@@ -1,7 +1,13 @@
 //! Desktop network inbound staging and NetworkHandle send/drain.
 //! Production handles are `None` (embedded) or `Client` (join). Listen-host
 //! TCP is owned by `ServerRuntime`, not a second GPU-thread server.
+//!
+//! Join and embedded both deliver wire `Packet` into staging / handlers.
+//! `ClientToGame` is only a thin local wrapper (`StatusUpdate` | `Packet`);
+//! there is no second field-mirrored presentation enum.
 
+use crate::network::client::ClientToGame;
+use crate::network::protocol::{Packet, PlayerId};
 use crate::presentation::interpolation::sequence_is_newer;
 use glam::Vec3;
 use std::time::{Duration, Instant};
@@ -9,7 +15,7 @@ use std::time::{Duration, Instant};
 pub enum NetworkHandle {
     None,
     Client {
-        client_to_game: std::sync::mpsc::Receiver<crate::network::client::ClientToGame>,
+        client_to_game: std::sync::mpsc::Receiver<ClientToGame>,
         game_to_client: std::sync::mpsc::Sender<crate::network::client::GameToClient>,
         thread: Option<std::thread::JoinHandle<()>>,
     },
@@ -30,161 +36,8 @@ impl<T> TrackedNetworkSender<T, std::sync::mpsc::SendError<T>> for std::sync::mp
     }
 }
 
-pub(crate) enum NetworkInbound {
-    Connected {
-        player_id: crate::network::protocol::PlayerId,
-        seed: u64,
-        gamemode: u8,
-    },
-    Disconnected(String),
-    PlayerJoin {
-        id: crate::network::protocol::PlayerId,
-        username: String,
-    },
-    PlayerLeave(crate::network::protocol::PlayerId),
-    PlayerPosition {
-        id: crate::network::protocol::PlayerId,
-        sequence: u32,
-        sender_time_millis: u64,
-        x: f32,
-        y: f32,
-        z: f32,
-        yaw: f32,
-        pitch: f32,
-    },
-    PlayerAction {
-        id: crate::network::protocol::PlayerId,
-        action: crate::network::protocol::Action,
-    },
-    AuthoritativeBlockChange {
-        dimension: u8,
-        revision: u64,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-        state: u8,
-        raw_fluid: u8,
-    },
-    BlockEntityDelta {
-        dimension: u8,
-        revision: u64,
-        x: i32,
-        y: i32,
-        z: i32,
-        entity: Option<crate::block_entity::BlockEntity>,
-    },
-    ChunkData {
-        dimension: u8,
-        cx: i32,
-        cz: i32,
-        revision: u64,
-        min_section_y: i8,
-        section_count: u16,
-        blocks: Vec<u8>,
-        block_states: Vec<u8>,
-        fluid_levels: Vec<u8>,
-        block_entities: Vec<u8>,
-    },
-    EntitySpawn {
-        dimension: u8,
-        sequence: u64,
-        state: crate::network::protocol::EntityStateWire,
-    },
-    EntityState {
-        dimension: u8,
-        sequence: u64,
-        state: crate::network::protocol::EntityStateWire,
-    },
-    EntityDespawn {
-        dimension: u8,
-        sequence: u64,
-        entity_id: u64,
-    },
-    PlayerHealth {
-        sequence: u64,
-        player_id: crate::network::protocol::PlayerId,
-        health: f32,
-        max_health: f32,
-        hunger: f32,
-        saturation: f32,
-        oxygen: f32,
-        is_dead: bool,
-        death_reason: u8,
-    },
-    PlayerEffect {
-        sequence: u64,
-        player_id: crate::network::protocol::PlayerId,
-        effects: Vec<crate::network::protocol::PlayerEffectWire>,
-    },
-    PlayerSessionUpdate {
-        sequence: u64,
-        player_id: crate::network::protocol::PlayerId,
-        dimension: u8,
-        state: crate::network::protocol::SessionGameplayWire,
-    },
-    TimeSync {
-        ticks: u64,
-        weather: u8,
-        weather_remaining_ticks: f32,
-    },
-    WorldRulesSync {
-        rules: crate::game_rules::WorldRules,
-    },
-    LightningStrike(crate::network::protocol::LightningStrike),
-    Chat {
-        sender: String,
-        message: String,
-    },
-    StatusUpdate(String),
-    GameplayResponse {
-        response: crate::network::protocol::GameplayResponse,
-    },
-    ContainerClose {
-        id: crate::network::protocol::PlayerId,
-        dimension: u8,
-        x: i32,
-        y: i32,
-        z: i32,
-    },
-    ContainerOpenResult {
-        dimension: u8,
-        success: bool,
-        x: i32,
-        y: i32,
-        z: i32,
-        slots: Vec<Option<crate::network::protocol::ItemWire>>,
-        revision: u64,
-    },
-    ContainerClickResult {
-        dimension: u8,
-        success: bool,
-        slot_index: u16,
-        slot: Option<crate::network::protocol::ItemWire>,
-        dragged: Option<crate::network::protocol::ItemWire>,
-    },
-    ContainerSlotUpdate {
-        dimension: u8,
-        revision: u64,
-        x: i32,
-        y: i32,
-        z: i32,
-        slot_index: u16,
-        slot: Option<crate::network::protocol::ItemWire>,
-    },
-    PlayerRespawnResult {
-        position: [f32; 3],
-        dimension: u8,
-    },
-    SleepStateSync {
-        player_id: crate::network::protocol::PlayerId,
-        is_sleeping: bool,
-    },
-    DimensionTransfer {
-        dimension: u8,
-        position: [f32; 3],
-    },
-}
+/// Presentation inbound = join-client `ClientToGame` (StatusUpdate | Packet).
+pub(crate) type NetworkInbound = ClientToGame;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NetworkDeliveryClass {
@@ -198,58 +51,28 @@ pub(crate) enum NetworkDeliveryClass {
 
 pub(crate) fn classify_network_event(event: &NetworkInbound) -> NetworkDeliveryClass {
     match event {
-        NetworkInbound::PlayerPosition { .. } => NetworkDeliveryClass::LatestPosition,
-        NetworkInbound::EntityState { .. } => NetworkDeliveryClass::LatestEntity,
-        NetworkInbound::PlayerHealth { .. } => NetworkDeliveryClass::LatestHealth,
-        NetworkInbound::PlayerEffect { .. } => NetworkDeliveryClass::LatestEffect,
-        NetworkInbound::TimeSync { .. } => NetworkDeliveryClass::LatestTimeSync,
+        NetworkInbound::Packet(Packet::PlayerPosition { .. }) => {
+            NetworkDeliveryClass::LatestPosition
+        }
+        NetworkInbound::Packet(Packet::EntityState { .. }) => NetworkDeliveryClass::LatestEntity,
+        NetworkInbound::Packet(Packet::PlayerHealth { .. }) => NetworkDeliveryClass::LatestHealth,
+        NetworkInbound::Packet(Packet::PlayerEffect { .. }) => NetworkDeliveryClass::LatestEffect,
+        NetworkInbound::Packet(Packet::TimeSync { .. }) => NetworkDeliveryClass::LatestTimeSync,
         _ => NetworkDeliveryClass::Reliable,
     }
 }
 
-impl NetworkInbound {
-    pub(crate) fn estimated_bytes(&self) -> usize {
-        let inline = std::mem::size_of_val(self);
-        let heap = match self {
-            Self::Disconnected(reason) | Self::StatusUpdate(reason) => reason.len(),
-            Self::GameplayResponse { response } => std::mem::size_of_val(response),
-            Self::PlayerJoin { username, .. } => username.len(),
-            Self::ChunkData {
-                blocks,
-                block_states,
-                ..
-            } => blocks.len().saturating_add(block_states.len()),
-            Self::PlayerEffect { effects, .. } => {
-                effects.len() * std::mem::size_of::<crate::network::protocol::PlayerEffectWire>()
-            }
-            Self::Chat { sender, message } => sender.len().saturating_add(message.len()),
-            Self::ContainerClose { .. } => 0,
-            Self::ContainerOpenResult { slots, .. } => {
-                slots.len() * std::mem::size_of::<Option<crate::network::protocol::ItemWire>>()
-            }
-            Self::ContainerClickResult { slot, dragged, .. } => {
-                slot.as_ref().map_or(0, |w| std::mem::size_of_val(w))
-                    + dragged.as_ref().map_or(0, |w| std::mem::size_of_val(w))
-            }
-            Self::ContainerSlotUpdate { slot, .. } => {
-                slot.as_ref().map_or(0, |w| std::mem::size_of_val(w))
-            }
-            _ => 0,
-        };
-        inline.saturating_add(heap)
-    }
+pub(crate) fn estimated_inbound_bytes(event: &NetworkInbound) -> usize {
+    event.estimated_bytes()
 }
 
 #[derive(Default)]
 pub(crate) struct NetworkStaging {
     pub(crate) reliable: std::collections::VecDeque<NetworkInbound>,
-    pub(crate) latest_positions:
-        std::collections::HashMap<crate::network::protocol::PlayerId, NetworkInbound>,
+    pub(crate) latest_positions: std::collections::HashMap<PlayerId, NetworkInbound>,
     pub(crate) latest_entities: std::collections::HashMap<(u8, u64), NetworkInbound>,
-    pub(crate) latest_health:
-        std::collections::HashMap<crate::network::protocol::PlayerId, NetworkInbound>,
-    pub(crate) latest_effects:
-        std::collections::HashMap<crate::network::protocol::PlayerId, NetworkInbound>,
+    pub(crate) latest_health: std::collections::HashMap<PlayerId, NetworkInbound>,
+    pub(crate) latest_effects: std::collections::HashMap<PlayerId, NetworkInbound>,
     pub(crate) latest_time_sync: Option<NetworkInbound>,
 }
 
@@ -258,16 +81,17 @@ impl NetworkStaging {
         match classify_network_event(&event) {
             NetworkDeliveryClass::Reliable => self.reliable.push_back(event),
             NetworkDeliveryClass::LatestPosition => {
-                let NetworkInbound::PlayerPosition { id, sequence, .. } = &event else {
-                    unreachable!("position delivery class must contain a position event");
+                let NetworkInbound::Packet(Packet::PlayerPosition { id, sequence, .. }) = &event
+                else {
+                    unreachable!("position delivery class must contain a position packet");
                 };
                 let replace = self.latest_positions.get(id).map_or(true, |previous| {
                     matches!(
                         previous,
-                        NetworkInbound::PlayerPosition {
+                        NetworkInbound::Packet(Packet::PlayerPosition {
                             sequence: old_sequence,
                             ..
-                        } if sequence_is_newer(*sequence, *old_sequence)
+                        }) if sequence_is_newer(*sequence, *old_sequence)
                     )
                 });
                 if replace {
@@ -275,22 +99,23 @@ impl NetworkStaging {
                 }
             }
             NetworkDeliveryClass::LatestEntity => {
-                let NetworkInbound::EntityState {
+                let NetworkInbound::Packet(Packet::EntityState {
                     dimension,
                     sequence,
                     state,
-                } = &event
+                    ..
+                }) = &event
                 else {
-                    unreachable!("entity delivery class must contain an entity-state event");
+                    unreachable!("entity delivery class must contain an entity-state packet");
                 };
                 let key = (*dimension, state.entity_id);
                 let replace = self.latest_entities.get(&key).map_or(true, |previous| {
                     matches!(
                         previous,
-                        NetworkInbound::EntityState {
+                        NetworkInbound::Packet(Packet::EntityState {
                             sequence: old_sequence,
                             ..
-                        } if sequence > old_sequence
+                        }) if sequence > old_sequence
                     )
                 });
                 if replace {
@@ -298,21 +123,21 @@ impl NetworkStaging {
                 }
             }
             NetworkDeliveryClass::LatestHealth => {
-                let NetworkInbound::PlayerHealth {
+                let NetworkInbound::Packet(Packet::PlayerHealth {
                     player_id,
                     sequence,
                     ..
-                } = &event
+                }) = &event
                 else {
-                    unreachable!("health delivery class must contain a health event");
+                    unreachable!("health delivery class must contain a health packet");
                 };
                 let replace = self.latest_health.get(player_id).map_or(true, |previous| {
                     matches!(
                         previous,
-                        NetworkInbound::PlayerHealth {
+                        NetworkInbound::Packet(Packet::PlayerHealth {
                             sequence: old_sequence,
                             ..
-                        } if sequence > old_sequence
+                        }) if sequence > old_sequence
                     )
                 });
                 if replace {
@@ -320,21 +145,21 @@ impl NetworkStaging {
                 }
             }
             NetworkDeliveryClass::LatestEffect => {
-                let NetworkInbound::PlayerEffect {
+                let NetworkInbound::Packet(Packet::PlayerEffect {
                     player_id,
                     sequence,
                     ..
-                } = &event
+                }) = &event
                 else {
-                    unreachable!("effect delivery class must contain an effect event");
+                    unreachable!("effect delivery class must contain an effect packet");
                 };
                 let replace = self.latest_effects.get(player_id).map_or(true, |previous| {
                     matches!(
                         previous,
-                        NetworkInbound::PlayerEffect {
+                        NetworkInbound::Packet(Packet::PlayerEffect {
                             sequence: old_sequence,
                             ..
-                        } if sequence > old_sequence
+                        }) if sequence > old_sequence
                     )
                 });
                 if replace {
@@ -342,16 +167,16 @@ impl NetworkStaging {
                 }
             }
             NetworkDeliveryClass::LatestTimeSync => {
-                let NetworkInbound::TimeSync { ticks, .. } = &event else {
-                    unreachable!("time-sync delivery class must contain a time-sync event");
+                let NetworkInbound::Packet(Packet::TimeSync { ticks, .. }) = &event else {
+                    unreachable!("time-sync delivery class must contain a time-sync packet");
                 };
                 let replace = self.latest_time_sync.as_ref().map_or(true, |previous| {
                     matches!(
                         previous,
-                        NetworkInbound::TimeSync {
+                        NetworkInbound::Packet(Packet::TimeSync {
                             ticks: old_ticks,
                             ..
-                        } if ticks > old_ticks
+                        }) if ticks > old_ticks
                     )
                 });
                 if replace {
@@ -369,7 +194,7 @@ impl NetworkStaging {
         K: Copy + Ord + std::hash::Hash + Eq,
     {
         let key = map.keys().min().copied()?;
-        let event_bytes = map.get(&key)?.estimated_bytes();
+        let event_bytes = estimated_inbound_bytes(map.get(&key)?);
         if event_bytes > remaining_bytes {
             return None;
         }
@@ -383,7 +208,7 @@ impl NetworkStaging {
         remaining_bytes: usize,
     ) -> Option<(NetworkInbound, usize)> {
         if let Some(event) = self.reliable.front() {
-            let event_bytes = event.estimated_bytes();
+            let event_bytes = estimated_inbound_bytes(event);
             if event_bytes > remaining_bytes {
                 return None;
             }
@@ -402,7 +227,7 @@ impl NetworkStaging {
         if !self.latest_effects.is_empty() {
             return Self::take_smallest_if_fits(&mut self.latest_effects, remaining_bytes);
         }
-        let event_bytes = self.latest_time_sync.as_ref()?.estimated_bytes();
+        let event_bytes = estimated_inbound_bytes(self.latest_time_sync.as_ref()?);
         if event_bytes > remaining_bytes {
             return None;
         }
@@ -430,7 +255,7 @@ impl NetworkStaging {
     pub(crate) fn reliable_bytes(&self) -> u64 {
         self.reliable
             .iter()
-            .map(|event| event.estimated_bytes() as u64)
+            .map(|event| estimated_inbound_bytes(event) as u64)
             .sum()
     }
 
@@ -441,12 +266,13 @@ impl NetworkStaging {
             .chain(self.latest_health.values())
             .chain(self.latest_effects.values())
             .chain(self.latest_time_sync.iter())
-            .map(|event| event.estimated_bytes() as u64)
+            .map(|event| estimated_inbound_bytes(event) as u64)
             .sum()
     }
 }
 
 impl NetworkHandle {
+    /// Drain join-client inbound without a second field-mirrored map.
     pub(crate) fn drain_inbound(&self) -> Vec<NetworkInbound> {
         const MAX_EVENTS: usize = 256;
         let started = Instant::now();
@@ -457,287 +283,14 @@ impl NetworkHandle {
                 while raw.len() < MAX_EVENTS && started.elapsed() < Duration::from_millis(2) {
                     match crate::perf::tracked_try_recv(
                         client_to_game,
-                        std::mem::size_of::<crate::network::client::ClientToGame>() as u64,
+                        std::mem::size_of::<ClientToGame>() as u64,
                         &crate::perf::queue_stats(crate::perf::QueueCategory::Inbound),
                     ) {
                         Ok(event) => raw.push(event),
                         Err(_) => break,
                     }
                 }
-                raw.into_iter()
-                    .map(|event| match event {
-                        crate::network::client::ClientToGame::Connected {
-                            player_id,
-                            seed,
-                            gamemode,
-                        } => NetworkInbound::Connected {
-                            player_id,
-                            seed,
-                            gamemode,
-                        },
-                        crate::network::client::ClientToGame::Disconnected { reason } => {
-                            NetworkInbound::Disconnected(reason)
-                        }
-                        crate::network::client::ClientToGame::PlayerJoin { id, username } => {
-                            NetworkInbound::PlayerJoin { id, username }
-                        }
-                        crate::network::client::ClientToGame::PlayerLeave { id } => {
-                            NetworkInbound::PlayerLeave(id)
-                        }
-                        crate::network::client::ClientToGame::PlayerPosition {
-                            id,
-                            sequence,
-                            sender_time_millis,
-                            x,
-                            y,
-                            z,
-                            yaw,
-                            pitch,
-                        } => NetworkInbound::PlayerPosition {
-                            id,
-                            sequence,
-                            sender_time_millis,
-                            x,
-                            y,
-                            z,
-                            yaw,
-                            pitch,
-                        },
-                        crate::network::client::ClientToGame::PlayerAction { id, action } => {
-                            NetworkInbound::PlayerAction { id, action }
-                        }
-                        crate::network::client::ClientToGame::BlockChange {
-                            dimension,
-                            revision,
-                            x,
-                            y,
-                            z,
-                            block,
-                            state,
-                            raw_fluid,
-                        } => NetworkInbound::AuthoritativeBlockChange {
-                            dimension,
-                            revision,
-                            x,
-                            y,
-                            z,
-                            block,
-                            state,
-                            raw_fluid,
-                        },
-                        crate::network::client::ClientToGame::BlockEntityDelta {
-                            dimension,
-                            revision,
-                            x,
-                            y,
-                            z,
-                            entity,
-                        } => NetworkInbound::BlockEntityDelta {
-                            dimension,
-                            revision,
-                            x,
-                            y,
-                            z,
-                            entity,
-                        },
-                        crate::network::client::ClientToGame::ChunkData {
-                            dimension,
-                            cx,
-                            cz,
-                            revision,
-                            min_section_y,
-                            section_count,
-                            blocks,
-                            block_states,
-                            fluid_levels,
-                            block_entities,
-                        } => NetworkInbound::ChunkData {
-                            dimension,
-                            cx,
-                            cz,
-                            revision,
-                            min_section_y,
-                            section_count,
-                            blocks,
-                            block_states,
-                            fluid_levels,
-                            block_entities,
-                        },
-                        crate::network::client::ClientToGame::EntitySpawn {
-                            dimension,
-                            sequence,
-                            state,
-                        } => NetworkInbound::EntitySpawn {
-                            dimension,
-                            sequence,
-                            state,
-                        },
-                        crate::network::client::ClientToGame::EntityState {
-                            dimension,
-                            sequence,
-                            state,
-                        } => NetworkInbound::EntityState {
-                            dimension,
-                            sequence,
-                            state,
-                        },
-                        crate::network::client::ClientToGame::EntityDespawn {
-                            dimension,
-                            sequence,
-                            entity_id,
-                        } => NetworkInbound::EntityDespawn {
-                            dimension,
-                            sequence,
-                            entity_id,
-                        },
-                        crate::network::client::ClientToGame::PlayerHealth {
-                            sequence,
-                            player_id,
-                            health,
-                            max_health,
-                            hunger,
-                            saturation,
-                            oxygen,
-                            is_dead,
-                            death_reason,
-                        } => NetworkInbound::PlayerHealth {
-                            sequence,
-                            player_id,
-                            health,
-                            max_health,
-                            hunger,
-                            saturation,
-                            oxygen,
-                            is_dead,
-                            death_reason,
-                        },
-                        crate::network::client::ClientToGame::PlayerEffect {
-                            sequence,
-                            player_id,
-                            effects,
-                        } => NetworkInbound::PlayerEffect {
-                            sequence,
-                            player_id,
-                            effects,
-                        },
-                        crate::network::client::ClientToGame::PlayerSessionUpdate {
-                            sequence,
-                            player_id,
-                            dimension,
-                            state,
-                        } => NetworkInbound::PlayerSessionUpdate {
-                            sequence,
-                            player_id,
-                            dimension,
-                            state,
-                        },
-                        crate::network::client::ClientToGame::TimeSync {
-                            ticks,
-                            weather,
-                            weather_remaining_ticks,
-                        } => NetworkInbound::TimeSync {
-                            ticks,
-                            weather,
-                            weather_remaining_ticks,
-                        },
-                        crate::network::client::ClientToGame::WorldRulesSync { rules } => {
-                            NetworkInbound::WorldRulesSync { rules }
-                        }
-                        crate::network::client::ClientToGame::GameplayResponse { response } => {
-                            NetworkInbound::GameplayResponse { response }
-                        }
-                        crate::network::client::ClientToGame::LightningStrike(strike) => {
-                            NetworkInbound::LightningStrike(strike)
-                        }
-                        crate::network::client::ClientToGame::Chat { sender, message } => {
-                            NetworkInbound::Chat { sender, message }
-                        }
-                        crate::network::client::ClientToGame::StatusUpdate { message } => {
-                            NetworkInbound::StatusUpdate(message)
-                        }
-                        crate::network::client::ClientToGame::ContainerOpenResult {
-                            dimension,
-                            success,
-                            x,
-                            y,
-                            z,
-                            slots,
-                            revision,
-                        } => NetworkInbound::ContainerOpenResult {
-                            dimension,
-                            success,
-                            x,
-                            y,
-                            z,
-                            slots,
-                            revision,
-                        },
-                        crate::network::client::ClientToGame::ContainerClose {
-                            id,
-                            dimension,
-                            x,
-                            y,
-                            z,
-                        } => NetworkInbound::ContainerClose {
-                            id,
-                            dimension,
-                            x,
-                            y,
-                            z,
-                        },
-                        crate::network::client::ClientToGame::ContainerClickResult {
-                            dimension,
-                            success,
-                            slot_index,
-                            slot,
-                            dragged,
-                        } => NetworkInbound::ContainerClickResult {
-                            dimension,
-                            success,
-                            slot_index,
-                            slot,
-                            dragged,
-                        },
-                        crate::network::client::ClientToGame::ContainerSlotUpdate {
-                            dimension,
-                            revision,
-                            x,
-                            y,
-                            z,
-                            slot_index,
-                            slot,
-                        } => NetworkInbound::ContainerSlotUpdate {
-                            dimension,
-                            revision,
-                            x,
-                            y,
-                            z,
-                            slot_index,
-                            slot,
-                        },
-                        crate::network::client::ClientToGame::PlayerRespawnResult {
-                            position,
-                            dimension,
-                        } => NetworkInbound::PlayerRespawnResult {
-                            position,
-                            dimension,
-                        },
-                        crate::network::client::ClientToGame::SleepStateSync {
-                            player_id,
-                            is_sleeping,
-                        } => NetworkInbound::SleepStateSync {
-                            player_id,
-                            is_sleeping,
-                        },
-                        crate::network::client::ClientToGame::DimensionTransfer {
-                            dimension,
-                            position,
-                        } => NetworkInbound::DimensionTransfer {
-                            dimension,
-                            position,
-                        },
-                    })
-                    .collect()
+                raw
             }
         }
     }

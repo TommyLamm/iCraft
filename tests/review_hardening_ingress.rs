@@ -160,7 +160,7 @@ fn pose_and_oversized_chat_flood_does_not_block_peer_gameplay() {
     assert!(
         peer.events().iter().all(|event| !matches!(
             event,
-            ClientToGame::Chat { message, .. } if message.chars().count() > 256
+            ClientToGame::Packet(Packet::ChatMessage { message, .. }) if message.chars().count() > 256
         )),
         "oversized chat must not be broadcast after being rejected at ingress"
     );
@@ -215,7 +215,7 @@ fn oversized_chat_from_join_client_is_not_relayed() {
             |_runtime, views| {
                 views.iter().any(|client| {
                     client.events().iter().any(|event| {
-                        matches!(event, ClientToGame::Chat { message, .. } if message == "ok")
+                        matches!(event, ClientToGame::Packet(Packet::ChatMessage { message, .. }) if message == "ok")
                     })
                 })
             },
@@ -228,7 +228,7 @@ fn oversized_chat_from_join_client_is_not_relayed() {
             .chain(peer.events().iter())
             .all(|event| !matches!(
                 event,
-                ClientToGame::Chat { message, .. } if message.chars().count() > 256
+                ClientToGame::Packet(Packet::ChatMessage { message, .. }) if message.chars().count() > 256
             )),
         "oversized chat must not enter the host queue or be relayed"
     );

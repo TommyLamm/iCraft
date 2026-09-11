@@ -11,10 +11,8 @@ use icraft::dimension::Dimension;
 use icraft::entity::EntityType;
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::client::{ClientToGame, GameToClient};
-use icraft::network::protocol::{
-    BlockActionKind, ContainerAction, GameplayOperation, GameplayOutcome, GameplayRequest,
-    GameplayResponse, ItemWire, RejectReason, SessionSlotWire,
-};
+use icraft::network::protocol::{BlockActionKind, ContainerAction, GameplayOperation, GameplayOutcome, GameplayRequest,
+    GameplayResponse, ItemWire, RejectReason, SessionSlotWire, Packet};
 use icraft::redstone::Direction;
 use icraft::server_runtime::{ServerProperties, ServerRuntime};
 use icraft::world::BlockType;
@@ -171,13 +169,13 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     assert!(alice.events().iter().any(|event| {
         matches!(
             event,
-            ClientToGame::PlayerSessionUpdate { player_id, .. } if *player_id == alice_id
+            ClientToGame::Packet(Packet::PlayerSessionUpdate { player_id, .. }) if *player_id == alice_id
         )
     }));
     assert!(!bob.events().iter().any(|event| {
         matches!(
             event,
-            ClientToGame::PlayerSessionUpdate { player_id, .. } if *player_id == alice_id
+            ClientToGame::Packet(Packet::PlayerSessionUpdate { player_id, .. }) if *player_id == alice_id
         )
     }));
 
@@ -413,7 +411,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
             alice.events().iter().any(|event| {
                 matches!(
                     event,
-                    ClientToGame::ContainerOpenResult { x, y, z, .. }
+                    ClientToGame::Packet(Packet::ContainerOpenResult { x, y, z, .. })
                         if (*x, *y, *z) == CHEST_POSITION
                 )
             })
@@ -509,7 +507,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
             alice.events().iter().any(|event| {
                 matches!(
                     event,
-                    ClientToGame::ContainerClickResult { slot_index: 0, .. }
+                    ClientToGame::Packet(Packet::ContainerClickResult { slot_index: 0, .. }
                 )
             })
         },
@@ -614,7 +612,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
 fn projected_dropped_item(client: &TcpClient) -> Option<(u64, ItemWire)> {
     client.events().iter().find_map(|event| {
         let state = match event {
-            ClientToGame::EntitySpawn { state, .. } | ClientToGame::EntityState { state, .. }
+            ClientToGame::Packet(Packet::EntitySpawn { state, .. }) | ClientToGame::Packet(Packet::EntityState { state, .. })
                 if state.entity_type == EntityType::DroppedItem.to_wire() =>
             {
                 state
@@ -630,14 +628,14 @@ fn projected_block_entity(
     position: (i32, i32, i32),
 ) -> Option<(u64, BlockEntity)> {
     client.events().iter().find_map(|event| match event {
-        ClientToGame::BlockEntityDelta {
+        ClientToGame::Packet(Packet::BlockEntityDelta {
             x,
             y,
             z,
             revision,
             entity: Some(entity),
             ..
-        } if (*x, *y, *z) == position => Some((*revision, entity.clone())),
+        }) if (*x, *y, *z) == position => Some((*revision, entity.clone())),
         _ => None,
     })
 }

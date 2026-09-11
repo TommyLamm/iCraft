@@ -293,7 +293,7 @@ fn run_tcp_travel(label: &str, listen: bool) {
                     && views[0].events().iter().any(|event| {
                         matches!(
                             event,
-                            ClientToGame::DimensionTransfer { dimension, .. }
+                            ClientToGame::Packet(Packet::DimensionTransfer { dimension, .. })
                                 if *dimension == Dimension::Nether as u8
                         )
                     })
@@ -315,10 +315,10 @@ fn run_tcp_travel(label: &str, listen: bool) {
     assert!(!clients[1]
         .events()
         .iter()
-        .any(|event| matches!(event, ClientToGame::DimensionTransfer { .. })));
+        .any(|event| matches!(event, ClientToGame::Packet(Packet::DimensionTransfer { .. })));
     assert!(!clients[1].events().iter().any(|event| matches!(
         event,
-        ClientToGame::PlayerSessionUpdate { player_id, .. } if *player_id == owner
+        ClientToGame::Packet(Packet::PlayerSessionUpdate { player_id, .. }) if *player_id == owner
     )));
     let mut stale = request(
         &runtime,

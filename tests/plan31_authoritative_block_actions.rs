@@ -392,14 +392,14 @@ fn run_tcp_vector(label: &str, listen: bool) {
     assert!(clients[0].events().iter().any(|event| {
         matches!(
             event,
-            ClientToGame::PlayerSessionUpdate { player_id, state, .. }
+            ClientToGame::Packet(Packet::PlayerSessionUpdate { player_id, state, .. })
                 if *player_id == owner_id && state.mining.is_some()
         )
     }));
     assert!(!clients[1].events().iter().any(|event| {
         matches!(
             event,
-            ClientToGame::PlayerSessionUpdate { player_id, .. }
+            ClientToGame::Packet(Packet::PlayerSessionUpdate { player_id, .. })
                 if *player_id == owner_id
         )
     }));
@@ -479,7 +479,7 @@ fn run_tcp_vector(label: &str, listen: bool) {
                         client.events().iter().any(|event| {
                             matches!(
                                 event,
-                                ClientToGame::BlockChange { x, y, z, block, .. }
+                                ClientToGame::Packet(Packet::BlockChange { x, y, z, block, .. })
                                     if (*x, *y, *z) == TARGET
                                         && *block == BlockType::Air.to_wire()
                             )
@@ -489,8 +489,8 @@ fn run_tcp_vector(label: &str, listen: bool) {
                         client.events().iter().any(|event| {
                             matches!(
                                 event,
-                                ClientToGame::EntitySpawn { state, .. }
-                                    | ClientToGame::EntityState { state, .. }
+                                ClientToGame::Packet(Packet::EntitySpawn { state, .. })
+                                    | ClientToGame::Packet(Packet::EntityState { state, .. })
                                     if state.item.is_some()
                             )
                         })
@@ -498,7 +498,7 @@ fn run_tcp_vector(label: &str, listen: bool) {
                     && views[0].events().iter().any(|event| {
                         matches!(
                             event,
-                            ClientToGame::PlayerSessionUpdate { player_id, state, .. }
+                            ClientToGame::Packet(Packet::PlayerSessionUpdate { player_id, state, .. })
                                 if *player_id == owner_id && state.experience >= 2
                         )
                     })
@@ -510,7 +510,7 @@ fn run_tcp_vector(label: &str, listen: bool) {
         assert!(client.events().iter().any(|event| {
             matches!(
                 event,
-                ClientToGame::BlockChange { x, y, z, block, .. }
+                ClientToGame::Packet(Packet::BlockChange { x, y, z, block, .. })
                     if (*x, *y, *z) == TARGET && *block == BlockType::Air.to_wire()
             )
         }));
@@ -519,7 +519,7 @@ fn run_tcp_vector(label: &str, listen: bool) {
         client.events().iter().any(|event| {
             matches!(
                 event,
-                ClientToGame::EntitySpawn { state, .. } | ClientToGame::EntityState { state, .. }
+                ClientToGame::Packet(Packet::EntitySpawn { state, .. }) | ClientToGame::Packet(Packet::EntityState { state, .. })
                     if state.item.is_some()
             )
         })
@@ -576,7 +576,7 @@ fn run_tcp_vector(label: &str, listen: bool) {
                         client.events().iter().any(|event| {
                             matches!(
                                 event,
-                                ClientToGame::BlockChange { x, y, z, block, .. }
+                                ClientToGame::Packet(Packet::BlockChange { x, y, z, block, .. })
                                     if (*x, *y, *z) == PLACE_TARGET
                                         && *block == BlockType::Chest.to_wire()
                             )
@@ -586,7 +586,7 @@ fn run_tcp_vector(label: &str, listen: bool) {
                         client.events().iter().any(|event| {
                             matches!(
                                 event,
-                                ClientToGame::BlockEntityDelta { x, y, z, entity, .. }
+                                ClientToGame::Packet(Packet::BlockEntityDelta { x, y, z, entity, .. })
                                     if (*x, *y, *z) == PLACE_TARGET && entity.is_some()
                             )
                         })
@@ -635,7 +635,7 @@ fn run_tcp_vector(label: &str, listen: bool) {
                         client.events().iter().any(|event| {
                             matches!(
                                 event,
-                                ClientToGame::BlockChange { x, y, z, block, .. }
+                                ClientToGame::Packet(Packet::BlockChange { x, y, z, block, .. })
                                     if (*x, *y, *z) == PLACE_TARGET
                                         && *block == BlockType::Air.to_wire()
                             )
@@ -645,7 +645,7 @@ fn run_tcp_vector(label: &str, listen: bool) {
                         client.events().iter().any(|event| {
                             matches!(
                                 event,
-                                ClientToGame::BlockEntityDelta { x, y, z, entity, .. }
+                                ClientToGame::Packet(Packet::BlockEntityDelta { x, y, z, entity, .. })
                                     if (*x, *y, *z) == PLACE_TARGET && entity.is_none()
                             )
                         })
@@ -700,7 +700,7 @@ fn run_tcp_vector(label: &str, listen: bool) {
                 views[0].events().iter().any(|event| {
                     matches!(
                         event,
-                        ClientToGame::PlayerSessionUpdate { player_id, state, .. }
+                        ClientToGame::Packet(Packet::PlayerSessionUpdate { player_id, state, .. })
                             if *player_id == owner_id && state.mining.is_some()
                     )
                 })

@@ -309,7 +309,7 @@ mod remote_sync_tests {
     fn network_burst_budget_leaves_persistent_backlog() {
         let mut staging = NetworkStaging::default();
         for _ in 0..(NETWORK_MAX_EVENTS_PER_PASS + 17) {
-            staging.stage(NetworkInbound::StatusUpdate("burst".into()));
+            staging.stage(NetworkInbound::StatusUpdate { message: "burst".into() });
         }
         for _ in 0..NETWORK_MAX_EVENTS_PER_PASS {
             assert!(staging.pop_next_if_fits(usize::MAX).is_some());
@@ -321,9 +321,9 @@ mod remote_sync_tests {
     fn reliable_events_remain_strict_fifo_until_eventual_delivery() {
         let mut staging = NetworkStaging::default();
         for event in [
-            NetworkInbound::StatusUpdate("one".into()),
-            NetworkInbound::StatusUpdate("two".into()),
-            NetworkInbound::StatusUpdate("three".into()),
+            NetworkInbound::StatusUpdate { message: "one".into() },
+            NetworkInbound::StatusUpdate { message: "two".into() },
+            NetworkInbound::StatusUpdate { message: "three".into() },
         ] {
             staging.stage(event);
         }
@@ -335,7 +335,7 @@ mod remote_sync_tests {
 
         let mut delivered = Vec::new();
         while let Some((event, _)) = staging.pop_next_if_fits(usize::MAX) {
-            if let NetworkInbound::StatusUpdate(message) = event {
+            if let NetworkInbound::StatusUpdate { message } = event {
                 delivered.push(message);
             }
         }
@@ -344,9 +344,11 @@ mod remote_sync_tests {
 
     #[test]
     fn latest_wins_state_is_sequence_aware_per_key() {
+        use crate::network::protocol::{Packet, PROTOCOL_VERSION};
         let mut staging = NetworkStaging::default();
         for (id, sequence, x) in [(7_u64, 2_u32, 2.0_f32), (7, 1, 1.0), (8, 4, 4.0)] {
-            staging.stage(NetworkInbound::PlayerPosition {
+            staging.stage(NetworkInbound::Packet(Packet::PlayerPosition {
+                protocol_version: PROTOCOL_VERSION,
                 id,
                 sequence,
                 sender_time_millis: sequence as u64,
@@ -355,10 +357,11 @@ mod remote_sync_tests {
                 z: 0.0,
                 yaw: 0.0,
                 pitch: 0.0,
-            });
+            }));
         }
         for sequence in [9, 8, 10] {
-            staging.stage(NetworkInbound::PlayerHealth {
+            staging.stage(NetworkInbound::Packet(Packet::PlayerHealth {
+                protocol_version: PROTOCOL_VERSION,
                 sequence,
                 player_id: 3,
                 health: sequence as f32,
@@ -368,22 +371,25 @@ mod remote_sync_tests {
                 oxygen: 20.0,
                 is_dead: false,
                 death_reason: 0,
-            });
-            staging.stage(NetworkInbound::PlayerEffect {
+            }));
+            staging.stage(NetworkInbound::Packet(Packet::PlayerEffect {
+                protocol_version: PROTOCOL_VERSION,
                 sequence,
                 player_id: 3,
                 effects: Vec::new(),
-            });
+            }));
         }
         for ticks in [40, 30, 50] {
-            staging.stage(NetworkInbound::TimeSync {
+            staging.stage(NetworkInbound::Packet(Packet::TimeSync {
+                protocol_version: PROTOCOL_VERSION,
                 ticks,
                 weather: 0,
                 weather_remaining_ticks: 0.0,
-            });
+            }));
         }
         for sequence in [4, 3, 5] {
-            staging.stage(NetworkInbound::EntityState {
+            staging.stage(NetworkInbound::Packet(Packet::EntityState {
+                protocol_version: PROTOCOL_VERSION,
                 dimension: 0,
                 sequence,
                 state: crate::network::protocol::EntityStateWire {
@@ -397,41 +403,41 @@ mod remote_sync_tests {
                     animation_state: 0,
                     item: None,
                 },
-            });
+            }));
         }
 
         assert_eq!(staging.latest_positions.len(), 2);
         assert!(matches!(
             staging.latest_positions.get(&7),
-            Some(NetworkInbound::PlayerPosition { sequence: 2, .. })
+            Some(NetworkInbound::Packet(Packet::PlayerPosition { sequence: 2, .. }))
         ));
         assert!(matches!(
             staging.latest_health.get(&3),
-            Some(NetworkInbound::PlayerHealth { sequence: 10, .. })
+            Some(NetworkInbound::Packet(Packet::PlayerHealth { sequence: 10, .. }))
         ));
         assert!(matches!(
             staging.latest_effects.get(&3),
-            Some(NetworkInbound::PlayerEffect { sequence: 10, .. })
+            Some(NetworkInbound::Packet(Packet::PlayerEffect { sequence: 10, .. }))
         ));
         assert!(matches!(
             staging.latest_entities.get(&(0, 99)),
-            Some(NetworkInbound::EntityState { sequence: 5, .. })
+            Some(NetworkInbound::Packet(Packet::EntityState { sequence: 5, .. }))
         ));
         assert!(matches!(
             staging.latest_time_sync,
-            Some(NetworkInbound::TimeSync { ticks: 50, .. })
+            Some(NetworkInbound::Packet(Packet::TimeSync { ticks: 50, .. }))
         ));
     }
 
     #[test]
     fn network_event_and_byte_caps_are_explicit_and_measurable() {
-        let event = NetworkInbound::StatusUpdate("bounded".into());
+        let event = NetworkInbound::StatusUpdate { message: "bounded".into() };
         assert!(event.estimated_bytes() > 0);
         assert!(NETWORK_MAX_EVENTS_PER_PASS <= 256);
         assert!(NETWORK_MAX_BYTES_PER_PASS >= event.estimated_bytes());
         assert!(NETWORK_MAX_TIME_PER_PASS > Duration::ZERO);
-        let small = NetworkInbound::StatusUpdate("x".into()).estimated_bytes();
-        let large = NetworkInbound::StatusUpdate("x".repeat(4096)).estimated_bytes();
+        let small = NetworkInbound::StatusUpdate { message: "x".into() }.estimated_bytes();
+        let large = NetworkInbound::StatusUpdate { message: "x".repeat(4096) }.estimated_bytes();
         assert!(large >= small + 4095);
     }
 
@@ -3690,7 +3696,7 @@ impl State {
             }
         };
         for event in output.presentation_events {
-            self.project_runtime_presentation_event(event, session_id);
+            self.deliver_projection_event(event, session_id);
         }
         self.project_authority_mutations(&output.snapshot.mutations);
         self.project_authority_sessions(&output.snapshot.session_updates);
@@ -3698,15 +3704,13 @@ impl State {
         Some(output.snapshot)
     }
 
-    /// Convert the runtime's target-aware presentation lane into the existing
-    /// renderer staging path.  The runtime remains the sole mutation owner;
-    /// these handlers only update presentation caches after a fixed tick.
-    fn project_runtime_presentation_event(
+    /// Deliver a session-targeted runtime projection as the same `Packet`
+    /// shape join clients stage — no second presentation enum map.
+    fn deliver_projection_event(
         &mut self,
         event: crate::server_runtime::ProjectionEvent,
         session_id: crate::network::protocol::PlayerId,
     ) {
-        use crate::network::protocol::Packet;
         use crate::server_runtime::ProjectionDest;
 
         let ProjectionDest::Session(target) = event.dest else {
@@ -3715,256 +3719,7 @@ impl State {
         if target != session_id {
             return;
         }
-
-        let inbound = match event.packet {
-            Packet::GameplayResponse { response, .. } => {
-                // Game mode lives on SessionContract rather than inside the
-                // legacy SessionGameplayWire.  Refresh it on every accepted
-                // embedded response so an accepted /gamemode command is
-                // immediately visible to the presentation.
-                if matches!(
-                    response.outcome,
-                    crate::network::protocol::GameplayOutcome::Accepted { .. }
-                ) {
-                    if let Some(mode) = self
-                        .embedded_runtime
-                        .as_ref()
-                        .and_then(EmbeddedRuntimeBridge::session_game_mode)
-                    {
-                        self.set_game_mode(mode);
-                    }
-                }
-                Some(NetworkInbound::GameplayResponse { response })
-            }
-            Packet::BlockChange {
-                dimension,
-                revision,
-                x,
-                y,
-                z,
-                block,
-                state,
-                raw_fluid,
-                ..
-            } => Some(NetworkInbound::AuthoritativeBlockChange {
-                dimension,
-                revision,
-                x,
-                y,
-                z,
-                block,
-                state,
-                raw_fluid,
-            }),
-            Packet::ChunkData {
-                dimension,
-                cx,
-                cz,
-                revision,
-                min_section_y,
-                section_count,
-                blocks,
-                block_states,
-                fluid_levels,
-                block_entities,
-                ..
-            } => Some(NetworkInbound::ChunkData {
-                dimension,
-                cx,
-                cz,
-                revision,
-                min_section_y,
-                section_count,
-                blocks,
-                block_states,
-                fluid_levels,
-                block_entities,
-            }),
-            Packet::BlockEntityDelta {
-                dimension,
-                revision,
-                x,
-                y,
-                z,
-                entity,
-                ..
-            } => Some(NetworkInbound::BlockEntityDelta {
-                dimension,
-                revision,
-                x,
-                y,
-                z,
-                entity,
-            }),
-            Packet::EntitySpawn {
-                dimension,
-                sequence,
-                state,
-                ..
-            } => Some(NetworkInbound::EntitySpawn {
-                dimension,
-                sequence,
-                state,
-            }),
-            Packet::EntityState {
-                dimension,
-                sequence,
-                state,
-                ..
-            } => Some(NetworkInbound::EntityState {
-                dimension,
-                sequence,
-                state,
-            }),
-            Packet::EntityDespawn {
-                dimension,
-                sequence,
-                entity_id,
-                ..
-            } => Some(NetworkInbound::EntityDespawn {
-                dimension,
-                sequence,
-                entity_id,
-            }),
-            Packet::PlayerSessionUpdate {
-                sequence,
-                player_id,
-                dimension,
-                state,
-                ..
-            } => Some(NetworkInbound::PlayerSessionUpdate {
-                sequence,
-                player_id,
-                dimension,
-                state,
-            }),
-            Packet::PlayerEffect {
-                sequence,
-                player_id,
-                effects,
-                ..
-            } => Some(NetworkInbound::PlayerEffect {
-                sequence,
-                player_id,
-                effects,
-            }),
-            Packet::PlayerPosition {
-                id,
-                sequence,
-                sender_time_millis,
-                x,
-                y,
-                z,
-                yaw,
-                pitch,
-                ..
-            } => Some(NetworkInbound::PlayerPosition {
-                id,
-                sequence,
-                sender_time_millis,
-                x,
-                y,
-                z,
-                yaw,
-                pitch,
-            }),
-            Packet::ContainerOpenResult {
-                dimension,
-                success,
-                x,
-                y,
-                z,
-                slots,
-                revision,
-                ..
-            } => Some(NetworkInbound::ContainerOpenResult {
-                dimension,
-                success,
-                x,
-                y,
-                z,
-                slots,
-                revision,
-            }),
-            Packet::ContainerClickResult {
-                dimension,
-                success,
-                slot_index,
-                slot,
-                dragged,
-                ..
-            } => Some(NetworkInbound::ContainerClickResult {
-                dimension,
-                success,
-                slot_index,
-                slot,
-                dragged,
-            }),
-            Packet::ContainerSlotUpdate {
-                dimension,
-                revision,
-                x,
-                y,
-                z,
-                slot_index,
-                slot,
-                ..
-            } => Some(NetworkInbound::ContainerSlotUpdate {
-                dimension,
-                revision,
-                x,
-                y,
-                z,
-                slot_index,
-                slot,
-            }),
-            Packet::ContainerClose {
-                dimension,
-                x,
-                y,
-                z,
-                ..
-            } => Some(NetworkInbound::ContainerClose {
-                id: target,
-                dimension,
-                x,
-                y,
-                z,
-            }),
-            Packet::PlayerRespawnResult {
-                position,
-                dimension,
-                ..
-            } => Some(NetworkInbound::PlayerRespawnResult {
-                position,
-                dimension,
-            }),
-            Packet::DimensionTransfer {
-                dimension,
-                position,
-                ..
-            } => Some(NetworkInbound::DimensionTransfer {
-                dimension,
-                position,
-            }),
-            Packet::WorldRulesSync { rules, .. } => {
-                Some(NetworkInbound::WorldRulesSync { rules })
-            }
-            Packet::TimeSync {
-                ticks,
-                weather,
-                weather_remaining_ticks,
-                ..
-            } => Some(NetworkInbound::TimeSync {
-                ticks,
-                weather,
-                weather_remaining_ticks,
-            }),
-            _ => None,
-        };
-        if let Some(inbound) = inbound {
-            self.handle_single_network_event(inbound);
-        }
+        self.handle_inbound_packet(event.packet);
     }
 
     fn session_slot_from_stack(
@@ -9285,6 +9040,7 @@ mod debug_tests {
 
     #[test]
     fn network_handle_preserves_client_chat_and_disconnect_payloads() {
+        use crate::network::protocol::{Packet, PROTOCOL_VERSION};
         let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
         let (outbound_tx, _outbound_rx) = std::sync::mpsc::channel();
         let handle = NetworkHandle::Client {
@@ -9293,26 +9049,25 @@ mod debug_tests {
             thread: None,
         };
         inbound_tx
-            .send(crate::network::client::ClientToGame::Chat {
+            .send(crate::network::client::ClientToGame::packet(Packet::ChatMessage {
+                protocol_version: PROTOCOL_VERSION,
                 sender: "Alex".to_string(),
                 message: "hello".to_string(),
-            })
+            }))
             .unwrap();
         inbound_tx
-            .send(crate::network::client::ClientToGame::Disconnected {
-                reason: "server stopped".to_string(),
-            })
+            .send(crate::network::client::ClientToGame::disconnect("server stopped"))
             .unwrap();
 
         let events = handle.drain_inbound();
         assert!(matches!(
             &events[0],
-            NetworkInbound::Chat { sender, message }
+            NetworkInbound::Packet(Packet::ChatMessage { sender, message, .. })
                 if sender == "Alex" && message == "hello"
         ));
         assert!(matches!(
             &events[1],
-            NetworkInbound::Disconnected(reason) if reason == "server stopped"
+            NetworkInbound::Packet(Packet::Disconnect { reason, .. }) if reason == "server stopped"
         ));
     }
 
@@ -9324,6 +9079,7 @@ mod debug_tests {
 
     #[test]
     fn client_block_change_is_classified_as_host_authority() {
+        use crate::network::protocol::{Packet, PROTOCOL_VERSION};
         let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
         let (outbound_tx, _outbound_rx) = std::sync::mpsc::channel();
         let handle = NetworkHandle::Client {
@@ -9332,7 +9088,8 @@ mod debug_tests {
             thread: None,
         };
         inbound_tx
-            .send(crate::network::client::ClientToGame::BlockChange {
+            .send(crate::network::client::ClientToGame::packet(Packet::BlockChange {
+                protocol_version: PROTOCOL_VERSION,
                 dimension: 0,
                 revision: 1,
                 x: 3,
@@ -9341,19 +9098,19 @@ mod debug_tests {
                 block: BlockType::Stone.to_wire(),
                 state: 0,
                 raw_fluid: 0,
-            })
+            }))
             .unwrap();
 
         assert!(matches!(
             handle.drain_inbound().as_slice(),
-            [NetworkInbound::AuthoritativeBlockChange {
+            [NetworkInbound::Packet(Packet::BlockChange {
                 x: 3,
                 y: 80,
                 z: -4,
                 block,
                 state: 0,
                 ..
-            }] if *block == BlockType::Stone.to_wire()
+            })] if *block == BlockType::Stone.to_wire()
         ));
     }
 

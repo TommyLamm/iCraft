@@ -850,7 +850,7 @@ fn run_topology(label: &str, listen: bool) {
                 && views[1]
                     .events()
                     .iter()
-                    .any(|event| matches!(event, ClientToGame::PlayerRespawnResult { .. }))
+                    .any(|event| matches!(event, ClientToGame::Packet(Packet::PlayerRespawnResult { .. })))
         },
     );
     assert_eq!(
@@ -915,7 +915,7 @@ fn run_topology(label: &str, listen: bool) {
     assert!(!clients[1].events().iter().any(|event| {
         matches!(
             event,
-            ClientToGame::PlayerSessionUpdate { player_id, .. } if *player_id == owner_id
+            ClientToGame::Packet(Packet::PlayerSessionUpdate { player_id, .. }) if *player_id == owner_id
         )
     }));
 

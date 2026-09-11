@@ -135,12 +135,14 @@ impl TcpClient {
     }
 
     pub fn drain(&mut self) {
+        use icraft::network::protocol::Packet;
         while let Ok(event) = self.inbound.try_recv() {
-            if let ClientToGame::Connected {
+            if let ClientToGame::Packet(Packet::LoginSuccess {
                 player_id,
                 seed,
                 gamemode,
-            } = &event
+                ..
+            }) = &event
             {
                 self.connected = Some((*player_id, *seed, *gamemode));
             }
@@ -169,20 +171,21 @@ impl TcpClient {
         &mut self,
         position: (i32, i32, i32),
     ) -> Option<(Vec<Option<ItemWire>>, u64)> {
+        use icraft::network::protocol::Packet;
         let index = self.events.iter().position(|event| {
             matches!(
                 event,
-                ClientToGame::ContainerOpenResult { x, y, z, .. }
+                ClientToGame::Packet(Packet::ContainerOpenResult { x, y, z, .. })
                     if (*x, *y, *z) == position
             )
         })?;
         match self.events.remove(index)? {
-            ClientToGame::ContainerOpenResult {
+            ClientToGame::Packet(Packet::ContainerOpenResult {
                 success,
                 slots,
                 revision,
                 ..
-            } => {
+            }) => {
                 assert!(success, "authority reported a failed container open");
                 Some((slots, revision))
             }
@@ -191,20 +194,21 @@ impl TcpClient {
     }
 
     pub fn take_click_result(&mut self, slot: u16) -> Option<(Option<ItemWire>, Option<ItemWire>)> {
+        use icraft::network::protocol::Packet;
         let index = self.events.iter().position(|event| {
             matches!(
                 event,
-                ClientToGame::ContainerClickResult { slot_index, .. }
+                ClientToGame::Packet(Packet::ContainerClickResult { slot_index, .. })
                     if *slot_index == slot
             )
         })?;
         match self.events.remove(index)? {
-            ClientToGame::ContainerClickResult {
+            ClientToGame::Packet(Packet::ContainerClickResult {
                 success,
                 slot,
                 dragged,
                 ..
-            } => {
+            }) => {
                 assert!(success, "authority reported a failed container click");
                 Some((slot, dragged))
             }
@@ -213,38 +217,41 @@ impl TcpClient {
     }
 
     pub fn has_private_container_event(&self) -> bool {
+        use icraft::network::protocol::Packet;
         self.events.iter().any(|event| {
             matches!(
                 event,
-                ClientToGame::ContainerOpenResult { .. }
-                    | ClientToGame::ContainerClickResult { .. }
-                    | ClientToGame::ContainerSlotUpdate { .. }
+                ClientToGame::Packet(Packet::ContainerOpenResult { .. })
+                    | ClientToGame::Packet(Packet::ContainerClickResult { .. })
+                    | ClientToGame::Packet(Packet::ContainerSlotUpdate { .. })
             )
         })
     }
 
     pub fn take_response(&mut self, request_id: u128) -> Option<GameplayResponse> {
+        use icraft::network::protocol::Packet;
         let index = self.events.iter().position(|event| {
             matches!(
                 event,
-                ClientToGame::GameplayResponse { response }
+                ClientToGame::Packet(Packet::GameplayResponse { response, .. })
                     if response.request_id == request_id
             )
         })?;
         match self.events.remove(index)? {
-            ClientToGame::GameplayResponse { response } => Some(response),
+            ClientToGame::Packet(Packet::GameplayResponse { response, .. }) => Some(response),
             _ => unreachable!("event index was selected as a gameplay response"),
         }
     }
 
     pub fn has_session_update(&self, player_id: u64) -> bool {
+        use icraft::network::protocol::Packet;
         self.events.iter().any(|event| {
             matches!(
                 event,
-                ClientToGame::PlayerSessionUpdate {
+                ClientToGame::Packet(Packet::PlayerSessionUpdate {
                     player_id: event_player,
                     ..
-                } if *event_player == player_id
+                }) if *event_player == player_id
             )
         })
     }

@@ -1,18 +1,43 @@
 //! Inbound network event dispatch extracted from `state.rs`.
+//! Join and embedded both deliver [`crate::network::protocol::Packet`] (via
+//! thin `ClientToGame` for StatusUpdate | Packet).
 
 use super::*;
+use crate::network::protocol::Packet;
 
 impl State {
     pub(super) fn handle_single_network_event(&mut self, event: NetworkInbound) {
         match event {
-            NetworkInbound::StatusUpdate(msg) => {
-                self.network_status = Some(msg);
+            NetworkInbound::StatusUpdate { message } => {
+                self.network_status = Some(message);
             }
-            NetworkInbound::GameplayResponse { response: _ } => {}
-            NetworkInbound::Connected {
+            NetworkInbound::Packet(packet) => self.handle_inbound_packet(packet),
+        }
+    }
+
+    pub(super) fn handle_inbound_packet(&mut self, packet: Packet) {
+        match packet {
+            Packet::GameplayResponse { response, .. } => {
+                // Embedded /gamemode: SessionContract is authoritative; refresh
+                // presentation mode when an accepted response arrives in-process.
+                if matches!(
+                    response.outcome,
+                    crate::network::protocol::GameplayOutcome::Accepted { .. }
+                ) {
+                    if let Some(mode) = self
+                        .embedded_runtime
+                        .as_ref()
+                        .and_then(EmbeddedRuntimeBridge::session_game_mode)
+                    {
+                        self.set_game_mode(mode);
+                    }
+                }
+            }
+            Packet::LoginSuccess {
                 player_id,
                 seed,
                 gamemode,
+                ..
             } => {
                 self.local_player_id = Some(player_id);
                 self.world_seed = seed as u32;
@@ -48,7 +73,7 @@ impl State {
                     format!("Connected to server as player #{player_id}"),
                 );
             }
-            NetworkInbound::Disconnected(reason) => {
+            Packet::Disconnect { reason, .. } => {
                 eprintln!("[State] Network disconnected: {reason}");
                 self.teardown_terrain_runtime("network disconnect");
                 self.network_ready = false;
@@ -68,7 +93,7 @@ impl State {
                     format!("{disconnected}: {reason}"),
                 );
             }
-            NetworkInbound::PlayerJoin { id, username } => {
+            Packet::PlayerJoin { id, username, .. } => {
                 if self.local_player_id != Some(id) {
                     if let Some(remote) = self.remote_players.get_mut(&id) {
                         remote.username = username.clone();
@@ -94,7 +119,7 @@ impl State {
                     );
                 }
             }
-            NetworkInbound::PlayerLeave(id) => {
+            Packet::PlayerLeave { id, .. } => {
                 if let Some(remote) = self.remote_players.remove(&id) {
                     push_chat_history(
                         &mut self.chat_messages,
@@ -110,7 +135,7 @@ impl State {
                     );
                 }
             }
-            NetworkInbound::PlayerPosition {
+            Packet::PlayerPosition {
                 id,
                 sequence,
                 sender_time_millis,
@@ -119,6 +144,7 @@ impl State {
                 z,
                 yaw,
                 pitch,
+                ..
             } => {
                 if self.local_player_id == Some(id) {
                     let authoritative = Vec3::new(x, y, z);
@@ -187,7 +213,7 @@ impl State {
                     }
                 }
             }
-            NetworkInbound::PlayerAction { id, action } => {
+            Packet::PlayerAction { id, action, .. } => {
                 if let Some(remote) = self.remote_players.get(&id) {
                     if let Some(entity) = self.entity_manager.get_by_id_mut(remote.entity_id) {
                         entity.action_cooldown = match action {
@@ -198,7 +224,7 @@ impl State {
                     }
                 }
             }
-            NetworkInbound::AuthoritativeBlockChange {
+            Packet::BlockChange {
                 dimension,
                 revision,
                 x,
@@ -207,22 +233,24 @@ impl State {
                 block,
                 state,
                 raw_fluid,
+                ..
             } => {
                 self.apply_remote_block_change(
                     dimension, revision, x, y, z, block, state, raw_fluid,
                 );
             }
-            NetworkInbound::BlockEntityDelta {
+            Packet::BlockEntityDelta {
                 dimension,
                 revision,
                 x,
                 y,
                 z,
                 entity,
+                ..
             } => {
                 self.apply_remote_block_entity_delta(dimension, revision, x, y, z, entity);
             }
-            NetworkInbound::ChunkData {
+            Packet::ChunkData {
                 dimension,
                 cx,
                 cz,
@@ -233,6 +261,7 @@ impl State {
                 block_states,
                 fluid_levels,
                 block_entities,
+                ..
             } => {
                 self.apply_remote_chunk_data(
                     dimension,
@@ -247,26 +276,29 @@ impl State {
                     block_entities,
                 );
             }
-            NetworkInbound::EntitySpawn {
+            Packet::EntitySpawn {
                 dimension,
                 sequence,
                 state,
+                ..
             }
-            | NetworkInbound::EntityState {
+            | Packet::EntityState {
                 dimension,
                 sequence,
                 state,
+                ..
             } => {
                 self.apply_replicated_entity_state(dimension, sequence, state);
             }
-            NetworkInbound::EntityDespawn {
+            Packet::EntityDespawn {
                 dimension,
                 sequence,
                 entity_id,
+                ..
             } => {
                 self.apply_replicated_entity_despawn(dimension, sequence, entity_id);
             }
-            NetworkInbound::PlayerHealth {
+            Packet::PlayerHealth {
                 sequence,
                 player_id,
                 health,
@@ -276,6 +308,7 @@ impl State {
                 oxygen,
                 is_dead,
                 death_reason,
+                ..
             } => {
                 if self.local_player_id == Some(player_id)
                     && self.presentation_topology().is_join_client()
@@ -295,10 +328,11 @@ impl State {
                     }
                 }
             }
-            NetworkInbound::PlayerEffect {
+            Packet::PlayerEffect {
                 sequence,
                 player_id,
                 effects,
+                ..
             } => {
                 if self.local_player_id == Some(player_id)
                     && self.presentation_topology().is_join_client()
@@ -309,11 +343,12 @@ impl State {
                         effects.into_iter().filter_map(effect_from_wire).collect();
                 }
             }
-            NetworkInbound::PlayerSessionUpdate {
+            Packet::PlayerSessionUpdate {
                 sequence,
                 player_id,
                 dimension,
                 state,
+                ..
             } => {
                 if self.local_player_id != Some(player_id) {
                     return;
@@ -327,10 +362,11 @@ impl State {
                     );
                 }
             }
-            NetworkInbound::TimeSync {
+            Packet::TimeSync {
                 ticks,
                 weather,
                 weather_remaining_ticks,
+                ..
             } => {
                 if self.presentation_topology().is_join_client() {
                     self.world_time.ticks = ticks;
@@ -341,39 +377,37 @@ impl State {
                     let _ = weather_remaining_ticks;
                 }
             }
-            NetworkInbound::WorldRulesSync { rules } => {
+            Packet::WorldRulesSync { rules, .. } => {
                 if self.presentation_topology().is_join_client() {
                     self.set_world_rules(rules);
                 }
             }
-            NetworkInbound::LightningStrike(strike) => {
+            Packet::LightningStrike { strike, .. } => {
                 if self.presentation_topology().is_join_client()
                     && self.current_dimension == crate::dimension::Dimension::Overworld
                 {
                     self.apply_lightning_strike(strike);
                 }
             }
-            NetworkInbound::Chat { sender, message } => {
+            Packet::ChatMessage { sender, message, .. } => {
                 let Some(message) = normalized_chat_message(&message) else {
                     return;
                 };
                 push_chat_history(&mut self.chat_messages, sender, message);
             }
-            NetworkInbound::ContainerClose {
-                id,
-                dimension,
-                x,
-                y,
-                z,
+            Packet::ContainerClose {
+                dimension, x, y, z, ..
             } => {
-                if self.local_player_id == Some(id)
-                    && dimension == self.current_dimension as u8
+                // Join client already filtered to the active container; embedded
+                // session targeting is done before this call. No player-id field
+                // on the wire Packet — match by open target only.
+                if dimension == self.current_dimension as u8
                     && self.container_target == Some((x, y, z))
                 {
                     self.force_close_inventory();
                 }
             }
-            NetworkInbound::ContainerOpenResult {
+            Packet::ContainerOpenResult {
                 dimension,
                 success,
                 x,
@@ -381,6 +415,7 @@ impl State {
                 z,
                 slots,
                 revision,
+                ..
             } => {
                 if !success {
                     if dimension == self.current_dimension as u8
@@ -417,12 +452,13 @@ impl State {
                     self.open_inventory();
                 }
             }
-            NetworkInbound::ContainerClickResult {
+            Packet::ContainerClickResult {
                 dimension,
                 success,
                 slot_index: _,
                 slot: _,
                 dragged,
+                ..
             } => {
                 if success
                     && dimension == self.current_dimension as u8
@@ -436,7 +472,7 @@ impl State {
                     self.inventory.dragged = dragged.and_then(|w| w.to_stack());
                 }
             }
-            NetworkInbound::ContainerSlotUpdate {
+            Packet::ContainerSlotUpdate {
                 dimension,
                 revision,
                 x,
@@ -444,6 +480,7 @@ impl State {
                 z,
                 slot_index,
                 slot,
+                ..
             } => {
                 if dimension != self.current_dimension as u8
                     || self.container_target != Some((x, y, z))
@@ -470,9 +507,10 @@ impl State {
                     }
                 }
             }
-            NetworkInbound::PlayerRespawnResult {
+            Packet::PlayerRespawnResult {
                 position,
                 dimension,
+                ..
             } => {
                 let target_vec = Vec3::from_array(position);
                 self.player_physics.position = target_vec;
@@ -489,9 +527,10 @@ impl State {
                 self.player_state.reset_for_respawn();
                 self.sync_cursor_mode();
             }
-            NetworkInbound::SleepStateSync {
+            Packet::SleepStateSync {
                 player_id,
                 is_sleeping,
+                ..
             } => {
                 if matches!(&self.network, NetworkHandle::Client { .. }) {
                     if self.local_player_id == Some(player_id) {
@@ -504,10 +543,17 @@ impl State {
                     }
                 }
             }
-            NetworkInbound::DimensionTransfer {
+            Packet::DimensionTransfer {
+                player_id,
                 dimension,
                 position,
+                ..
             } => {
+                if self.local_player_id.is_some_and(|id| id != player_id)
+                    && !matches!(&self.network, NetworkHandle::None)
+                {
+                    return;
+                }
                 if let Some(target) = crate::dimension::Dimension::from_wire(dimension) {
                     self.reset_presented_dimension(target);
                     self.player_physics.position = Vec3::from_array(position);
@@ -516,6 +562,8 @@ impl State {
                     self.portal_cooldown = 3.0;
                 }
             }
+            // Client→server or otherwise non-presentation packets: ignore.
+            _ => {}
         }
     }
 }

@@ -14,9 +14,7 @@ use icraft::enchantment::Enchantment;
 use icraft::entity::EntityType;
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::client::ClientToGame;
-use icraft::network::protocol::{
-    BlockActionKind, GameplayOperation, GameplayOutcome, GameplayRequest, ItemWire, SessionSlotWire,
-};
+use icraft::network::protocol::{BlockActionKind, GameplayOperation, GameplayOutcome, GameplayRequest, ItemWire, SessionSlotWire, Packet};
 use icraft::redstone::Direction;
 use icraft::server_runtime::{
     EmbeddedRuntimeOptions, LocalSessionProfile, ServerProperties, ServerRuntime, TransportMode,
@@ -257,7 +255,7 @@ fn matching_drop_events(client: &TcpClient, expected: ItemStack) -> Vec<(u64, It
     let mut matching = BTreeMap::new();
     for event in client.events() {
         let state = match event {
-            ClientToGame::EntitySpawn { state, .. } | ClientToGame::EntityState { state, .. } => {
+            ClientToGame::Packet(Packet::EntitySpawn { state, .. }) | ClientToGame::Packet(Packet::EntityState { state, .. }) => {
                 state
             }
             _ => continue,
@@ -405,13 +403,13 @@ fn run_tcp_container_vector(label: &str, listen: bool) {
                     == BlockType::Air
                     && views.iter().all(|client| {
                         client.events().iter().any(|event| {
-                            matches!(event, ClientToGame::BlockChange { x, y, z, block, .. }
+                            matches!(event, ClientToGame::Packet(Packet::BlockChange { x, y, z, block, .. })
                                 if (*x, *y, *z) == TARGET && *block == BlockType::Air.to_wire())
                         })
                     })
                     && views.iter().all(|client| {
                         client.events().iter().any(|event| {
-                            matches!(event, ClientToGame::BlockEntityDelta { x, y, z, entity, .. }
+                            matches!(event, ClientToGame::Packet(Packet::BlockEntityDelta { x, y, z, entity, .. })
                                 if (*x, *y, *z) == TARGET && entity.is_none())
                         })
                     })
@@ -432,27 +430,27 @@ fn run_tcp_container_vector(label: &str, listen: bool) {
     assert!(clients[0].events().iter().any(|event| {
         matches!(
             event,
-            ClientToGame::PlayerSessionUpdate { player_id, state, .. }
+            ClientToGame::Packet(Packet::PlayerSessionUpdate { player_id, state, .. })
                 if *player_id == owner_id && state.mining.is_some()
         )
     }));
     assert!(!clients[1].events().iter().any(|event| {
         matches!(
             event,
-            ClientToGame::PlayerSessionUpdate { player_id, .. }
+            ClientToGame::Packet(Packet::PlayerSessionUpdate { player_id, .. })
                 if *player_id == owner_id
         )
     }));
     assert!(!clients[1]
         .events()
         .iter()
-        .any(|event| { matches!(event, ClientToGame::GameplayResponse { .. }) }));
+        .any(|event| { matches!(event, ClientToGame::Packet(Packet::GameplayResponse { .. }) }));
     assert!(!clients[1].events().iter().any(|event| {
         matches!(
             event,
-            ClientToGame::ContainerOpenResult { .. }
-                | ClientToGame::ContainerClickResult { .. }
-                | ClientToGame::ContainerSlotUpdate { .. }
+            ClientToGame::Packet(Packet::ContainerOpenResult { .. })
+                | ClientToGame::Packet(Packet::ContainerClickResult { .. })
+                | ClientToGame::Packet(Packet::ContainerSlotUpdate { .. }
         )
     }));
     // Entity ids must agree for owner and observer during one authoritative

@@ -77,12 +77,7 @@ impl ClientEventSender {
 
     fn mark_dead(&self, reason: &str) {
         self.dead.set(true);
-        let _ = send_to_game(
-            &self.sender,
-            ClientToGame::Disconnected {
-                reason: reason.into(),
-            },
-        );
+        let _ = send_to_game(&self.sender, ClientToGame::disconnect(reason));
     }
 
     fn send(&self, event: ClientToGame) -> Result<(), ClientQueueError> {
@@ -112,171 +107,65 @@ impl ClientEventSender {
     }
 }
 
+/// Join-client thread → game thread.
+///
+/// Wire projections are already-decoded [`Packet`] values after a single
+/// protocol-version check. The only local-only variant is connection-progress
+/// [`Self::StatusUpdate`] text (never encoded on the wire).
 #[derive(Debug)]
 pub enum ClientToGame {
-    Connected {
-        player_id: PlayerId,
-        seed: u64,
-        gamemode: u8,
-    },
-    Disconnected {
-        reason: String,
-    },
-    PlayerJoin {
-        id: PlayerId,
-        username: String,
-    },
-    PlayerLeave {
-        id: PlayerId,
-    },
-    PlayerPosition {
-        id: PlayerId,
-        sequence: u32,
-        sender_time_millis: u64,
-        x: f32,
-        y: f32,
-        z: f32,
-        yaw: f32,
-        pitch: f32,
-    },
-    PlayerAction {
-        id: PlayerId,
-        action: Action,
-    },
-    BlockChange {
-        dimension: u8,
-        revision: u64,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-        state: u8,
-        raw_fluid: u8,
-    },
-    ChunkData {
-        dimension: u8,
-        cx: i32,
-        cz: i32,
-        revision: u64,
-        min_section_y: i8,
-        section_count: u16,
-        blocks: Vec<u8>,
-        block_states: Vec<u8>,
-        fluid_levels: Vec<u8>,
-        block_entities: Vec<u8>,
-    },
-    BlockEntityDelta {
-        dimension: u8,
-        revision: u64,
-        x: i32,
-        y: i32,
-        z: i32,
-        entity: Option<crate::block_entity::BlockEntity>,
-    },
-    EntitySpawn {
-        dimension: u8,
-        sequence: u64,
-        state: EntityStateWire,
-    },
-    EntityState {
-        dimension: u8,
-        sequence: u64,
-        state: EntityStateWire,
-    },
-    EntityDespawn {
-        dimension: u8,
-        sequence: u64,
-        entity_id: u64,
-    },
-    PlayerHealth {
-        sequence: u64,
-        player_id: PlayerId,
-        health: f32,
-        max_health: f32,
-        hunger: f32,
-        saturation: f32,
-        oxygen: f32,
-        is_dead: bool,
-        death_reason: u8,
-    },
-    PlayerEffect {
-        sequence: u64,
-        player_id: PlayerId,
-        effects: Vec<PlayerEffectWire>,
-    },
-    PlayerSessionUpdate {
-        sequence: u64,
-        player_id: PlayerId,
-        dimension: u8,
-        state: SessionGameplayWire,
-    },
-    TimeSync {
-        ticks: u64,
-        weather: u8,
-        weather_remaining_ticks: f32,
-    },
-    WorldRulesSync {
-        rules: crate::game_rules::WorldRules,
-    },
-    DimensionTransfer {
-        dimension: u8,
-        position: [f32; 3],
-    },
-    LightningStrike(LightningStrike),
-    Chat {
-        sender: String,
-        message: String,
-    },
     StatusUpdate {
         message: String,
     },
-    ContainerOpenResult {
-        dimension: u8,
-        success: bool,
-        x: i32,
-        y: i32,
-        z: i32,
-        slots: Vec<Option<crate::network::protocol::ItemWire>>,
-        revision: u64,
-    },
-    /// Targeted server-side invalidation of the active container session.
-    /// This is deliberately separate from slot revision replication: a close
-    /// remains valid even when its wire revision is lower than the last slot
-    /// update.
-    ContainerClose {
-        id: PlayerId,
-        dimension: u8,
-        x: i32,
-        y: i32,
-        z: i32,
-    },
-    ContainerClickResult {
-        dimension: u8,
-        success: bool,
-        slot_index: u16,
-        slot: Option<crate::network::protocol::ItemWire>,
-        dragged: Option<crate::network::protocol::ItemWire>,
-    },
-    ContainerSlotUpdate {
-        dimension: u8,
-        revision: u64,
-        x: i32,
-        y: i32,
-        z: i32,
-        slot_index: u16,
-        slot: Option<crate::network::protocol::ItemWire>,
-    },
-    PlayerRespawnResult {
-        position: [f32; 3],
-        dimension: u8,
-    },
-    SleepStateSync {
-        player_id: PlayerId,
-        is_sleeping: bool,
-    },
-    GameplayResponse {
-        response: GameplayResponse,
-    },
+    Packet(Packet),
+}
+
+impl ClientToGame {
+    pub fn packet(packet: Packet) -> Self {
+        Self::Packet(packet)
+    }
+
+    pub fn disconnect(reason: impl Into<String>) -> Self {
+        Self::Packet(Packet::Disconnect {
+            protocol_version: PROTOCOL_VERSION,
+            reason: reason.into(),
+        })
+    }
+
+    pub fn estimated_bytes(&self) -> usize {
+        let inline = std::mem::size_of_val(self);
+        let heap = match self {
+            Self::StatusUpdate { message } => message.len(),
+            Self::Packet(packet) => match packet {
+                Packet::Disconnect { reason, .. } => reason.len(),
+                Packet::GameplayResponse { response, .. } => std::mem::size_of_val(response),
+                Packet::PlayerJoin { username, .. } => username.len(),
+                Packet::ChunkData {
+                    blocks,
+                    block_states,
+                    ..
+                } => blocks.len().saturating_add(block_states.len()),
+                Packet::PlayerEffect { effects, .. } => {
+                    effects.len() * std::mem::size_of::<PlayerEffectWire>()
+                }
+                Packet::ChatMessage { sender, message, .. } => {
+                    sender.len().saturating_add(message.len())
+                }
+                Packet::ContainerOpenResult { slots, .. } => {
+                    slots.len() * std::mem::size_of::<Option<crate::network::protocol::ItemWire>>()
+                }
+                Packet::ContainerClickResult { slot, dragged, .. } => {
+                    slot.as_ref().map_or(0, |w| std::mem::size_of_val(w))
+                        + dragged.as_ref().map_or(0, |w| std::mem::size_of_val(w))
+                }
+                Packet::ContainerSlotUpdate { slot, .. } => {
+                    slot.as_ref().map_or(0, |w| std::mem::size_of_val(w))
+                }
+                _ => 0,
+            },
+        };
+        inline.saturating_add(heap)
+    }
 }
 
 #[derive(Debug)]
@@ -451,14 +340,15 @@ impl RevisionGate {
         block: u32,
         state: u8,
         raw_fluid: u8,
-    ) -> Vec<ClientToGame> {
+    ) -> Vec<Packet> {
         let key = (dimension, x.div_euclid(16), z.div_euclid(16));
         if let Some(current) = self.applied.get_mut(&key) {
             if revision <= *current {
                 return Vec::new();
             }
             *current = revision;
-            return vec![ClientToGame::BlockChange {
+            return vec![Packet::BlockChange {
+                protocol_version: PROTOCOL_VERSION,
                 dimension,
                 revision,
                 x,
@@ -495,7 +385,7 @@ impl RevisionGate {
         block_states: Vec<u8>,
         fluid_levels: Vec<u8>,
         block_entities: Vec<u8>,
-    ) -> Vec<ClientToGame> {
+    ) -> Vec<Packet> {
         let key = (dimension, cx, cz);
         if self
             .applied
@@ -508,7 +398,8 @@ impl RevisionGate {
         if let Some(changes) = self.buffered.get_mut(&key) {
             changes.retain(|buffered_revision, _| *buffered_revision > revision);
         }
-        let mut events = vec![ClientToGame::ChunkData {
+        let mut events = vec![Packet::ChunkData {
+            protocol_version: PROTOCOL_VERSION,
             dimension,
             cx,
             cz,
@@ -524,7 +415,7 @@ impl RevisionGate {
         events
     }
 
-    fn flush_buffered(&mut self, key: (u8, i32, i32)) -> Vec<ClientToGame> {
+    fn flush_buffered(&mut self, key: (u8, i32, i32)) -> Vec<Packet> {
         let mut events = Vec::new();
         let current = self.applied.get(&key).copied().unwrap_or(0);
         let pending = self.buffered.remove(&key).unwrap_or_default();
@@ -533,7 +424,8 @@ impl RevisionGate {
                 continue;
             }
             self.applied.insert(key, revision);
-            events.push(ClientToGame::BlockChange {
+            events.push(Packet::BlockChange {
+                protocol_version: PROTOCOL_VERSION,
                 dimension: key.0,
                 revision,
                 x: change.x,
@@ -545,23 +437,6 @@ impl RevisionGate {
             });
         }
         events
-    }
-}
-
-fn authoritative_weather_event(packet: &Packet) -> Option<ClientToGame> {
-    match packet {
-        Packet::TimeSync {
-            ticks,
-            weather,
-            weather_remaining_ticks,
-            ..
-        } => Some(ClientToGame::TimeSync {
-            ticks: *ticks,
-            weather: *weather,
-            weather_remaining_ticks: *weather_remaining_ticks,
-        }),
-        Packet::LightningStrike { strike, .. } => Some(ClientToGame::LightningStrike(*strike)),
-        _ => None,
     }
 }
 
@@ -608,12 +483,19 @@ async fn send_or_die(
 ) -> Result<(), ()> {
     if writer.send(packet).await.is_err() {
         eprintln!("[NetworkClient] Disconnecting: failed to send {what}");
-        let _ = client_to_game.send(ClientToGame::Disconnected {
-            reason: "connection lost".into(),
-        });
+        let _ = client_to_game.send(ClientToGame::disconnect("connection lost"));
         return Err(());
     }
     Ok(())
+}
+
+fn authoritative_weather_event(packet: &Packet) -> Option<ClientToGame> {
+    match packet {
+        Packet::TimeSync { .. } | Packet::LightningStrike { .. } => {
+            Some(ClientToGame::packet(packet.clone()))
+        }
+        _ => None,
+    }
 }
 
 impl NetworkClient {
@@ -628,9 +510,9 @@ impl NetworkClient {
             let runtime = match tokio::runtime::Runtime::new() {
                 Ok(runtime) => runtime,
                 Err(error) => {
-                    let _ = client_to_game.send(ClientToGame::Disconnected {
-                        reason: format!("failed to create network runtime: {error}"),
-                    });
+                    let _ = client_to_game.send(ClientToGame::disconnect(format!(
+                        "failed to create network runtime: {error}"
+                    )));
                     return;
                 }
             };
@@ -666,7 +548,7 @@ async fn run_client(
             Err(error) => {
                 let reason = format!("connection failed: {error}");
                 eprintln!("[NetworkClient] Connection failed: {error}");
-                let _ = client_to_game.send(ClientToGame::Disconnected { reason });
+                let _ = client_to_game.send(ClientToGame::disconnect(reason));
                 return;
             }
         }
@@ -692,7 +574,7 @@ async fn run_client(
     {
         let reason = error.to_string();
         eprintln!("[NetworkClient] Handshake send error: {reason}");
-        let _ = client_to_game.send(ClientToGame::Disconnected { reason });
+        let _ = client_to_game.send(ClientToGame::disconnect(reason));
         return;
     }
 
@@ -707,34 +589,35 @@ async fn run_client(
             let _ = client_to_game.send(ClientToGame::StatusUpdate {
                 message: "LOGIN SUCCESS. LOADING WORLD...".into(),
             });
-            let _ = client_to_game.send(ClientToGame::Connected {
+            let _ = client_to_game.send(ClientToGame::packet(Packet::LoginSuccess {
+                protocol_version: PROTOCOL_VERSION,
                 player_id,
                 seed,
                 gamemode,
-            });
+            }));
             player_id
         }
         Ok(Ok(Packet::Disconnect { reason, .. })) => {
             eprintln!("[NetworkClient] Server disconnected during login: {reason}");
-            let _ = client_to_game.send(ClientToGame::Disconnected { reason });
+            let _ = client_to_game.send(ClientToGame::disconnect(reason));
             return;
         }
         Ok(Ok(packet)) => {
             let reason = format!("unexpected handshake response: {packet:?}");
             eprintln!("[NetworkClient] {reason}");
-            let _ = client_to_game.send(ClientToGame::Disconnected { reason });
+            let _ = client_to_game.send(ClientToGame::disconnect(reason));
             return;
         }
         Ok(Err(error)) => {
             let reason = error.to_string();
             eprintln!("[NetworkClient] Connection recv error: {reason}");
-            let _ = client_to_game.send(ClientToGame::Disconnected { reason });
+            let _ = client_to_game.send(ClientToGame::disconnect(reason));
             return;
         }
         Err(_) => {
             let reason = "login timed out".to_string();
             eprintln!("[NetworkClient] Login timed out after 5s");
-            let _ = client_to_game.send(ClientToGame::Disconnected { reason });
+            let _ = client_to_game.send(ClientToGame::disconnect(reason));
             return;
         }
     };
@@ -755,17 +638,30 @@ async fn run_client(
                 match incoming {
                     Ok(packet) if packet.protocol_version() != PROTOCOL_VERSION => {
                         eprintln!("[NetworkClient] Disconnecting: protocol version mismatch");
-                        let _ = client_to_game.send(ClientToGame::Disconnected { reason: "protocol version mismatch".into() });
+                        let _ = client_to_game.send(ClientToGame::disconnect("protocol version mismatch"));
                         break;
                     }
-                    Ok(Packet::PlayerJoin { id, username, .. }) => { let _ = client_to_game.send(ClientToGame::PlayerJoin { id, username }); }
-                    Ok(Packet::PlayerLeave { id, .. }) => { let _ = client_to_game.send(ClientToGame::PlayerLeave { id }); }
-                    Ok(Packet::PlayerPosition { id, sequence, sender_time_millis, x, y, z, yaw, pitch, .. }) => {
-                        let _ = client_to_game.send(ClientToGame::PlayerPosition {
-                            id, sequence, sender_time_millis, x, y, z, yaw, pitch,
-                        });
+                    Ok(packet @ Packet::PlayerJoin { .. })
+                    | Ok(packet @ Packet::PlayerLeave { .. })
+                    | Ok(packet @ Packet::PlayerPosition { .. })
+                    | Ok(packet @ Packet::PlayerAction { .. })
+                    | Ok(packet @ Packet::ContainerClickResult { .. })
+                    | Ok(packet @ Packet::PlayerRespawnResult { .. })
+                    | Ok(packet @ Packet::SleepStateSync { .. })
+                    | Ok(packet @ Packet::WorldRulesSync { .. })
+                    | Ok(packet @ Packet::ChatMessage { .. })
+                    | Ok(packet @ Packet::TimeSync { .. })
+                    | Ok(packet @ Packet::LightningStrike { .. }) => {
+                        if matches!(
+                            &packet,
+                            Packet::PlayerRespawnResult { dimension, .. }
+                        ) {
+                            if let Packet::PlayerRespawnResult { dimension, .. } = &packet {
+                                current_dimension = *dimension;
+                            }
+                        }
+                        let _ = client_to_game.send(ClientToGame::packet(packet));
                     }
-                    Ok(Packet::PlayerAction { id, action, .. }) => { let _ = client_to_game.send(ClientToGame::PlayerAction { id, action }); }
                     Ok(Packet::BlockChange {
                         dimension,
                         revision,
@@ -782,32 +678,32 @@ async fn run_client(
                         for event in revision_gate.accept_block_change(
                             dimension, revision, x, y, z, block, state, raw_fluid,
                         ) {
-                            let _ = client_to_game.send(event);
+                            let _ = client_to_game.send(ClientToGame::packet(event));
                         }
                     }
-                    Ok(Packet::BlockEntityDelta {
+                    Ok(packet @ Packet::BlockEntityDelta {
                         dimension,
                         revision,
                         x,
                         y,
                         z,
-                        entity,
                         ..
                     }) => {
                         current_dimension = dimension;
                         if replication_gate.accept_block_entity((dimension, x, y, z), revision) {
                             last_client_revision = last_client_revision.max(revision);
-                            let _ = client_to_game.send(ClientToGame::BlockEntityDelta {
-                                dimension,
-                                revision,
-                                x,
-                                y,
-                                z,
-                                entity,
-                            });
+                            let _ = client_to_game.send(ClientToGame::packet(packet));
                         }
                     }
-                    Ok(Packet::ContainerOpenResult { dimension, success, x, y, z, slots, revision, .. }) => {
+                    Ok(packet @ Packet::ContainerOpenResult {
+                        dimension,
+                        success,
+                        x,
+                        y,
+                        z,
+                        revision,
+                        ..
+                    }) => {
                         let key = (dimension, x, y, z);
                         if !success {
                             // A failed open is not a slot delta.  If it names
@@ -816,42 +712,33 @@ async fn run_client(
                             // that the player opened in the meantime.
                             if active_container == Some(key) {
                                 active_container = None;
-                                let _ = client_to_game.send(ClientToGame::ContainerClose {
-                                    id: player_id,
+                                let _ = client_to_game.send(ClientToGame::packet(Packet::ContainerClose {
+                                    protocol_version: PROTOCOL_VERSION,
                                     dimension,
                                     x,
                                     y,
                                     z,
-                                });
+                                }));
                             }
                         } else if replication_gate.accept_container_update(key, revision) {
                             current_dimension = dimension;
                             last_client_revision = last_client_revision.max(revision);
                             active_container = Some(key);
-                            let _ = client_to_game.send(ClientToGame::ContainerOpenResult { dimension, success, x, y, z, slots, revision });
+                            let _ = client_to_game.send(ClientToGame::packet(packet));
                         }
                     }
-                    Ok(Packet::ContainerClose { dimension, x, y, z, .. }) => {
+                    Ok(packet @ Packet::ContainerClose { dimension, x, y, z, .. }) => {
                         let key = (dimension, x, y, z);
                         if active_container == Some(key) {
                             active_container = None;
-                            let _ = client_to_game.send(ClientToGame::ContainerClose {
-                                id: player_id,
-                                dimension,
-                                x,
-                                y,
-                                z,
-                            });
+                            let _ = client_to_game.send(ClientToGame::packet(packet));
                         }
                     }
-                    Ok(Packet::ContainerClickResult { dimension, success, slot_index, slot, dragged, .. }) => {
-                        let _ = client_to_game.send(ClientToGame::ContainerClickResult { dimension, success, slot_index, slot, dragged });
-                    }
-                    Ok(Packet::PlayerRespawnResult { position, dimension, .. }) => {
-                        current_dimension = dimension;
-                        let _ = client_to_game.send(ClientToGame::PlayerRespawnResult { position, dimension });
-                    }
-                    Ok(Packet::DimensionTransfer { player_id: target_id, dimension, position, .. }) => {
+                    Ok(packet @ Packet::DimensionTransfer {
+                        player_id: target_id,
+                        dimension,
+                        ..
+                    }) => {
                         if target_id == player_id {
                             current_dimension = dimension;
                             // Revisions are independent per dimension; the
@@ -859,17 +746,21 @@ async fn run_client(
                             // compared to the source world's high-water mark.
                             last_client_revision = 0;
                             active_container = None;
-                            let _ = client_to_game.send(ClientToGame::DimensionTransfer { dimension, position });
+                            let _ = client_to_game.send(ClientToGame::packet(packet));
                         }
                     }
-                    Ok(Packet::SleepStateSync { player_id, is_sleeping, .. }) => {
-                        let _ = client_to_game.send(ClientToGame::SleepStateSync { player_id, is_sleeping });
-                    }
-                    Ok(Packet::ContainerSlotUpdate { dimension, revision, x, y, z, slot_index, slot, .. }) => {
+                    Ok(packet @ Packet::ContainerSlotUpdate {
+                        dimension,
+                        revision,
+                        x,
+                        y,
+                        z,
+                        ..
+                    }) => {
                         current_dimension = dimension;
                         if replication_gate.accept_container_update((dimension, x, y, z), revision) {
                             last_client_revision = last_client_revision.max(revision);
-                            let _ = client_to_game.send(ClientToGame::ContainerSlotUpdate { dimension, revision, x, y, z, slot_index, slot });
+                            let _ = client_to_game.send(ClientToGame::packet(packet));
                         }
                     }
                     Ok(Packet::ChunkData {
@@ -899,155 +790,126 @@ async fn run_client(
                             fluid_levels,
                             block_entities,
                         ) {
-                            let _ = client_to_game.send(event);
+                            let _ = client_to_game.send(ClientToGame::packet(event));
                         }
                     }
-                    Ok(Packet::EntitySpawn {
-                        dimension,
-                        sequence,
-                        state,
-                        ..
-                    }) => {
-                        if replication_gate.accept_entity(dimension, state.entity_id, sequence) {
-                            let _ = client_to_game.send(ClientToGame::EntitySpawn {
+                    Ok(packet @ Packet::EntitySpawn { .. }) => {
+                        let accept = match &packet {
+                            Packet::EntitySpawn {
                                 dimension,
                                 sequence,
                                 state,
-                            });
+                                ..
+                            } => replication_gate.accept_entity(*dimension, state.entity_id, *sequence),
+                            _ => false,
+                        };
+                        if accept {
+                            let _ = client_to_game.send(ClientToGame::packet(packet));
                         }
                     }
-                    Ok(Packet::EntityState {
-                        dimension,
-                        sequence,
-                        state,
-                        ..
-                    }) => {
-                        if replication_gate.accept_entity(dimension, state.entity_id, sequence) {
-                            let _ = client_to_game.send(ClientToGame::EntityState {
+                    Ok(packet @ Packet::EntityState { .. }) => {
+                        let accept = match &packet {
+                            Packet::EntityState {
                                 dimension,
                                 sequence,
                                 state,
-                            });
+                                ..
+                            } => replication_gate.accept_entity(*dimension, state.entity_id, *sequence),
+                            _ => false,
+                        };
+                        if accept {
+                            let _ = client_to_game.send(ClientToGame::packet(packet));
                         }
                     }
-                    Ok(Packet::EntityDespawn {
+                    Ok(packet @ Packet::EntityDespawn {
                         dimension,
                         sequence,
                         entity_id,
                         ..
                     }) => {
                         if replication_gate.accept_entity(dimension, entity_id, sequence) {
-                            let _ = client_to_game.send(ClientToGame::EntityDespawn {
-                                dimension,
-                                sequence,
-                                entity_id,
-                            });
+                            let _ = client_to_game.send(ClientToGame::packet(packet));
                         }
                     }
-                    Ok(Packet::PlayerHealth {
+                    Ok(packet @ Packet::PlayerHealth {
                         sequence,
-                        player_id,
-                        health,
-                        max_health,
-                        hunger,
-                        saturation,
-                        oxygen,
-                        is_dead,
-                        death_reason,
+                        player_id: health_player_id,
                         ..
                     }) => {
-                        if replication_gate.accept_health(player_id, sequence) {
-                            let _ = client_to_game.send(ClientToGame::PlayerHealth {
-                                sequence,
-                                player_id,
-                                health,
-                                max_health,
-                                hunger,
-                                saturation,
-                                oxygen,
-                                is_dead,
-                                death_reason,
-                            });
+                        if replication_gate.accept_health(health_player_id, sequence) {
+                            let _ = client_to_game.send(ClientToGame::packet(packet));
                         }
                     }
-                    Ok(Packet::PlayerEffect {
+                    Ok(packet @ Packet::PlayerEffect {
                         sequence,
-                        player_id,
-                        effects,
+                        player_id: effect_player_id,
                         ..
                     }) => {
-                        if replication_gate.accept_effect(player_id, sequence) {
-                            let _ = client_to_game.send(ClientToGame::PlayerEffect {
-                                sequence,
-                                player_id,
-                                effects,
-                            });
+                        if replication_gate.accept_effect(effect_player_id, sequence) {
+                            let _ = client_to_game.send(ClientToGame::packet(packet));
                         }
                     }
-                    Ok(Packet::PlayerSessionUpdate {
-                        sequence,
-                        player_id: session_player_id,
-                        dimension,
-                        state,
-                        ..
-                    }) => {
-                        if session_player_id != player_id {
-                            // Owner-targeted projection only. A malicious
-                            // server must not enqueue foreign session snapshots.
-                        } else if state.validate_bounds().is_ok()
-                            && replication_gate.accept_session(
-                                session_player_id,
-                                dimension,
-                                sequence,
-                                state.revision,
-                            )
-                        {
-                            if dimension == current_dimension {
-                                last_client_revision =
-                                    last_client_revision.max(state.revision);
-                            }
-                            let _ = client_to_game.send(ClientToGame::PlayerSessionUpdate {
+                    Ok(packet @ Packet::PlayerSessionUpdate { .. }) => {
+                        let accept = match &packet {
+                            Packet::PlayerSessionUpdate {
                                 sequence,
                                 player_id: session_player_id,
                                 dimension,
                                 state,
-                            });
+                                ..
+                            } => {
+                                if *session_player_id != player_id {
+                                    false
+                                } else if state.validate_bounds().is_ok()
+                                    && replication_gate.accept_session(
+                                        *session_player_id,
+                                        *dimension,
+                                        *sequence,
+                                        state.revision,
+                                    )
+                                {
+                                    if *dimension == current_dimension {
+                                        last_client_revision =
+                                            last_client_revision.max(state.revision);
+                                    }
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => false,
+                        };
+                        if accept {
+                            let _ = client_to_game.send(ClientToGame::packet(packet));
                         }
-                    }
-                    Ok(packet @ Packet::TimeSync { .. })
-                    | Ok(packet @ Packet::LightningStrike { .. }) => {
-                        if let Some(event) = authoritative_weather_event(&packet) {
-                            let _ = client_to_game.send(event);
-                        }
-                    }
-                    Ok(Packet::WorldRulesSync { rules, .. }) => {
-                        let _ = client_to_game.send(ClientToGame::WorldRulesSync { rules });
                     }
                     Ok(Packet::GameplayResponse { response, .. }) => {
                         if let crate::network::protocol::GameplayOutcome::Accepted { revision } = response.outcome {
                             last_client_revision = last_client_revision.max(revision);
                         }
                         if gameplay_response_gate.accept(&response) {
-                            let _ = client_to_game.send(ClientToGame::GameplayResponse { response });
+                            let _ = client_to_game.send(ClientToGame::packet(Packet::GameplayResponse {
+                                protocol_version: PROTOCOL_VERSION,
+                                response,
+                            }));
                         }
                     }
-                    Ok(Packet::ChatMessage { sender, message, .. }) => { let _ = client_to_game.send(ClientToGame::Chat { sender, message }); }
                     Ok(Packet::Keepalive { .. }) => {
                         if writer.send(&Packet::Keepalive { protocol_version: PROTOCOL_VERSION }).await.is_err() {
                             eprintln!("[NetworkClient] Disconnecting: failed to reply to keepalive");
-                            let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
+                            let _ = client_to_game.send(ClientToGame::disconnect("connection lost"));
                             break;
                         }
                     }
                     Ok(Packet::Disconnect { reason, .. }) => {
                         eprintln!("[NetworkClient] Disconnecting: server sent Disconnect: {reason}");
-                        let _ = client_to_game.send(ClientToGame::Disconnected { reason });
+                        let _ = client_to_game.send(ClientToGame::disconnect(reason));
                         break;
                     }
                     Ok(_) => {}
                     Err(error) => {
                         eprintln!("[NetworkClient] Disconnecting: reader recv error: {error}");
-                        let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
+                        let _ = client_to_game.send(ClientToGame::disconnect("connection lost"));
                         break;
                     }
                 }
@@ -1199,17 +1061,23 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn wait_for_event(rx: &Receiver<ClientToGame>) -> ClientToGame {
+    fn wait_for_event(rx: &Receiver<ClientToGame>) -> Packet {
         loop {
             let event = rx
                 .recv_timeout(Duration::from_secs(5))
                 .expect("client event timed out");
-            if !matches!(
-                event,
-                ClientToGame::StatusUpdate { .. } | ClientToGame::PlayerSessionUpdate { .. }
-            ) {
-                return event;
+            match event {
+                ClientToGame::StatusUpdate { .. } => {}
+                ClientToGame::Packet(Packet::PlayerSessionUpdate { .. }) => {}
+                ClientToGame::Packet(packet) => return packet,
             }
+        }
+    }
+
+    fn unwrap_packet(event: ClientToGame) -> Packet {
+        match event {
+            ClientToGame::Packet(packet) => packet,
+            other => panic!("expected Packet inbound, got {other:?}"),
         }
     }
 
@@ -1299,10 +1167,11 @@ mod tests {
         let client_a = NetworkClient::spawn(addr.clone(), "steve".into(), game_rx_a, event_tx_a);
         let first = wait_for_event(&event_rx_a);
         let first_id = match first {
-            ClientToGame::Connected {
+            Packet::LoginSuccess {
                 player_id,
                 seed,
                 gamemode,
+                ..
             } => {
                 assert_eq!(seed, 0xCAFE_BABE);
                 assert_eq!(gamemode, 1);
@@ -1318,7 +1187,7 @@ mod tests {
         let (event_tx_b, event_rx_b) = mpsc::sync_channel(CLIENT_TO_GAME_QUEUE_CAPACITY);
         let client_b = NetworkClient::spawn(addr, "alex".into(), game_rx_b, event_tx_b);
         let second_id = match wait_for_event(&event_rx_b) {
-            ClientToGame::Connected { player_id, .. } => player_id,
+            Packet::LoginSuccess { player_id, .. } => player_id,
             other => panic!("expected second Connected, got {other:?}"),
         };
         let second_join = server_rx
@@ -1340,7 +1209,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             wait_for_event(&event_rx_a),
-            ClientToGame::PlayerJoin { id, username } if id == second_id && username == "alex"
+            Packet::PlayerJoin { id, username, .. } if id == second_id && username == "alex"
         ));
 
         game_tx_a.send(GameToClient::Disconnect).unwrap();
@@ -1366,7 +1235,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::sync_channel(CLIENT_TO_GAME_QUEUE_CAPACITY);
         let client = NetworkClient::spawn(addr, "catchup".into(), game_rx, event_tx);
         let player_id = match wait_for_event(&event_rx) {
-            ClientToGame::Connected { player_id, .. } => player_id,
+            Packet::LoginSuccess { player_id, .. } => player_id,
             other => panic!("expected Connected, got {other:?}"),
         };
         let _ = server_rx
@@ -1431,10 +1300,10 @@ mod tests {
             if let Ok(event) = event_rx.recv_timeout(Duration::from_secs(2)) {
                 if matches!(
                     event,
-                    ClientToGame::BlockChange { .. }
-                        | ClientToGame::ChunkData { .. }
-                        | ClientToGame::TimeSync { .. }
-                        | ClientToGame::LightningStrike(..)
+                    ClientToGame::Packet(Packet::BlockChange { .. })
+                        | ClientToGame::Packet(Packet::ChunkData { .. })
+                        | ClientToGame::Packet(Packet::TimeSync { .. })
+                        | ClientToGame::Packet(Packet::LightningStrike { .. })
                 ) {
                     events.push(event);
                 }
@@ -1446,30 +1315,31 @@ mod tests {
 
         assert!(events.iter().any(|e| matches!(
             e,
-            ClientToGame::BlockChange {
+            ClientToGame::Packet(Packet::BlockChange {
                 x: 7,
                 y: 80,
                 z: -9,
                 block: 3,
                 state: 0,
                 ..
-            }
+            })
         )));
         assert!(events.iter().any(|e| matches!(
             e,
-            ClientToGame::ChunkData { cx: 0, cz: -1, blocks, block_states: _, .. } if blocks == &vec![1, 2, 3, 4]
+            ClientToGame::Packet(Packet::ChunkData { cx: 0, cz: -1, blocks, block_states: _, .. }) if blocks == &vec![1, 2, 3, 4]
         )));
         assert!(events.iter().any(|e| matches!(
             e,
-            ClientToGame::TimeSync {
+            ClientToGame::Packet(Packet::TimeSync {
                 ticks: 19_000,
                 weather: 2,
                 weather_remaining_ticks: 8_000.5,
-            }
+                ..
+            })
         )));
         assert!(events.iter().any(|e| matches!(
             e,
-            ClientToGame::LightningStrike(received) if *received == strike
+            ClientToGame::Packet(Packet::LightningStrike { strike: received, .. }) if *received == strike
         )));
 
         game_tx.send(GameToClient::Disconnect).unwrap();
@@ -1500,7 +1370,7 @@ mod tests {
         ) -> crate::world::Chunk {
             let (blocks, block_states) = loop {
                 match wait_for_event(rx) {
-                    ClientToGame::ChunkData {
+                    Packet::ChunkData {
                         dimension: 0,
                         cx: 0,
                         cz: 0,
@@ -1510,7 +1380,7 @@ mod tests {
                         block_entities: _,
                         ..
                     } => break (blocks, block_states),
-                    ClientToGame::PlayerJoin { .. } => {}
+                    Packet::PlayerJoin { .. } => {}
                     other => panic!("expected persisted chunk snapshot, got {other:?}"),
                 }
             };
@@ -1535,7 +1405,7 @@ mod tests {
             .unwrap();
 
             match wait_for_event(rx) {
-                ClientToGame::BlockChange {
+                Packet::BlockChange {
                     dimension: 0,
                     revision: 2,
                     x: 2,
@@ -1593,7 +1463,7 @@ mod tests {
         let (event_tx_a, event_rx_a) = mpsc::sync_channel(CLIENT_TO_GAME_QUEUE_CAPACITY);
         let client_a = NetworkClient::spawn(addr.clone(), "slow".into(), game_rx_a, event_tx_a);
         let id_a = match wait_for_event(&event_rx_a) {
-            ClientToGame::Connected { player_id, .. } => player_id,
+            Packet::LoginSuccess { player_id, .. } => player_id,
             other => panic!("expected first Connected, got {other:?}"),
         };
         assert!(matches!(
@@ -1605,7 +1475,7 @@ mod tests {
         let (event_tx_b, event_rx_b) = mpsc::sync_channel(CLIENT_TO_GAME_QUEUE_CAPACITY);
         let client_b = NetworkClient::spawn(addr, "fast".into(), game_rx_b, event_tx_b);
         let id_b = match wait_for_event(&event_rx_b) {
-            ClientToGame::Connected { player_id, .. } => player_id,
+            Packet::LoginSuccess { player_id, .. } => player_id,
             other => panic!("expected second Connected, got {other:?}"),
         };
         assert!(matches!(
@@ -1677,7 +1547,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             wait_for_event(&event_rx_a),
-            ClientToGame::ChunkData {
+            Packet::ChunkData {
                 cx: 8,
                 revision: 1,
                 blocks,
@@ -1707,7 +1577,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::sync_channel(CLIENT_TO_GAME_QUEUE_CAPACITY);
         let client = NetworkClient::spawn(addr, "ordering".into(), game_rx, event_tx);
         let player_id = match wait_for_event(&event_rx) {
-            ClientToGame::Connected { player_id, .. } => player_id,
+            Packet::LoginSuccess { player_id, .. } => player_id,
             other => panic!("expected Connected, got {other:?}"),
         };
         assert!(matches!(
@@ -1771,23 +1641,23 @@ mod tests {
 
         assert!(matches!(
             wait_for_event(&event_rx),
-            ClientToGame::Chat { message, .. } if message == "first"
+            Packet::ChatMessage { message, .. } if message == "first"
         ));
         assert!(matches!(
             wait_for_event(&event_rx),
-            ClientToGame::TimeSync { ticks: 42, .. }
+            Packet::TimeSync { ticks: 42, .. }
         ));
         assert!(matches!(
             wait_for_event(&event_rx),
-            ClientToGame::Chat { message, .. } if message == "second"
+            Packet::ChatMessage { message, .. } if message == "second"
         ));
         assert!(matches!(
             wait_for_event(&event_rx),
-            ClientToGame::ChunkData { revision: 1, .. }
+            Packet::ChunkData { revision: 1, .. }
         ));
         assert!(matches!(
             wait_for_event(&event_rx),
-            ClientToGame::BlockChange { revision: 2, .. }
+            Packet::BlockChange { revision: 2, .. }
         ));
 
         game_tx.send(GameToClient::Disconnect).unwrap();
@@ -1806,11 +1676,12 @@ mod tests {
         };
         assert!(matches!(
             authoritative_weather_event(&sync),
-            Some(ClientToGame::TimeSync {
+            Some(ClientToGame::Packet(Packet::TimeSync {
                 ticks: 12_345,
                 weather: 1,
                 weather_remaining_ticks: 6_789.5,
-            })
+                ..
+            }))
         ));
 
         let strike = LightningStrike {
@@ -1824,7 +1695,7 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION,
                 strike,
             }),
-            Some(ClientToGame::LightningStrike(received)) if received == strike
+            Some(ClientToGame::Packet(Packet::LightningStrike { strike: received, .. })) if received == strike
         ));
     }
 
@@ -1842,7 +1713,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::sync_channel(CLIENT_TO_GAME_QUEUE_CAPACITY);
         let client = NetworkClient::spawn(addr, "steve".into(), game_rx, event_tx);
         let player_id = match wait_for_event(&event_rx) {
-            ClientToGame::Connected { player_id, .. } => player_id,
+            Packet::LoginSuccess { player_id, .. } => player_id,
             other => panic!("expected Connected, got {other:?}"),
         };
         assert!(matches!(
@@ -1871,7 +1742,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             wait_for_event(&event_rx),
-            ClientToGame::Chat { sender, message }
+            Packet::ChatMessage { sender, message, .. }
                 if sender == "steve" && message == "hello"
         ));
 
@@ -1894,7 +1765,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::sync_channel(CLIENT_TO_GAME_QUEUE_CAPACITY);
         let client = NetworkClient::spawn(addr, "live-client".into(), game_rx, event_tx);
         let player_id = match wait_for_event(&event_rx) {
-            ClientToGame::Connected { player_id, .. } => player_id,
+            Packet::LoginSuccess { player_id, .. } => player_id,
             other => panic!("expected Connected, got {other:?}"),
         };
         assert!(matches!(
@@ -1997,7 +1868,7 @@ mod tests {
         let client = NetworkClient::spawn(addr, "quit_witness".into(), game_rx, event_tx);
 
         match wait_for_event(&event_rx) {
-            ClientToGame::Connected { seed, gamemode, .. } => {
+            Packet::LoginSuccess { seed, gamemode, .. } => {
                 assert_eq!(seed, 0xDEAD_BEEF);
                 assert_eq!(gamemode, 0);
             }
@@ -2010,7 +1881,7 @@ mod tests {
         // Host quits: stop the server. The client must be notified and exit.
         host_tx.try_send(HostToServer::Stop).unwrap();
         match event_rx.recv_timeout(Duration::from_secs(3)) {
-            Ok(ClientToGame::Disconnected { .. }) => {}
+            Ok(ClientToGame::Packet(Packet::Disconnect { .. })) => {}
             Ok(other) => panic!("expected Disconnected, got {other:?}"),
             Err(_) => panic!("client did not observe disconnect after host stop"),
         }
@@ -2044,7 +1915,7 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert!(matches!(
             &events[0],
-            ClientToGame::ChunkData {
+            Packet::ChunkData {
                 dimension: 0,
                 cx: 0,
                 cz: 0,
@@ -2054,14 +1925,14 @@ mod tests {
         ));
         assert!(matches!(
             &events[0],
-            ClientToGame::ChunkData {
+            Packet::ChunkData {
                 fluid_levels,
                 ..
             } if fluid_levels == &vec![crate::world::FLUID_WATERLOGGED_BIT]
         ));
         assert!(matches!(
             &events[1],
-            ClientToGame::BlockChange {
+            Packet::BlockChange {
                 dimension: 0,
                 revision: 2,
                 x: 1,
@@ -2084,7 +1955,7 @@ mod tests {
         let skipped = gate.accept_block_change(0, 7, 1, 70, 1, 8, 0, 0);
         assert!(matches!(
             skipped.as_slice(),
-            [ClientToGame::BlockChange {
+            [Packet::BlockChange {
                 revision: 7,
                 block: 8,
                 ..
@@ -2155,7 +2026,7 @@ mod tests {
             let mut client = crate::world::Chunk::new(0, 0);
             for event in events {
                 match event {
-                    ClientToGame::ChunkData {
+                    Packet::ChunkData {
                         blocks,
                         block_states,
                         ..
@@ -2176,7 +2047,7 @@ mod tests {
                         .restore_to_chunk(&mut client)
                         .unwrap();
                     }
-                    ClientToGame::BlockChange { x, y, z, block, .. } => {
+                    Packet::BlockChange { x, y, z, block, .. } => {
                         client.set_block_local(
                             x.rem_euclid(16) as usize,
                             y,
@@ -2273,7 +2144,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::sync_channel(CLIENT_TO_GAME_QUEUE_CAPACITY);
         let client = NetworkClient::spawn(addr, "container-close".into(), game_rx, event_tx);
         let player_id = match wait_for_event(&event_rx) {
-            ClientToGame::Connected { player_id, .. } => player_id,
+            Packet::LoginSuccess { player_id, .. } => player_id,
             other => panic!("expected Connected, got {other:?}"),
         };
         let _ = server_rx.recv_timeout(Duration::from_secs(3)).unwrap();
@@ -2296,7 +2167,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             wait_for_event(&event_rx),
-            ClientToGame::ContainerOpenResult {
+            Packet::ContainerOpenResult {
                 success: true,
                 x,
                 y,
@@ -2324,7 +2195,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             wait_for_event(&event_rx),
-            ClientToGame::ContainerSlotUpdate { revision: 100, .. }
+            Packet::ContainerSlotUpdate { revision: 100, .. }
         ));
 
         host_tx
@@ -2358,8 +2229,8 @@ mod tests {
             .unwrap();
         assert!(matches!(
             wait_for_event(&event_rx),
-            ClientToGame::ContainerClose { id, dimension: 0, x, y, z }
-                if id == player_id && (x, y, z) == position
+            Packet::ContainerClose { dimension: 0, x, y, z, .. }
+                if (x, y, z) == position
         ));
 
         game_tx.send(GameToClient::Disconnect).unwrap();
@@ -2382,7 +2253,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::sync_channel(CLIENT_TO_GAME_QUEUE_CAPACITY);
         let client = NetworkClient::spawn(addr, "replica".into(), game_rx, event_tx);
         let player_id = match wait_for_event(&event_rx) {
-            ClientToGame::Connected { player_id, .. } => player_id,
+            Packet::LoginSuccess { player_id, .. } => player_id,
             other => panic!("expected Connected, got {other:?}"),
         };
         assert!(matches!(
@@ -2449,17 +2320,21 @@ mod tests {
                 continue;
             };
             match event {
-                ClientToGame::EntitySpawn { state, .. } if state.entity_id == 77 => {
+                ClientToGame::Packet(Packet::EntitySpawn { state, .. })
+                    if state.entity_id == 77 =>
+                {
                     saw_spawn = true;
                 }
-                ClientToGame::EntityState { state, .. } if state.entity_id == 77 => {
+                ClientToGame::Packet(Packet::EntityState { state, .. })
+                    if state.entity_id == 77 =>
+                {
                     latest_entity_x = Some(state.position[0]);
                 }
-                ClientToGame::PlayerEffect {
+                ClientToGame::Packet(Packet::PlayerEffect {
                     player_id: id,
                     effects: value,
                     ..
-                } if id == player_id => effects = Some(value),
+                }) if id == player_id => effects = Some(value),
                 _ => {}
             }
         }
@@ -2477,7 +2352,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             wait_for_event(&event_rx),
-            ClientToGame::EntityDespawn {
+            Packet::EntityDespawn {
                 sequence: 4,
                 entity_id: 77,
                 ..
@@ -2613,17 +2488,17 @@ mod tests {
         let client = NetworkClient::spawn(addr, "owner".into(), game_rx, event_tx);
         assert!(matches!(
             wait_for_event(&event_rx),
-            ClientToGame::Connected { player_id: 1, .. }
+            Packet::LoginSuccess { player_id: 1, .. }
         ));
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         let mut local_update = None;
         while std::time::Instant::now() < deadline && local_update.is_none() {
             match event_rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(ClientToGame::PlayerSessionUpdate { player_id: 99, .. }) => {
+                Ok(ClientToGame::Packet(Packet::PlayerSessionUpdate { player_id: 99, .. })) => {
                     panic!("foreign player_id session snapshot entered the join-client queue")
                 }
-                Ok(event @ ClientToGame::PlayerSessionUpdate { player_id: 1, .. }) => {
-                    local_update = Some(event);
+                Ok(event @ ClientToGame::Packet(Packet::PlayerSessionUpdate { player_id: 1, .. })) => {
+                    local_update = Some(unwrap_packet(event));
                 }
                 Ok(ClientToGame::StatusUpdate { .. }) => {}
                 Ok(_) => {}
@@ -2633,7 +2508,7 @@ mod tests {
         }
         assert!(matches!(
             local_update,
-            Some(ClientToGame::PlayerSessionUpdate {
+            Some(Packet::PlayerSessionUpdate {
                 player_id: 1,
                 state,
                 ..

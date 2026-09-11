@@ -435,14 +435,14 @@ fn run_tcp(label: &str, listen: bool) {
     assert!(clients[0].events().iter().any(|event| {
         matches!(
             event,
-            ClientToGame::PlayerSessionUpdate { player_id, state, .. }
+            ClientToGame::Packet(Packet::PlayerSessionUpdate { player_id, state, .. })
                 if *player_id == owner && state.fishing_hook.is_some()
         )
     }));
     assert!(!clients[1].events().iter().any(|event| {
         matches!(
             event,
-            ClientToGame::PlayerSessionUpdate { player_id, .. } if *player_id == owner
+            ClientToGame::Packet(Packet::PlayerSessionUpdate { player_id, .. }) if *player_id == owner
         )
     }));
     assert!(
