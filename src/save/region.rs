@@ -104,6 +104,86 @@ pub fn atomic_write<P: AsRef<Path>>(path: P, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// Write many small sidecars with a single `sync_all` before renames.
+/// Each entry is replaced atomically; on failure earlier renames may have
+/// already completed (same as sequential `atomic_write` today).
+pub fn atomic_write_group<P: AsRef<Path>>(entries: &[(P, &[u8])]) -> io::Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let mut prepared: Vec<(std::path::PathBuf, std::path::PathBuf)> =
+        Vec::with_capacity(entries.len());
+    for (path, bytes) in entries {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("save");
+        let tmp_path = path.with_file_name(format!(
+            ".{file_name}.{}.{}.tmp",
+            std::process::id(),
+            NEXT_TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path)?;
+            file.write_all(bytes)?;
+            file.flush()?;
+        }
+        prepared.push((tmp_path, path.to_path_buf()));
+    }
+
+    // One durability barrier for the whole sidecar batch.
+    if let Some((tmp, _)) = prepared.last() {
+        let file = fs::OpenOptions::new().read(true).write(true).open(tmp)?;
+        file.sync_all()?;
+    }
+
+    if atomic_write_should_crash("before_replace") {
+        std::process::abort();
+    }
+
+    if atomic_write_should_fail(1) {
+        for (tmp, _) in &prepared {
+            let _ = fs::remove_file(tmp);
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "injected failure before atomic replacement",
+        ));
+    }
+
+    for (tmp_path, path) in &prepared {
+        if let Err(error) = replace_file_atomically(tmp_path, path) {
+            let _ = fs::remove_file(tmp_path);
+            return Err(error);
+        }
+    }
+
+    if atomic_write_should_crash("after_replace") {
+        std::process::abort();
+    }
+
+    if atomic_write_should_fail(2) {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "injected failure after atomic replacement",
+        ));
+    }
+
+    #[cfg(unix)]
+    if let Some(parent) = prepared[0].1.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+
+    Ok(())
+}
+
 #[cfg(not(windows))]
 pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<()> {
     fs::rename(source, destination)

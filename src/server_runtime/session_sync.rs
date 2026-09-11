@@ -38,6 +38,7 @@ impl ServerRuntime {
         if refresh_interest {
             if let Some(session) = self.players.get_mut(&id) {
                 session.interest.invalidate_anchor();
+                session.player_dirty = true;
             }
             if let Some(dimension) = self
                 .players
@@ -46,6 +47,8 @@ impl ServerRuntime {
             {
                 self.update_interest_for(id, dimension, position);
             }
+        } else if let Some(session) = self.players.get_mut(&id) {
+            session.player_dirty = true;
         }
         true
     }
@@ -68,6 +71,7 @@ impl ServerRuntime {
     pub(super) fn sync_dimension(&mut self, id: u64, dimension: Dimension) {
         if let Some(session) = self.players.get_mut(&id) {
             session.interest.dimension = dimension;
+            session.player_dirty = true;
         }
         if let Some(authority_session) = self.authority.session_mut(id) {
             authority_session.dimension = dimension as u8;
@@ -84,6 +88,7 @@ impl ServerRuntime {
         };
         if let Some(session) = self.players.get_mut(&id) {
             session.data.game_mode = game_mode;
+            session.player_dirty = true;
         }
     }
 
@@ -107,6 +112,7 @@ impl ServerRuntime {
             session.data.yaw = yaw;
             session.data.pitch = pitch;
             session.last_pose_position = position;
+            session.player_dirty = true;
         }
     }
 }

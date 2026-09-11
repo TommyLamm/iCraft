@@ -27,6 +27,17 @@ use crate::world::BlockType;
 use glam::Vec3;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// How missing columns are materialized.
+///
+/// `Sync` generates on the calling thread (tests / world construction).
+/// `Async` only registers demand for the runtime worldgen worker; completed
+/// columns are applied at the start of `AuthorityCore::tick`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorldgenMode {
+    Sync,
+    Async,
+}
+
 const WORLD_BOUND: i32 = 30_000_000;
 pub const FIXED_DT: f32 = 1.0 / 20.0;
 /// Near-zero velocity gate shared with settled dropped-item physics skip.
@@ -77,6 +88,13 @@ pub struct ServerWorld {
     /// never inserted, generated, or written back so a later save cannot
     /// replace player builds with freshly generated terrain.
     failed_restore_chunks: BTreeSet<(i32, i32)>,
+    /// Missing columns requested for async worldgen. Cleared when applied or
+    /// when sync materialization inserts the column.
+    pending_chunk_generation: BTreeSet<(i32, i32)>,
+    worldgen_mode: WorldgenMode,
+    /// Last `EntityManager::checksum_epoch` that was successfully persisted.
+    /// Autosave skips `entities.dat` while this matches the live epoch.
+    entities_persisted_epoch: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,9 +139,43 @@ impl ServerWorld {
             block_revision_checksum: 0,
             chunk_revisions: BTreeMap::new(),
             failed_restore_chunks: BTreeSet::new(),
+            pending_chunk_generation: BTreeSet::new(),
+            worldgen_mode: WorldgenMode::Sync,
+            entities_persisted_epoch: 0,
         };
         world.ensure_chunk(0, 0);
         world
+    }
+
+    pub fn set_worldgen_mode(&mut self, mode: WorldgenMode) {
+        self.worldgen_mode = mode;
+    }
+
+    pub fn worldgen_mode(&self) -> WorldgenMode {
+        self.worldgen_mode
+    }
+
+    pub fn pending_chunk_generation(&self) -> &BTreeSet<(i32, i32)> {
+        &self.pending_chunk_generation
+    }
+
+    pub fn entities_dirty_for_save(&self) -> bool {
+        self.entities.checksum_epoch() != self.entities_persisted_epoch
+    }
+
+    pub fn acknowledge_entities_persisted(&mut self) {
+        self.entities_persisted_epoch = self.entities.checksum_epoch();
+    }
+
+    /// Insert a worker-generated column when still demanded and not
+    /// fail-closed. Stale results for already-resident columns are ignored.
+    pub fn apply_generated_chunk(&mut self, chunk_x: i32, chunk_z: i32, chunk: crate::world::Chunk) {
+        let key = (chunk_x, chunk_z);
+        self.pending_chunk_generation.remove(&key);
+        if self.chunks.chunks.contains_key(&key) || self.failed_restore_chunks.contains(&key) {
+            return;
+        }
+        self.chunks.chunks.insert(key, chunk);
     }
 
     /// Whether a future/other authoritative spawn source may create a
@@ -134,12 +186,15 @@ impl ServerWorld {
         self.rules.do_mob_spawning && !matches!(self.difficulty, Difficulty::Peaceful)
     }
 
-    pub fn ensure_chunk(&mut self, chunk_x: i32, chunk_z: i32) {
+    /// Synchronously generate a missing column regardless of `worldgen_mode`.
+    /// Used for spawn bootstrap and paths that cannot wait a tick.
+    pub fn materialize_chunk(&mut self, chunk_x: i32, chunk_z: i32) {
         if self.chunks.chunks.contains_key(&(chunk_x, chunk_z))
             || self.failed_restore_chunks.contains(&(chunk_x, chunk_z))
         {
             return;
         }
+        self.pending_chunk_generation.remove(&(chunk_x, chunk_z));
         let options = WorldGenerationOptions {
             world_type: self.world_type,
             generate_structures: self.generate_structures,
@@ -149,6 +204,26 @@ impl ServerWorld {
         self.chunks.chunks.insert((chunk_x, chunk_z), chunk);
     }
 
+    pub fn ensure_chunk(&mut self, chunk_x: i32, chunk_z: i32) {
+        if self.chunks.chunks.contains_key(&(chunk_x, chunk_z))
+            || self.failed_restore_chunks.contains(&(chunk_x, chunk_z))
+        {
+            return;
+        }
+        match self.worldgen_mode {
+            WorldgenMode::Async => {
+                self.pending_chunk_generation.insert((chunk_x, chunk_z));
+            }
+            WorldgenMode::Sync => {
+                self.materialize_chunk(chunk_x, chunk_z);
+            }
+        }
+    }
+
+    pub fn chunk_is_resident(&self, chunk_x: i32, chunk_z: i32) -> bool {
+        self.chunks.chunks.contains_key(&(chunk_x, chunk_z))
+    }
+
     pub fn valid_coordinate(&self, x: i32, y: i32, z: i32) -> bool {
         self.dimension.height().contains_y(y)
             && x.unsigned_abs() <= WORLD_BOUND as u32
@@ -156,7 +231,7 @@ impl ServerWorld {
     }
 
     pub fn safe_spawn_y(&mut self, x: i32, z: i32) -> i32 {
-        self.ensure_chunk(x.div_euclid(16), z.div_euclid(16));
+        self.materialize_chunk(x.div_euclid(16), z.div_euclid(16));
         let height = self.dimension.height();
         for y in (height.min_y()..height.max_y_exclusive()).rev() {
             if self.get_block(x, y, z).properties().is_solid {
@@ -426,6 +501,7 @@ impl ServerWorld {
         for entity in data {
             self.entities.add_restored_entity(entity);
         }
+        self.acknowledge_entities_persisted();
     }
 
     /// Remove one exact viewer registration and report whether it existed.
@@ -771,7 +847,10 @@ impl ServerWorld {
         if !self.valid_coordinate(x, y, z) {
             return Err(RejectReason::InvalidCoordinate);
         }
-        self.ensure_chunk(x.div_euclid(16), z.div_euclid(16));
+        self.materialize_chunk(x.div_euclid(16), z.div_euclid(16));
+        if !self.chunk_is_resident(x.div_euclid(16), z.div_euclid(16)) {
+            return Err(RejectReason::InvalidState);
+        }
         let old_block = self.get_block(x, y, z);
         let old_state = self.get_block_state(x, y, z);
         if old_block == block && old_state == state {
@@ -1018,7 +1097,10 @@ impl ServerWorld {
         {
             return Err(RejectReason::InvalidState);
         }
-        self.ensure_chunk(x.div_euclid(16), z.div_euclid(16));
+        self.materialize_chunk(x.div_euclid(16), z.div_euclid(16));
+        if !self.chunk_is_resident(x.div_euclid(16), z.div_euclid(16)) {
+            return Err(RejectReason::InvalidState);
+        }
 
         match source {
             crate::inventory::Item::WaterBucket => {

@@ -13,6 +13,7 @@ impl AuthorityCore {
     /// dimension-scoped; `(WorldMutation.dimension, revision)` is the stable
     /// routing/persistence identity.
     pub fn tick(&mut self) -> AuthoritySnapshot {
+        self.apply_pending_worldgen(crate::server_runtime::MAX_INITIAL_CHUNK_PROJECTIONS_PER_TICK);
         self.fixed_tick = self.fixed_tick.wrapping_add(1).max(1);
         let dimensions: Vec<Dimension> = self.dimensions().collect();
         let mut mutations_by_dimension: BTreeMap<Dimension, Vec<WorldMutation>> = BTreeMap::new();

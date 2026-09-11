@@ -13,7 +13,8 @@ pub mod transactions;
 use crate::dimension::Dimension;
 use crate::game_rules::{Difficulty, WorldRules, WorldType};
 use crate::network::protocol::{GameplayRequest, GameplayResponse, PlayerId, RejectReason};
-use crate::server_world::ServerWorld;
+use crate::server_world::{ServerWorld, WorldgenMode};
+use crate::world::Chunk;
 use contract::{
     AuthoritySnapshot, SessionContract, SessionGameplayState, SessionGameplayUpdate, WorldMutation,
 };
@@ -105,6 +106,18 @@ pub struct AuthorityCore {
     /// The allocator is shared by every loaded dimension, unlike each world's
     /// legacy EntityManager allocator.
     pub(crate) next_authority_entity_id: u64,
+    /// Completed worldgen columns waiting for deterministic apply at tick start.
+    /// Runtime polls the worker and pushes here before `tick`.
+    pub(crate) pending_worldgen: Vec<PendingWorldgenColumn>,
+    /// Mode applied to newly created dimensions.
+    pub(crate) worldgen_mode: WorldgenMode,
+}
+
+pub struct PendingWorldgenColumn {
+    pub dimension: Dimension,
+    pub chunk_x: i32,
+    pub chunk_z: i32,
+    pub chunk: Chunk,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -118,7 +131,10 @@ pub struct DimensionTransferIntent {
 impl AuthorityCore {
     pub fn new(config: AuthorityConfig) -> Self {
         let mut worlds = BTreeMap::new();
-        worlds.insert(config.dimension, Self::new_world(config, config.dimension));
+        worlds.insert(
+            config.dimension,
+            Self::new_world(config, config.dimension, WorldgenMode::Sync),
+        );
         Self {
             config,
             worlds,
@@ -131,11 +147,85 @@ impl AuthorityCore {
             pending_session_revisions: BTreeSet::new(),
             pending_dimension_transfers: Vec::new(),
             next_authority_entity_id: AUTHORITY_ENTITY_ID_START,
+            pending_worldgen: Vec::new(),
+            worldgen_mode: WorldgenMode::Sync,
         }
     }
 
-    fn new_world(config: AuthorityConfig, dimension: Dimension) -> ServerWorld {
-        ServerWorld::new_with_difficulty(
+    pub fn set_worldgen_mode_all(&mut self, mode: WorldgenMode) {
+        self.worldgen_mode = mode;
+        for world in self.worlds.values_mut() {
+            world.set_worldgen_mode(mode);
+        }
+    }
+
+    pub fn queue_worldgen_results(&mut self, columns: Vec<PendingWorldgenColumn>) {
+        self.pending_worldgen.extend(columns);
+    }
+
+    /// Apply completed worldgen at tick start. Sort is session-id then
+    /// nearest-first to the earliest session in that dimension; capped by
+    /// `apply_limit` so projection budgets stay bounded.
+    pub(crate) fn apply_pending_worldgen(&mut self, apply_limit: usize) {
+        if self.pending_worldgen.is_empty() || apply_limit == 0 {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_worldgen);
+        let mut order: Vec<usize> = (0..pending.len()).collect();
+        order.sort_by_key(|&index| {
+            let column = &pending[index];
+            let session_key = self
+                .session_ids_in_dimension(column.dimension)
+                .first()
+                .copied()
+                .unwrap_or(PlayerId::MAX);
+            let distance = self
+                .sessions
+                .get(&session_key)
+                .map(|session| {
+                    let px = (session.position[0] / 16.0).floor() as i32;
+                    let pz = (session.position[2] / 16.0).floor() as i32;
+                    let dx = column.chunk_x.saturating_sub(px) as i64;
+                    let dz = column.chunk_z.saturating_sub(pz) as i64;
+                    dx * dx + dz * dz
+                })
+                .unwrap_or(i64::MAX);
+            (
+                column.dimension as u8,
+                session_key,
+                distance,
+                column.chunk_x,
+                column.chunk_z,
+                index,
+            )
+        });
+        let mut slots: Vec<Option<PendingWorldgenColumn>> =
+            pending.into_iter().map(Some).collect();
+        let mut applied = 0usize;
+        let mut deferred = Vec::new();
+        for index in order {
+            let Some(column) = slots[index].take() else {
+                continue;
+            };
+            if applied >= apply_limit {
+                deferred.push(column);
+                continue;
+            }
+            if let Some(world) = self.worlds.get_mut(&column.dimension) {
+                world.apply_generated_chunk(column.chunk_x, column.chunk_z, column.chunk);
+                applied += 1;
+            } else {
+                deferred.push(column);
+            }
+        }
+        for slot in slots.into_iter().flatten() {
+            deferred.push(slot);
+        }
+        self.pending_worldgen = deferred;
+    }
+
+    fn new_world(config: AuthorityConfig, dimension: Dimension, mode: WorldgenMode) -> ServerWorld {
+        let mut world = ServerWorld::new_with_difficulty(
             config.seed,
             dimension,
             config.world_type,
@@ -143,15 +233,18 @@ impl AuthorityCore {
             config.rules,
             config.render_distance,
             config.difficulty,
-        )
+        );
+        world.set_worldgen_mode(mode);
+        world
     }
 
     pub(crate) fn ensure_dimension(&mut self, target: Dimension) {
         if self.worlds.contains_key(&target) {
             return;
         }
+        let mode = self.worldgen_mode;
         self.worlds
-            .insert(target, Self::new_world(self.config, target));
+            .insert(target, Self::new_world(self.config, target, mode));
     }
 
     /// Read a loaded dimension. Prefer this over any ambient "active world".

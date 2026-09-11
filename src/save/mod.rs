@@ -27,7 +27,8 @@ pub use index::{
 };
 pub use player::normalize_player_identity;
 pub use region::{
-    atomic_write, compress_bytes, decompress_bytes, decompress_bytes_limited, RegionData,
+    atomic_write, atomic_write_group, compress_bytes, decompress_bytes, decompress_bytes_limited,
+    RegionData,
 };
 
 /// Read-only `dimension.dat` peek. Embedded presentation uses this so it can
@@ -47,10 +48,13 @@ pub fn peek_current_dimension(world_dir: &Path) -> Dimension {
 pub struct SaveManager {
     pub world_dir: PathBuf,
     region_cache: HashMap<(Dimension, i32, i32), RegionData>,
-    /// Serialized on-disk length last observed for a cached region. Write
-    /// hits the cache when this still matches `metadata.len()`, so an
-    /// externally truncated/corrupt file still fail-closes.
-    region_disk_len: HashMap<(Dimension, i32, i32), u64>,
+    /// Write-generation stamp for each cached region. Cache hits trust this
+    /// stamp instead of re-statting the file with `fs::metadata` on every
+    /// write. A truncated or corrupt region still fail-closes when the cache
+    /// misses and disk load rejects the bytes; `.bin.bak` semantics are
+    /// unchanged.
+    region_write_generation: HashMap<(Dimension, i32, i32), u64>,
+    next_region_write_generation: u64,
     lru_order: VecDeque<(Dimension, i32, i32)>,
 }
 
@@ -70,7 +74,8 @@ impl SaveManager {
         Self {
             world_dir,
             region_cache: HashMap::new(),
-            region_disk_len: HashMap::new(),
+            region_write_generation: HashMap::new(),
+            next_region_write_generation: 1,
             lru_order: VecDeque::new(),
         }
     }
@@ -99,7 +104,7 @@ impl SaveManager {
         while self.region_cache.len() > MAX_ENTRIES || self.region_cache_bytes() > MAX_BYTES {
             if let Some(lru_key) = self.lru_order.pop_front() {
                 self.region_cache.remove(&lru_key);
-                self.region_disk_len.remove(&lru_key);
+                self.region_write_generation.remove(&lru_key);
             } else {
                 break;
             }
@@ -315,8 +320,11 @@ impl SaveManager {
                     if file.read_to_end(&mut bytes).is_ok() {
                         if let Ok(region_data) = bincode::deserialize::<RegionData>(&bytes) {
                             self.region_cache.insert((dimension, rx, rz), region_data);
-                            self.region_disk_len
-                                .insert((dimension, rx, rz), bytes.len() as u64);
+                            let generation = self.next_region_write_generation;
+                            self.next_region_write_generation =
+                                self.next_region_write_generation.wrapping_add(1).max(1);
+                            self.region_write_generation
+                                .insert((dimension, rx, rz), generation);
                         }
                     }
                 }
@@ -382,35 +390,75 @@ impl SaveManager {
         let region_file = self
             .region_dir(dimension)
             .join(format!("r.{}.{}.bin", rx, rz));
+        let key = (dimension, rx, rz);
         let mut region =
-            self.load_region_for_write(dimension, rx, rz, &region_file, *error_cx, *error_cz)?;
+            self.take_region_for_write(dimension, rx, rz, &region_file, *error_cx, *error_cz)?;
 
+        // Remember prior local payloads so a failed atomic write can restore the
+        // in-memory region without cloning the whole cache entry on the happy path.
+        let mut previous: HashMap<(u8, u8), Option<Vec<u8>>> = HashMap::new();
         for (cx, cz, data) in entries {
             let lx = cx.rem_euclid(32) as u8;
             let lz = cz.rem_euclid(32) as u8;
             let serialized_chunk = bincode::serialize(&data)
                 .map_err(|error| SaveError::Serialization(error.to_string()))?;
-            region.chunks.insert((lx, lz), serialized_chunk);
+            let old = region.chunks.insert((lx, lz), serialized_chunk);
+            previous.insert((lx, lz), old);
         }
 
-        let serialized_region = bincode::serialize(&region)
-            .map_err(|error| SaveError::Serialization(error.to_string()))?;
+        let serialized_region = match bincode::serialize(&region) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                Self::restore_region_chunk_slots(&mut region, previous);
+                self.region_cache.insert(key, region);
+                self.touch_region(key);
+                return Err(SaveError::Serialization(error.to_string()));
+            }
+        };
 
         region::backup_region_file_if_needed(&region_file);
-        atomic_write(&region_file, &serialized_region)
-            .map_err(|error| SaveError::io("atomic region replacement", &region_file, error))?;
-        // Do not poison the in-memory cache if replacement fails; callers can
-        // retry the same revision without losing the old on-disk snapshot.
-        self.region_cache.insert((dimension, rx, rz), region);
-        self.region_disk_len
-            .insert((dimension, rx, rz), serialized_region.len() as u64);
-        self.touch_region((dimension, rx, rz));
+        if let Err(error) = atomic_write(&region_file, &serialized_region) {
+            // Disk still holds the previous snapshot. Undo in-memory edits and
+            // put the cache entry back so callers can retry the same revision.
+            Self::restore_region_chunk_slots(&mut region, previous);
+            self.region_cache.insert(key, region);
+            self.touch_region(key);
+            return Err(SaveError::io(
+                "atomic region replacement",
+                &region_file,
+                error,
+            ));
+        }
+        let generation = self.next_region_write_generation;
+        self.next_region_write_generation = self.next_region_write_generation.wrapping_add(1).max(1);
+        self.region_cache.insert(key, region);
+        self.region_write_generation.insert(key, generation);
+        self.touch_region(key);
         self.evict_lru_regions();
         Ok(())
     }
 
-    fn load_region_for_write(
-        &self,
+    fn restore_region_chunk_slots(
+        region: &mut RegionData,
+        previous: HashMap<(u8, u8), Option<Vec<u8>>>,
+    ) {
+        for (coord, old) in previous {
+            match old {
+                Some(bytes) => {
+                    region.chunks.insert(coord, bytes);
+                }
+                None => {
+                    region.chunks.remove(&coord);
+                }
+            }
+        }
+    }
+
+    /// Take ownership of a cached region (no clone) or load from disk.
+    /// Cache hits trust the write-generation stamp and do not call
+    /// `fs::metadata`.
+    fn take_region_for_write(
+        &mut self,
         dimension: Dimension,
         rx: i32,
         rz: i32,
@@ -419,15 +467,11 @@ impl SaveManager {
         chunk_z: i32,
     ) -> SaveResult<RegionData> {
         let key = (dimension, rx, rz);
-        if let Some(cached) = self.region_cache.get(&key) {
-            if !region_file.exists() {
-                return Ok(cached.clone());
+        if self.region_write_generation.contains_key(&key) {
+            if let Some(cached) = self.region_cache.remove(&key) {
+                return Ok(cached);
             }
-            if let Ok(meta) = fs::metadata(region_file) {
-                if self.region_disk_len.get(&key).copied() == Some(meta.len()) {
-                    return Ok(cached.clone());
-                }
-            }
+            self.region_write_generation.remove(&key);
         }
         self.load_region_from_disk(region_file, chunk_x, chunk_z)
     }

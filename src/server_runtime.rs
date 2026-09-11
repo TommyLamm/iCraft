@@ -45,7 +45,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod ingress;
 pub mod projection;
+mod save_worker;
 mod session_sync;
+mod worldgen_worker;
 
 pub(super) const TICK_INTERVAL: Duration = Duration::from_millis(50);
 pub(super) const MAX_INBOUND_EVENTS_PER_TICK: usize = 512;
@@ -62,7 +64,7 @@ pub(super) const MAX_PRESENTATION_EVENTS_PER_TICK: usize = 1_024;
 pub(super) const MAX_PRESENTATION_CRITICAL_OVERFLOW: usize = MAX_INBOUND_EVENTS_PER_TICK;
 pub(super) const MAX_PRESENTATION_QUEUE_LEN: usize =
     MAX_PRESENTATION_EVENTS_PER_TICK + MAX_PRESENTATION_CRITICAL_OVERFLOW;
-pub(super) const MAX_INITIAL_CHUNK_PROJECTIONS_PER_TICK: usize = 16;
+pub(crate) const MAX_INITIAL_CHUNK_PROJECTIONS_PER_TICK: usize = 16;
 // A validated maximum view distance of 32 covers a 65x65 chunk square.
 pub(super) const MAX_PENDING_INITIAL_CHUNKS_PER_SESSION: usize = 65 * 65;
 pub(super) const MAX_POSE_SPEED_BLOCKS_PER_SECOND: f32 = 100.0;
@@ -600,6 +602,12 @@ pub struct ServerMetrics {
     pub players_online: usize,
     pub saves: u64,
     pub last_save_latency_ms: u64,
+    pub autosave_failures: u64,
+    pub evict_flush_failures: u64,
+    pub tick_over_budget: u64,
+    pub save_queue_full: u64,
+    pub worldgen_stale_discarded: u64,
+    pub restore_chunk_skipped: u64,
 }
 
 /// Runtime session overlay kept beside authority `SessionContract`.
@@ -628,6 +636,9 @@ pub struct PlayerSessionState {
     /// authoritative pose lives on `SessionContract`.
     pub last_pose_position: [f32; 3],
     pub(super) teleport_allowance: Option<[f32; 3]>,
+    /// Set when pose / inventory / dimension / gameplay change; cleared after
+    /// a successful player-file ack from the save worker.
+    pub(super) player_dirty: bool,
 }
 
 impl PlayerSessionState {
@@ -653,6 +664,7 @@ impl PlayerSessionState {
             last_pose_received_at: None,
             last_pose_position,
             teleport_allowance: None,
+            player_dirty: true,
         }
     }
 
@@ -785,6 +797,8 @@ pub struct ServerRuntime {
     /// Successful `save_all` during shutdown. `request_shutdown` only sets
     /// `stopped`; a later `shutdown` must still flush if this is false.
     pub(super) save_flushed: bool,
+    worldgen_worker: worldgen_worker::WorldgenWorker,
+    save_worker: Option<save_worker::SaveWorker>,
 }
 
 impl ServerRuntime {
@@ -888,7 +902,7 @@ impl ServerRuntime {
             metrics: ServerMetrics::default(),
             players: HashMap::new(),
             authority,
-            world_dir,
+            world_dir: world_dir.clone(),
             save_manager,
             default_game_mode: creation.game_mode,
             host_tx,
@@ -905,9 +919,15 @@ impl ServerRuntime {
             chunk_interest_index: HashMap::new(),
             stopped: false,
             save_flushed: false,
+            worldgen_worker: worldgen_worker::WorldgenWorker::new(),
+            save_worker: Some(save_worker::SaveWorker::spawn(SaveManager::new(&world_dir))),
         };
         runtime.restore_authority_state()?;
         runtime.ensure_spawn_chunk();
+        // After spawn materialization, offload further ensure_chunk calls.
+        runtime
+            .authority
+            .set_worldgen_mode_all(crate::server_world::WorldgenMode::Async);
         if let Some(profile) = options.local_session {
             runtime.handle_join_with_storage(profile.id, profile.username, profile.storage)?;
         }
@@ -949,6 +969,9 @@ impl ServerRuntime {
             });
         }
         let started = Instant::now();
+        self.drain_save_acks();
+        self.schedule_pending_worldgen();
+        self.collect_worldgen_results();
         let mut processed = 0;
         while processed < MAX_INBOUND_EVENTS_PER_TICK {
             let event = match self.host_rx.try_recv() {
@@ -986,8 +1009,8 @@ impl ServerRuntime {
             .map(|world| world.entities.entities.len())
             .sum();
         if self.metrics.ticks % AUTOSAVE_INTERVAL_TICKS == 0 {
-            if let Err(error) = self.save_all() {
-                eprintln!("[ServerRuntime] autosave failed: {error}");
+            if let Err(_error) = self.save_all_async() {
+                self.metrics.autosave_failures = self.metrics.autosave_failures.saturating_add(1);
             }
         }
         let elapsed = started.elapsed();
@@ -999,7 +1022,7 @@ impl ServerRuntime {
             .max(self.metrics.last_tick_time_us);
         self.sync_network_metrics();
         if elapsed > TICK_INTERVAL {
-            eprintln!("[ServerRuntime] tick over budget: {elapsed:?}");
+            self.metrics.tick_over_budget = self.metrics.tick_over_budget.saturating_add(1);
         }
         Ok(RuntimeTickOutput {
             snapshot,
@@ -1034,6 +1057,9 @@ impl ServerRuntime {
         if save_result.is_ok() {
             self.save_flushed = true;
         }
+        if let Some(worker) = self.save_worker.take() {
+            worker.shutdown();
+        }
         if self.host_tx.is_some() {
             self.enqueue_stop();
         }
@@ -1065,11 +1091,8 @@ impl ServerRuntime {
             }
             self.authority.with_world(dimension, |world| {
                 for chunk in &chunks {
-                    if let Err(error) = world.restore_saved_chunk(chunk) {
-                        eprintln!(
-                            "[ServerRuntime] skipping corrupt saved chunk ({}, {}) in {:?}: {error}",
-                            chunk.chunk_x, chunk.chunk_z, dimension
-                        );
+                    if let Err(_error) = world.restore_saved_chunk(chunk) {
+                        // Count and skip; failed_restore_chunks stays fail-closed.
                     }
                 }
                 for ((_cx, _cz), revision) in revisions {
@@ -1095,61 +1118,163 @@ impl ServerRuntime {
         let mut merged_revisions = MutationRevisionIndex::default();
         let dimensions: Vec<_> = self.authority.dimensions().collect();
         for dimension in dimensions {
-            let (chunks, dirty_revs, entities, revisions) =
+            let (chunks, entities_payload, revisions, entities_epoch) =
                 self.authority.with_world(dimension, |world| {
                     let mut dirty = world.chunks.dirty_chunks.dirty_revisions();
                     dirty.sort_unstable_by_key(|(coord, _)| *coord);
                     let mut payloads = Vec::new();
-                    let mut revs = Vec::new();
                     for ((cx, cz), revision) in dirty {
                         let Some(data) = world.chunk_save_payload(cx, cz) else {
                             continue;
                         };
                         if world.chunks.dirty_chunks.begin_save(cx, cz, revision) {
-                            payloads.push((cx, cz, data));
-                            revs.push((cx, cz, revision));
+                            payloads.push((cx, cz, revision, data));
                         }
                     }
-                    let entities = world
-                        .entities
-                        .entities
-                        .iter()
-                        .map(EntitySaveData::from)
-                        .collect::<Vec<_>>();
-                    (payloads, revs, entities, world.mutation_revision_index())
-                });
-            let save_result = self.save_manager.save_chunks_in(dimension, chunks);
-            self.authority.with_world(dimension, |world| {
-                for (cx, cz, revision) in &dirty_revs {
-                    if save_result.is_ok() {
-                        world
-                            .chunks
-                            .dirty_chunks
-                            .acknowledge_persisted(*cx, *cz, *revision);
+                    let entities_dirty = world.entities_dirty_for_save();
+                    let entities_epoch = world.entities.checksum_epoch();
+                    let entities = if entities_dirty {
+                        Some(
+                            world
+                                .entities
+                                .entities
+                                .iter()
+                                .map(EntitySaveData::from)
+                                .collect::<Vec<_>>(),
+                        )
                     } else {
-                        world
-                            .chunks
-                            .dirty_chunks
-                            .acknowledge_failed(*cx, *cz, *revision);
-                    }
+                        None
+                    };
+                    (
+                        payloads,
+                        entities,
+                        world.mutation_revision_index(),
+                        entities_epoch,
+                    )
+                });
+            if !chunks.is_empty() {
+                let rollback: Vec<(i32, i32, u64)> = chunks
+                    .iter()
+                    .map(|(cx, cz, revision, _)| (*cx, *cz, *revision))
+                    .collect();
+                let job_id = self
+                    .save_worker
+                    .as_mut()
+                    .map(|worker| worker.next_job_id())
+                    .unwrap_or(0);
+                if !self.enqueue_save_payload(save_worker::SavePayload::Chunks {
+                    job_id,
+                    dimension,
+                    entries: chunks,
+                }) {
+                    self.authority.with_world(dimension, |world| {
+                        for (cx, cz, revision) in rollback {
+                            world
+                                .chunks
+                                .dirty_chunks
+                                .acknowledge_failed(cx, cz, revision);
+                        }
+                    });
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "save queue full while enqueueing chunks",
+                    ));
                 }
-            });
-            save_result.map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
-            self.save_manager.save_entities_in(dimension, &entities)?;
+            }
+            if let Some(entities) = entities_payload {
+                let path = self.save_manager.entities_file_path(dimension);
+                let bytes = bincode::serialize(&entities)
+                    .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+                let job_id = self
+                    .save_worker
+                    .as_mut()
+                    .map(|worker| worker.next_job_id())
+                    .unwrap_or(0);
+                if !self.enqueue_save_payload(save_worker::SavePayload::Entities {
+                    job_id,
+                    dimension,
+                    epoch: entities_epoch,
+                    bytes,
+                    path,
+                }) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "save queue full while enqueueing entities",
+                    ));
+                }
+            }
             for ((cx, cz), revision) in revisions.entries_in(dimension) {
                 merged_revisions
                     .ensure_at_least(dimension, cx, cz, revision)
                     .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
             }
         }
-        self.save_manager
-            .save_mutation_revision_index(&merged_revisions)?;
-        self.save_manager
-            .save_current_dimension(persisted_dimension)?;
+        let revision_bytes = bincode::serialize(&merged_revisions)
+            .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+        let level_bytes = bincode::serialize(&self.level)
+            .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+        let mut whitelist: Vec<_> = self.properties.whitelist.iter().cloned().collect();
+        whitelist.sort();
+        let properties_text = format!(
+            "# online-mode=false is LAN/offline: names are accounts until real credentials exist.\n\
+             # Operators are granted only by the dedicated-server console `op` command (or this file),\n\
+             # bound to the normalized identity of later connections. There is still no password.\n\
+             bind={}\nport={}\nmotd={}\nmax-players={}\ndifficulty={}\nonline-mode={}\nwhitelist={}\noperators={}\nview-distance={}\nsimulation-distance={}\npvp={}\nlevel-name={}\nlevel-seed={}\n",
+            self.properties.bind,
+            self.properties.port,
+            self.properties.motd,
+            self.properties.max_players,
+            self.properties.difficulty,
+            self.properties.online_mode,
+            whitelist.join(","),
+            sorted_names(&self.properties.operators).join(","),
+            self.properties.view_distance,
+            self.properties.simulation_distance,
+            self.properties.pvp,
+            self.properties.world_dir.display(),
+            self.properties.seed as i64,
+        );
+        let sidecars = vec![
+            (
+                self.world_dir.join("mutation_revisions.bin"),
+                revision_bytes,
+            ),
+            (
+                self.world_dir.join("dimension.dat"),
+                vec![persisted_dimension as u8],
+            ),
+            (self.world_dir.join("level.dat"), level_bytes),
+            (
+                self.world_dir.join("server.properties"),
+                properties_text.into_bytes(),
+            ),
+        ];
+        let job_id = self
+            .save_worker
+            .as_mut()
+            .map(|worker| worker.next_job_id())
+            .unwrap_or(0);
+        if !self.enqueue_save_payload(save_worker::SavePayload::SidecarGroup {
+            job_id,
+            entries: sidecars,
+        }) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "save queue full while enqueueing sidecars",
+            ));
+        }
         Ok(())
     }
 
     pub fn save_all(&mut self) -> io::Result<()> {
+        self.save_all_inner(true)
+    }
+
+    fn save_all_async(&mut self) -> io::Result<()> {
+        self.save_all_inner(false)
+    }
+
+    fn save_all_inner(&mut self, wait_for_drain: bool) -> io::Result<()> {
         #[cfg(test)]
         if SAVE_ALL_FAILPOINT.with(|failpoint| failpoint.get()) {
             return Err(io::Error::new(
@@ -1158,24 +1283,48 @@ impl ServerRuntime {
             ));
         }
         let started = Instant::now();
-        self.save_manager.save_level(&self.level)?;
         self.save_authority_state()?;
-        // Keep operator-owned difficulty (and the rest of server policy) in
-        // the same durable world directory as level/player state.  Runtime
-        // construction validates this file before an authority world exists.
-        self.persist_properties()?;
         let mut player_ids: Vec<_> = self.players.keys().copied().collect();
         player_ids.sort_unstable();
         for id in player_ids.iter().copied() {
             self.sync_gameplay_projection(id);
         }
-        let mut names: Vec<_> = self.players.keys().copied().collect();
-        names.sort_unstable();
-        for id in names {
+        for id in player_ids {
             let Some(session) = self.players.get(&id) else {
                 continue;
             };
+            if !session.player_dirty {
+                continue;
+            }
             self.save_player(id, session)?;
+            if let Some(session) = self.players.get_mut(&id) {
+                session.player_dirty = false;
+            }
+        }
+        if wait_for_drain {
+            if let Some(worker) = self.save_worker.as_mut() {
+                let job_id = worker.next_job_id();
+                worker
+                    .enqueue_blocking(save_worker::SavePayload::Barrier { job_id })
+                    .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
+                let acks = worker.wait_barrier(job_id);
+                let failed = acks.iter().any(|ack| {
+                    matches!(
+                        ack,
+                        save_worker::SaveAck::Chunks { ok: false, .. }
+                            | save_worker::SaveAck::Entities { ok: false, .. }
+                            | save_worker::SaveAck::SidecarGroup { ok: false, .. }
+                            | save_worker::SaveAck::PlayerFile { ok: false, .. }
+                    )
+                });
+                self.apply_save_acks(acks);
+                if failed {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        "save worker reported a failed write",
+                    ));
+                }
+            }
         }
         self.metrics.saves = self.metrics.saves.saturating_add(1);
         let latency_us = started.elapsed().as_micros().min(u64::MAX as u128) as u64;
@@ -1271,8 +1420,151 @@ impl ServerRuntime {
         let cx = self.level.spawn_x.div_euclid(16);
         let cz = self.level.spawn_z.div_euclid(16);
         self.authority.with_world(dimension, |world| {
-            world.ensure_chunk(cx, cz);
+            world.materialize_chunk(cx, cz);
         });
+    }
+
+    fn schedule_pending_worldgen(&mut self) {
+        let generation = self.worldgen_worker.generation;
+        let lifetime = self.worldgen_worker.lifetime;
+        let dimensions: Vec<_> = self.authority.dimensions().collect();
+        let mut jobs = Vec::new();
+        for dimension in dimensions {
+            let Some(world) = self.authority.world_ref(dimension) else {
+                continue;
+            };
+            for &(cx, cz) in world.pending_chunk_generation() {
+                jobs.push(worldgen_worker::WorldgenJob {
+                    dimension,
+                    chunk_x: cx,
+                    chunk_z: cz,
+                    seed: world.seed,
+                    world_type: world.world_type,
+                    generate_structures: world.generate_structures,
+                    generation,
+                    lifetime,
+                });
+            }
+        }
+        for job in jobs {
+            let _ = self.worldgen_worker.schedule(job);
+        }
+    }
+
+    fn collect_worldgen_results(&mut self) {
+        let completed = self.worldgen_worker.poll_completed();
+        let mut columns = Vec::new();
+        for result in completed {
+            if !self.worldgen_worker.is_current(&result) {
+                self.metrics.worldgen_stale_discarded =
+                    self.metrics.worldgen_stale_discarded.saturating_add(1);
+                continue;
+            }
+            columns.push(crate::authority::PendingWorldgenColumn {
+                dimension: result.dimension,
+                chunk_x: result.chunk_x,
+                chunk_z: result.chunk_z,
+                chunk: result.chunk,
+            });
+        }
+        if !columns.is_empty() {
+            self.authority.queue_worldgen_results(columns);
+        }
+    }
+
+    fn drain_save_acks(&mut self) {
+        let Some(worker) = self.save_worker.as_ref() else {
+            return;
+        };
+        let acks = worker.poll_acks();
+        self.apply_save_acks(acks);
+    }
+
+    fn apply_save_acks(&mut self, acks: Vec<save_worker::SaveAck>) {
+        let mut evict_failures = 0u64;
+        let mut autosave_failures = 0u64;
+        for ack in acks {
+            match ack {
+                save_worker::SaveAck::Chunks {
+                    dimension,
+                    revisions,
+                    ok,
+                    ..
+                } => {
+                    self.authority.with_world(dimension, |world| {
+                        for (cx, cz, revision) in revisions {
+                            if ok {
+                                world
+                                    .chunks
+                                    .dirty_chunks
+                                    .acknowledge_persisted(cx, cz, revision);
+                            } else {
+                                world
+                                    .chunks
+                                    .dirty_chunks
+                                    .acknowledge_failed(cx, cz, revision);
+                                evict_failures = evict_failures.saturating_add(1);
+                            }
+                        }
+                    });
+                }
+                save_worker::SaveAck::Entities {
+                    dimension,
+                    epoch,
+                    ok,
+                    ..
+                } => {
+                    if ok {
+                        self.authority.with_world(dimension, |world| {
+                            if world.entities.checksum_epoch() == epoch {
+                                world.acknowledge_entities_persisted();
+                            }
+                        });
+                    } else {
+                        autosave_failures = autosave_failures.saturating_add(1);
+                    }
+                }
+                save_worker::SaveAck::PlayerFile {
+                    player_id, ok, ..
+                } => {
+                    if ok {
+                        if let Some(session) = self.players.get_mut(&player_id) {
+                            session.player_dirty = false;
+                        }
+                    } else {
+                        autosave_failures = autosave_failures.saturating_add(1);
+                    }
+                }
+                save_worker::SaveAck::SidecarGroup { ok, .. } => {
+                    if !ok {
+                        autosave_failures = autosave_failures.saturating_add(1);
+                    }
+                }
+                save_worker::SaveAck::Barrier { .. } => {}
+            }
+        }
+        self.metrics.evict_flush_failures = self
+            .metrics
+            .evict_flush_failures
+            .saturating_add(evict_failures);
+        self.metrics.autosave_failures = self
+            .metrics
+            .autosave_failures
+            .saturating_add(autosave_failures);
+    }
+
+    fn enqueue_save_payload(&mut self, payload: save_worker::SavePayload) -> bool {
+        let Some(worker) = self.save_worker.as_ref() else {
+            return false;
+        };
+        match worker.try_enqueue(payload) {
+            Ok(()) => true,
+            Err(std::sync::mpsc::TrySendError::Full(_))
+            | Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                self.metrics.save_queue_full = self.metrics.save_queue_full.saturating_add(1);
+                false
+            }
+        }
     }
 
     pub fn valid_coordinate(&self, dimension: Dimension, x: i32, y: i32, z: i32) -> bool {
@@ -1357,7 +1649,9 @@ impl ServerRuntime {
                 });
             });
             if let Some(error) = flush_error {
-                eprintln!("[ServerRuntime] evict flush failed in {dimension:?} {error}");
+                self.metrics.evict_flush_failures =
+                    self.metrics.evict_flush_failures.saturating_add(1);
+                let _ = error;
             }
         }
     }
@@ -3044,9 +3338,9 @@ mod tests {
         )
         .unwrap();
         runtime.authority.with_world(Dimension::Overworld, |world| {
-            world.ensure_chunk(0, 0);
-            world.ensure_chunk(8, 0);
-            world.ensure_chunk(-3, 2);
+            world.materialize_chunk(0, 0);
+            world.materialize_chunk(8, 0);
+            world.materialize_chunk(-3, 2);
         });
         runtime.tick().unwrap();
         let world = runtime.authority.world_ref(Dimension::Overworld).unwrap();
@@ -3072,8 +3366,8 @@ mod tests {
         properties.world_dir = temp_dir("dirty_only_autosave");
         let mut runtime = ServerRuntime::new(properties).unwrap();
         runtime.authority.with_world(Dimension::Overworld, |world| {
-            world.ensure_chunk(0, 0);
-            world.ensure_chunk(1, 0);
+            world.materialize_chunk(0, 0);
+            world.materialize_chunk(1, 0);
             world
                 .set_block(8, 80, 8, crate::world::BlockType::DiamondOre, 0)
                 .unwrap();

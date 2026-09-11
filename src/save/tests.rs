@@ -785,6 +785,10 @@ fn corrupt_existing_region_is_never_overwritten() {
     let corrupt_bytes = b"not a bincode region".to_vec();
     fs::write(&region_path, &corrupt_bytes).unwrap();
 
+    // Cold cache: write-generation stamp is gone, so the corrupt disk bytes
+    // are loaded and fail-closed without replacement.
+    drop(manager);
+    let mut manager = SaveManager::new(&world_dir);
     let second = Chunk::new(1, 0);
     let error = manager
         .save_chunk(1, 0, ChunkSaveData::from_chunk(&second).unwrap())
@@ -792,6 +796,37 @@ fn corrupt_existing_region_is_never_overwritten() {
     assert!(matches!(error, SaveError::RegionCorruption { .. }));
     assert_eq!(fs::read(&region_path).unwrap(), corrupt_bytes);
 
+    fs::remove_dir_all(world_dir).unwrap();
+}
+
+#[test]
+fn stamped_region_cache_recovers_over_corrupt_disk_without_metadata() {
+    let world_dir = unique_test_dir("region_stamp_recover");
+    let mut manager = SaveManager::new(&world_dir);
+    manager
+        .save_chunk_in(
+            Dimension::Overworld,
+            0,
+            0,
+            same_region_chunk_data(0, 0, BlockType::Brick),
+        )
+        .unwrap();
+
+    let region_path = world_dir.join("regions").join("r.0.0.bin");
+    fs::write(&region_path, b"not a bincode region").unwrap();
+
+    // Warm stamp: skip fs::metadata and trust the in-memory region so a
+    // sibling column can still flush (Plan 12 write-generation stamp).
+    manager
+        .save_chunk_in(
+            Dimension::Overworld,
+            1,
+            0,
+            same_region_chunk_data(1, 0, BlockType::Cobblestone),
+        )
+        .unwrap();
+    assert_saved_marker(&mut manager, 0, 0, BlockType::Brick);
+    assert_saved_marker(&mut manager, 1, 0, BlockType::Cobblestone);
     fs::remove_dir_all(world_dir).unwrap();
 }
 

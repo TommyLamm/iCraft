@@ -250,13 +250,18 @@ which `ServerWorld` applies; durable writes stay on `ServerRuntime`.
 
 `ServerRuntime::tick_with_output` (50 ms):
 
-1. Drain at most the bounded inbound budget.
-2. `AuthorityCore::tick` every loaded dimension (session domains, mining,
-   portals, then world time/redstone/hoppers/fluids/random ticks/furnaces/
-   spawning/entities; then deferred dispenser/dropper actions).
-3. Apply dimension transfers, route snapshots by interest, evict uninteresting
-   columns, close invalid containers, update metrics, autosave every 6,000
-   ticks (log errors; shutdown still `save_all`).
+1. Drain save-worker acks (clear dirty only after successful persist).
+2. Schedule pending async worldgen and collect completed Rayon results.
+3. Drain at most the bounded inbound budget.
+4. `AuthorityCore::tick` applies up to `MAX_INITIAL_CHUNK_PROJECTIONS_PER_TICK`
+   completed columns (session-id / nearest-first), then every loaded dimension
+   (session domains, mining, portals, then world time/redstone/hoppers/fluids/
+   random ticks/furnaces/spawning/entities; then deferred dispenser/dropper
+   actions).
+5. Apply dimension transfers, route snapshots by interest, evict uninteresting
+   columns, close invalid containers, update metrics, enqueue autosave every
+   6,000 ticks (failures increment metrics; shutdown / console `save-all`
+   still block on a save-worker barrier).
   `ServerWorld::checksum` is computed only by `AuthorityCore` after pending
   redstone dispense mutations are folded in; `ServerWorld::tick` leaves
   snapshot `checksum` at 0. The hash mixes a running XOR of block-revision
@@ -264,6 +269,12 @@ which `ServerWorld` applies; durable writes stay on `ServerRuntime`.
   fingerprint. Idle ticks skip the resident-map scan and, when there is no
   entity spawn / despawn / pose / `ai_phase` change, reuse the prior entity
   fingerprint instead of sorting and re-hashing the full table.
+
+Worldgen for interest projection is off the tick thread: `ensure_chunk` in
+`WorldgenMode::Async` only registers demand; Rayon workers generate; results
+carry `(dimension, generation, lifetime)` and are discarded when stale.
+Gameplay mutations that need a missing column (`set_block`, fluid use, spawn
+Y, spawn bootstrap) still call `materialize_chunk` synchronously.
 
 Desktop: `App -> State::update(dt) -> State::render()`. Drain events, run
 capped 20 Hz catch-up (listen-host keeps ticking in pause/death UI;
@@ -393,13 +404,19 @@ configured `world_dir` (default `world/`).
 Writes are atomic. Chunk restore is fail-closed: corrupt/empty/oversized/
 dimension-inconsistent streams error; the column is never generated or
 saved over (`ServerWorld::failed_restore_chunks`). `ServerRuntime` is the
-sole `SaveManager` owner and the sole writer of `mutation_revisions.bin`.
-Desktop `State` does not keep a second mutation index. Autosave and shutdown
-flush only `dirty_chunks` (plus eviction of unkept dirty columns), batched
-per region file so one region is rewritten once. `SaveManager` reuses
-`region_cache` on write when the on-disk length still matches the last
-observed snapshot; a truncated or corrupt region still fail-closes and
-leaves `.bin.bak` semantics unchanged. Disk chunk streams use zlib level 1
+sole `SaveManager` owner for loads and the sole writer of
+`mutation_revisions.bin` (via the save worker). Desktop `State` does not keep
+a second mutation index. Autosave and shutdown flush only `dirty_chunks`
+(plus eviction of unkept dirty columns), batched per region file so one
+region is rewritten once. Region write hits take the cache entry by move
+(`remove` → mutate → reinsert) and trust a write-generation stamp instead of
+re-statting with `fs::metadata`; a cold load of a truncated or corrupt region
+still fail-closes and leaves `.bin.bak` semantics unchanged. Tick enqueues
+`SavePayload`s (flattened chunk payloads, dirty entity dumps, sidecar groups);
+zlib/region bincode/atomic write run on the save thread; dirty bits clear only
+after ack. Sidecar batches share one `sync_all`. Players persist only when
+their per-session dirty bit is set; entities skip rewrite while their checksum
+epoch matches the last persisted watermark. Disk chunk streams use zlib level 1
 (`Compression::fast`); the wrapper is unchanged so older level-6 payloads
 still inflate. Historical save payloads still treat Y as `0..256` world Y
 and must not be reinterpreted as signed-Y. Live `ChunkData` projection

@@ -1151,6 +1151,9 @@ impl ServerRuntime {
                     if world.failed_restore_chunks().contains(&(cx, cz)) {
                         return None;
                     }
+                    if !world.chunk_is_resident(cx, cz) {
+                        return None;
+                    }
                     world.chunks.chunks.get(&(cx, cz)).and_then(|chunk| {
                         let data = ChunkSaveData::network_terrain_payload(chunk).ok()?;
                         let revision = world.chunk_revision(cx, cz);

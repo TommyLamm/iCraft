@@ -67,7 +67,7 @@
 | 09 | [v20 附帶項：`ContainerAction` 進 enum、剝每封包 `protocol_version`](09_v20_container_action_and_strip_packet_version.md) | P1 | -40 struct 欄位、-113 行 accessor、關 wire gap | 09 波 01（已單獨 v20 → **改走 v21**） | 已完成（v21） |
 | 10 | [單一 session 記錄、單一 response cache、單一 preflight](10_single_session_cache_preflight.md) | P1 | ~-400 行 sync／cache／gate；每請求少兩次 cache 掃 | 07、09 波 13 | 已完成 |
 | 11 | [刪 `active_dimension`／`world()`／`world_mut_active()`，dispatch 帶 `Dimension`](11_thread_dimension_drop_active_dimension.md) | P1 | tick 少 3–4 次 `Vec` 配置與 restore；`current_revision` 不再看錯維度 | 無 | 已完成 |
-| 12 | [tick 執行緒卸載：worldgen worker、非同步存檔、dirty 玩家／實體](12_offload_worldgen_and_save_from_tick.md) | P1 | 走路時 tick 少數十 ms；autosave 不再 50–500 ms 卡 | 無 | 未開始 |
+| 12 | [tick 執行緒卸載：worldgen worker、非同步存檔、dirty 玩家／實體](12_offload_worldgen_and_save_from_tick.md) | P1 | 走路時 tick 少數十 ms；autosave 不再 50–500 ms 卡 | 無 | 已完成 |
 | 13 | [世界 tick 索引：漏斗、紅石 generation、dispense、metadata、boss](13_world_tick_indexes_hopper_redstone_dispense.md) | P1 | 安靜世界 hopper／redstone tick 接近零；busy 紅石少兩次全表 sort | 09 波 08、09 | 未開始 |
 | 14 | [runtime 每 tick 快取：union／keep-set、entity id、`SessionContract` clone、metrics](14_runtime_per_tick_caches_and_clones.md) | P1 | 靜止玩家每 tick 少 ~8k BTree insert 與 O(resident) 掃 | 09 波 07 | 未開始 |
 | 15 | [embedded 零拷貝投影：`Arc<Chunk>`、突變只套一次](15_embedded_zero_copy_projection.md) | P1 | 單機每欄少 ~3×288 KiB 拷貝＋palette 重建＋全欄 lighting | 07 | 未開始 |
