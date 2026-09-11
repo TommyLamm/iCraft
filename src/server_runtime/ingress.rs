@@ -112,10 +112,7 @@ impl ServerRuntime {
                 self.update_interest_for(id, dimension, respawn_position);
                 Ok(())
             }
-            ServerToHost::CatchupAccepted { .. }
-            | ServerToHost::CatchupBackpressured { .. }
-            | ServerToHost::CatchupAck { .. }
-            | ServerToHost::Disconnected { .. } => Ok(()),
+            ServerToHost::Disconnected { .. } => Ok(()),
         }
     }
 

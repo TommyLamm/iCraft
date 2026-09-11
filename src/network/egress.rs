@@ -78,27 +78,7 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
             .get(&to)
             .map(|session| Arc::clone(&session.catchup_mailbox));
         if let Some(mailbox) = mailbox {
-            match mailbox.replace(packet).await {
-                Ok(()) => {
-                    let _ = server_to_host.send(ServerToHost::CatchupAccepted {
-                        id: to,
-                        dimension,
-                        cx,
-                        cz,
-                        revision,
-                    });
-                }
-                Err(mailbox_full_count) => {
-                    let _ = server_to_host.send(ServerToHost::CatchupBackpressured {
-                        id: to,
-                        dimension,
-                        cx,
-                        cz,
-                        revision,
-                        mailbox_full_count,
-                    });
-                }
-            }
+            let _ = mailbox.replace(packet).await;
         }
         return;
     }
@@ -294,27 +274,6 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
                 entity,
             },
             to,
-            true,
-        ),
-        HostToServer::SendBlockActionResult {
-            to,
-            x,
-            y,
-            z,
-            success,
-            consumed_item,
-            drops,
-        } => (
-            Packet::BlockActionResult {
-                protocol_version: PROTOCOL_VERSION,
-                x,
-                y,
-                z,
-                success,
-                consumed_item,
-                drops,
-            },
-            Some(to),
             true,
         ),
         HostToServer::EntitySpawn {

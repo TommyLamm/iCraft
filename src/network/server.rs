@@ -875,40 +875,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn leftover_inbound_packets_are_dropped_not_wrapped() {
+    async fn leftover_inbound_packets_close_the_connection() {
         let server = TestServer::start(0xCAFE_BABE, 1);
         let (mut client, id) = server.connect("legacy-adapter").await;
 
-        client
-            .send(&Packet::SleepRequest {
-                protocol_version: PROTOCOL_VERSION,
-                x: -3,
-                y: 70,
-                z: 11,
-            })
-            .await
-            .unwrap();
-        client
-            .send(&Packet::ContainerOpenRequest {
-                protocol_version: PROTOCOL_VERSION,
-                dimension: 1,
-                x: 12,
-                y: 65,
-                z: -8,
-            })
-            .await
-            .unwrap();
-        client
-            .send(&Packet::ContainerClickRequest {
-                protocol_version: PROTOCOL_VERSION,
-                dimension: 1,
-                revision: 17,
-                slot_index: 4,
-                is_left: true,
-                dragged: None,
-            })
-            .await
-            .unwrap();
         client
             .send(&Packet::ContainerClose {
                 protocol_version: PROTOCOL_VERSION,
@@ -919,33 +889,11 @@ mod tests {
             })
             .await
             .unwrap();
-        client
-            .send(&Packet::GameplayRequest {
-                protocol_version: PROTOCOL_VERSION,
-                request: GameplayRequest {
-                    request_id: 9,
-                    client_sequence: 1,
-                    session_id: 0,
-                    dimension: 0,
-                    client_revision: 0,
-                    operation: GameplayOperation::ItemUse { item: 1, count: 1 },
-                },
-            })
-            .await
-            .unwrap();
-        let forwarded = server
-            .next_event_matching(|event| matches!(event, ServerToHost::GameplayRequest { .. }))
+        let left = server
+            .next_event_matching(|event| matches!(event, ServerToHost::ClientLeft { .. }))
             .await;
-        assert!(matches!(
-            forwarded,
-            ServerToHost::GameplayRequest { id: event_id, request }
-                if event_id == id
-                    && request.request_id == 9
-                    && matches!(
-                        request.operation,
-                        GameplayOperation::ItemUse { item: 1, count: 1 }
-                    )
-        ));
+        assert!(matches!(left, ServerToHost::ClientLeft { id: left_id } if left_id == id));
+
         server.stop().await;
     }
 
@@ -976,7 +924,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inbound_block_change_is_not_wrapped_as_a_request() {
+    async fn inbound_block_change_closes_the_connection() {
         let server = TestServer::start(0xCAFE_BABE, 1);
         let (mut client, id) = server.connect("steve").await;
 
@@ -994,35 +942,11 @@ mod tests {
             })
             .await
             .unwrap();
-        client
-            .send(&Packet::GameplayRequest {
-                protocol_version: PROTOCOL_VERSION,
-                request: GameplayRequest {
-                    request_id: 4,
-                    client_sequence: 1,
-                    session_id: 0,
-                    dimension: 0,
-                    client_revision: 0,
-                    operation: GameplayOperation::ItemUse { item: 1, count: 1 },
-                },
-            })
-            .await
-            .unwrap();
 
-        let event = server
-            .next_event_matching(|event| matches!(event, ServerToHost::GameplayRequest { .. }))
+        let left = server
+            .next_event_matching(|event| matches!(event, ServerToHost::ClientLeft { .. }))
             .await;
-        assert!(matches!(
-            event,
-            ServerToHost::GameplayRequest { id: event_id, request }
-                if event_id == id
-                    && request.session_id == id
-                    && request.request_id == 4
-                    && matches!(
-                        request.operation,
-                        GameplayOperation::ItemUse { item: 1, count: 1 }
-                    )
-        ));
+        assert!(matches!(left, ServerToHost::ClientLeft { id: left_id } if left_id == id));
 
         server.stop().await;
     }
@@ -1750,10 +1674,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn relays_block_action_request_and_targeted_result() {
+    async fn relays_block_action_gameplay_request() {
         let server = TestServer::start(0xCAFE_BABE, 1);
         let (mut client_a, id_a) = server.connect("steve").await;
-        let (mut client_b, _id_b) = server.connect("alex").await;
+        let (_client_b, _id_b) = server.connect("alex").await;
 
         let held = crate::network::protocol::ItemWire::from_stack(
             &crate::inventory::ItemStack::new(crate::inventory::Item::StonePickaxe, 1),
@@ -1803,50 +1727,6 @@ mod tests {
                         }
                     )
         ));
-
-        // Host sends targeted result to client_a
-        let drop = crate::network::protocol::ItemWire::from_stack(
-            &crate::inventory::ItemStack::new(crate::inventory::Item::Cobblestone, 1),
-        );
-        server
-            .host_tx
-            .send(HostToServer::SendBlockActionResult {
-                to: id_a,
-                x: 10,
-                y: 64,
-                z: 20,
-                success: true,
-                consumed_item: false,
-                drops: vec![drop],
-            })
-            .await
-            .unwrap();
-
-        // client_a receives result
-        let res_a = recv_matching(&mut client_a, |p| {
-            matches!(p, Packet::BlockActionResult { .. })
-        })
-        .await;
-        assert!(matches!(
-            res_a,
-            Packet::BlockActionResult {
-                x: 10,
-                y: 64,
-                z: 20,
-                success: true,
-                ..
-            }
-        ));
-
-        // client_b should NOT receive targeted result (wait short time with recv timeout)
-        let res_b = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            recv_matching(&mut client_b, |p| {
-                matches!(p, Packet::BlockActionResult { .. })
-            }),
-        )
-        .await;
-        assert!(res_b.is_err());
 
         server.stop().await;
     }

@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::sync::{mpsc as std_mpsc, Arc};
+use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 
 use super::protocol::{
@@ -76,28 +76,6 @@ pub enum ServerToHost {
         id: PlayerId,
         message: String,
     },
-    CatchupAccepted {
-        id: PlayerId,
-        dimension: u8,
-        cx: i32,
-        cz: i32,
-        revision: u64,
-    },
-    CatchupBackpressured {
-        id: PlayerId,
-        dimension: u8,
-        cx: i32,
-        cz: i32,
-        revision: u64,
-        mailbox_full_count: u64,
-    },
-    CatchupAck {
-        id: PlayerId,
-        dimension: u8,
-        cx: i32,
-        cz: i32,
-        revision: u64,
-    },
     ClientRespawnRequest {
         id: PlayerId,
     },
@@ -124,15 +102,6 @@ pub enum HostToServer {
         y: i32,
         z: i32,
         entity: Option<crate::block_entity::BlockEntity>,
-    },
-    SendBlockActionResult {
-        to: PlayerId,
-        x: i32,
-        y: i32,
-        z: i32,
-        success: bool,
-        consumed_item: bool,
-        drops: Vec<ItemWire>,
     },
     SendChunk {
         dimension: u8,

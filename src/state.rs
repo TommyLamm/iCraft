@@ -72,12 +72,6 @@ const CHAT_INPUT_CAPACITY: usize = 256;
 
 const CREATIVE_FLIGHT_DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(300);
 const MELEE_REACH: f32 = 4.0;
-#[allow(dead_code)]
-const MAX_CATCHUP_SUBMITS_PER_FRAME: usize = 2;
-#[allow(dead_code)]
-const CATCHUP_ACK_TIMEOUT: Duration = Duration::from_secs(2);
-#[allow(dead_code)]
-const MAX_CATCHUP_RETRIES: u8 = 3;
 const NETWORK_MAX_EVENTS_PER_PASS: usize = 256;
 const NETWORK_MAX_BYTES_PER_PASS: usize = 1_048_576;
 const NETWORK_MAX_TIME_PER_PASS: Duration = Duration::from_millis(2);

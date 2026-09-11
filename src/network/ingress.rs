@@ -610,24 +610,6 @@ pub(crate) async fn run_client<S: HostEventSender>(
                             }
                         }
                     }
-                    Ok(Ok(Packet::ChunkAck {
-                        dimension,
-                        cx,
-                        cz,
-                        revision,
-                        ..
-                    })) => {
-                        if server_to_host.send(ServerToHost::CatchupAck {
-                            id,
-                            dimension,
-                            cx,
-                            cz,
-                            revision,
-                        }).is_err() {
-                            disconnect_reason = "host channel closed (CatchupAck)".into();
-                            break;
-                        }
-                    }
                     Ok(Ok(Packet::PlayerRespawnRequest { .. })) => {
                         if server_to_host.send(ServerToHost::ClientRespawnRequest { id }).is_err() {
                             disconnect_reason = "host channel closed (ClientRespawnRequest)".into();
@@ -647,12 +629,10 @@ pub(crate) async fn run_client<S: HostEventSender>(
                         disconnect_reason = format!("timeout: no packet received within {CLIENT_TIMEOUT:?}");
                         break;
                     }
-                    // Leftover inbound request packets (BlockChange-as-request,
-                    // BlockActionRequest, SleepRequest, ContainerOpenRequest,
-                    // ContainerClickRequest, ContainerClose) are dropped. Live
-                    // gameplay uses GameplayRequest. Server→client BlockChange
-                    // projection is egress, not this path.
-                    Ok(Ok(_)) => {}
+                    Ok(Ok(_)) => {
+                        disconnect_reason = "unexpected inbound packet".into();
+                        break;
+                    }
                 }
             }
             _ = &mut send_task => {

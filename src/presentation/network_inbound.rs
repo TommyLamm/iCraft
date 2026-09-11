@@ -56,14 +56,6 @@ pub(crate) enum NetworkInbound {
         id: crate::network::protocol::PlayerId,
         action: crate::network::protocol::Action,
     },
-    BlockActionResult {
-        x: i32,
-        y: i32,
-        z: i32,
-        success: bool,
-        consumed_item: bool,
-        drops: Vec<crate::network::protocol::ItemWire>,
-    },
     AuthoritativeBlockChange {
         dimension: u8,
         revision: u64,
@@ -229,9 +221,6 @@ impl NetworkInbound {
             } => blocks.len().saturating_add(block_states.len()),
             Self::PlayerEffect { effects, .. } => {
                 effects.len() * std::mem::size_of::<crate::network::protocol::PlayerEffectWire>()
-            }
-            Self::BlockActionResult { drops, .. } => {
-                drops.len() * std::mem::size_of::<crate::network::protocol::ItemWire>()
             }
             Self::Chat { sender, message } => sender.len().saturating_add(message.len()),
             Self::ContainerClose { .. } => 0,
@@ -535,21 +524,6 @@ impl NetworkHandle {
                             block,
                             state,
                             raw_fluid,
-                        },
-                        crate::network::client::ClientToGame::BlockActionResult {
-                            x,
-                            y,
-                            z,
-                            success,
-                            consumed_item,
-                            drops,
-                        } => NetworkInbound::BlockActionResult {
-                            x,
-                            y,
-                            z,
-                            success,
-                            consumed_item,
-                            drops,
                         },
                         crate::network::client::ClientToGame::BlockEntityDelta {
                             dimension,

@@ -15,7 +15,9 @@ use super::transport::{Connection, ConnectionWriter};
 
 /// Bounded network-client → game-thread queue. A malicious server cannot grow
 /// this without bound; sustained overflow disconnects the join client.
-pub const CLIENT_TO_GAME_QUEUE_CAPACITY: usize = 256;
+/// Sized to absorb one `ServerRuntime` presentation tick (`1024`) now that
+/// clients no longer ACK-pace `ChunkData`.
+pub const CLIENT_TO_GAME_QUEUE_CAPACITY: usize = 1024;
 const CLIENT_TO_GAME_OVERFLOW_LIMIT: u32 = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,14 +152,6 @@ pub enum ClientToGame {
         block: u32,
         state: u8,
         raw_fluid: u8,
-    },
-    BlockActionResult {
-        x: i32,
-        y: i32,
-        z: i32,
-        success: bool,
-        consumed_item: bool,
-        drops: Vec<crate::network::protocol::ItemWire>,
     },
     ChunkData {
         dimension: u8,
@@ -813,9 +807,6 @@ async fn run_client(
                             });
                         }
                     }
-                    Ok(Packet::BlockActionResult { x, y, z, success, consumed_item, drops, .. }) => {
-                        let _ = client_to_game.send(ClientToGame::BlockActionResult { x, y, z, success, consumed_item, drops });
-                    }
                     Ok(Packet::ContainerOpenResult { dimension, success, x, y, z, slots, revision, .. }) => {
                         let key = (dimension, x, y, z);
                         if !success {
@@ -909,22 +900,6 @@ async fn run_client(
                             block_entities,
                         ) {
                             let _ = client_to_game.send(event);
-                        }
-                        if writer
-                            .send(&Packet::ChunkAck {
-                                protocol_version: PROTOCOL_VERSION,
-                                dimension,
-                                cx,
-                                cz,
-                                revision,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            let _ = client_to_game.send(ClientToGame::Disconnected {
-                                reason: "connection lost".into(),
-                            });
-                            break;
                         }
                     }
                     Ok(Packet::EntitySpawn {
@@ -1680,63 +1655,12 @@ mod tests {
             ))
             .unwrap();
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        let mut accepted_a = false;
-        let mut backpressured_a = false;
-        let mut accepted_b = false;
-        while std::time::Instant::now() < deadline && !(accepted_a && backpressured_a && accepted_b)
-        {
-            match server_rx.recv_timeout(Duration::from_millis(250)) {
-                Ok(ServerToHost::CatchupAccepted {
-                    id,
-                    cx: 0,
-                    revision: 1,
-                    ..
-                }) if id == id_a => accepted_a = true,
-                Ok(ServerToHost::CatchupBackpressured {
-                    id,
-                    cx: 8,
-                    revision: 1,
-                    mailbox_full_count,
-                    ..
-                }) if id == id_a => {
-                    assert_eq!(mailbox_full_count, 1);
-                    backpressured_a = true;
-                }
-                Ok(ServerToHost::CatchupAccepted {
-                    id,
-                    cx: 0,
-                    revision: 1,
-                    ..
-                }) if id == id_b => accepted_b = true,
-                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(error) => panic!("server event channel failed: {error}"),
-            }
-        }
-        assert!(accepted_a && backpressured_a && accepted_b);
-
         let converged_a = receive_converged_chunk(&event_rx_a, &persisted);
         let converged_b = receive_converged_chunk(&event_rx_b, &persisted);
         let mut expected = source_chunk;
         expected.set_block_local(2, 70, 2, crate::world::BlockType::Dirt);
         assert_eq!(checksum(&converged_a), checksum(&expected));
         assert_eq!(checksum(&converged_b), checksum(&expected));
-
-        let mut ack_a = false;
-        let mut ack_b = false;
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        while std::time::Instant::now() < deadline && !(ack_a && ack_b) {
-            match server_rx.recv_timeout(Duration::from_millis(250)) {
-                Ok(ServerToHost::CatchupAck { id, cx: 0, .. }) if id == id_a => ack_a = true,
-                Ok(ServerToHost::CatchupAck { id, cx: 0, .. }) if id == id_b => ack_b = true,
-                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(error) => panic!("server event channel failed: {error}"),
-            }
-        }
-        assert!(
-            ack_a && ack_b,
-            "both TCP clients must ACK accepted snapshots"
-        );
 
         host_tx
             .try_send(snapshot(id_a, 8, vec![8], vec![0]))
@@ -1750,20 +1674,6 @@ mod tests {
                 ..
             } if blocks == vec![8]
         ));
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        let mut retry_accepted = false;
-        let mut retry_acked = false;
-        while std::time::Instant::now() < deadline && !(retry_accepted && retry_acked) {
-            match server_rx.recv_timeout(Duration::from_millis(250)) {
-                Ok(ServerToHost::CatchupAccepted { id, cx: 8, .. }) if id == id_a => {
-                    retry_accepted = true
-                }
-                Ok(ServerToHost::CatchupAck { id, cx: 8, .. }) if id == id_a => retry_acked = true,
-                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(error) => panic!("server event channel failed: {error}"),
-            }
-        }
-        assert!(retry_accepted && retry_acked);
 
         game_tx_a.send(GameToClient::Disconnect).unwrap();
         game_tx_b.send(GameToClient::Disconnect).unwrap();
@@ -1864,21 +1774,6 @@ mod tests {
             wait_for_event(&event_rx),
             ClientToGame::BlockChange { revision: 2, .. }
         ));
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        let mut accepted = false;
-        let mut acked = false;
-        while std::time::Instant::now() < deadline && !(accepted && acked) {
-            match server_rx.recv_timeout(Duration::from_millis(250)) {
-                Ok(ServerToHost::CatchupAccepted { id, cx: 0, .. }) if id == player_id => {
-                    accepted = true
-                }
-                Ok(ServerToHost::CatchupAck { id, cx: 0, .. }) if id == player_id => acked = true,
-                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(error) => panic!("server event channel failed: {error}"),
-            }
-        }
-        assert!(accepted && acked);
 
         game_tx.send(GameToClient::Disconnect).unwrap();
         client.join().unwrap();

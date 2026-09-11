@@ -447,7 +447,7 @@ fn run_tcp_container_vector(label: &str, listen: bool) {
     assert!(!clients[1].events().iter().any(|event| {
         matches!(
             event,
-            ClientToGame::GameplayResponse { .. } | ClientToGame::BlockActionResult { .. }
+            ClientToGame::GameplayResponse { .. }
         )
     }));
     assert!(!clients[1].events().iter().any(|event| {

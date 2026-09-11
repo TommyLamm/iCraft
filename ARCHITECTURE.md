@@ -238,9 +238,11 @@ Join `ChunkData` that omits light streams zeros them then
 
 ## Network
 
-Protocol v19: bincode over TCP, 4-byte big-endian length, 2 MiB cap.
+Protocol v20: bincode over TCP, 4-byte big-endian length, 2 MiB cap.
 `Packet::encode_frame` is the length-prefix helper. Older versions fail
 handshake. Malformed pre-auth frames close that connection only.
+Unknown or wrong-direction post-auth packets close that connection; there
+is no decode-then-drop leftover path.
 
 Player identity is `normalize_player_identity`: lowercase ASCII
 `[a-z0-9_-]`, 1–16 bytes, no Windows reserved stems. `online-mode=true`
@@ -251,13 +253,12 @@ operator.
 revision, and a typed operation. The bounded response cache makes retries
 idempotent. Live egress for sleep / container click / close is a
 `GameplayRequest`. `Container` wire values are Open=`0` and Close=`2`;
-leftover Click=`1` fails bounds validation. Leftover inbound request packets (`BlockChange` as a
-client request, `BlockActionRequest`, `SleepRequest`,
-`ContainerOpenRequest`, `ContainerClickRequest`, inbound `ContainerClose`)
-are decoded then dropped. Live desktop send uses pose / chat / disconnect /
-`GameplayRequest` / respawn. Server→client `BlockChange` projection is
-unchanged. Deleting `GameplayOperation::BlockUse` shifts later
-`GameplayOperation` bincode discriminants; handshake stays protocol v19.
+leftover Click=`1` fails bounds validation. Live desktop send uses pose /
+chat / disconnect / `GameplayRequest` / respawn. Server→client `BlockChange`
+projection and server→client `ContainerClose` remain. Clients do not ACK
+chunks; the join-client inbound queue is 1024 events so one presentation
+tick can enqueue without ACK pacing. Deleting leftover inbound `Packet`
+variants shifts later discriminants; handshake is protocol v20.
 
 `NetworkServer` / `NetworkClient` run Tokio on a background thread with
 bounded/metered channels. Reliable gameplay/lifecycle output is never

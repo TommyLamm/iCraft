@@ -10,10 +10,10 @@ use std::marker::PhantomData;
 
 pub type PlayerId = u64;
 
-/// Protocol v19 adds authoritative progression travel (portal activation,
-/// dimension transfer over TCP, dragon completion, End City loot/reconnect).
-/// Older clients are rejected during the existing handshake.
-pub const PROTOCOL_VERSION: u32 = 19;
+/// Protocol v20 removes leftover inbound request packets and the dead
+/// ChunkAck / BlockActionResult variants. Older clients are rejected
+/// during handshake.
+pub const PROTOCOL_VERSION: u32 = 20;
 
 /// Transport frame cap and decode budget. `ConnectionReader` rejects a
 /// length header above this before allocating a body; `Packet::decode`
@@ -1261,13 +1261,6 @@ pub enum Packet {
         z: i32,
         entity: Option<crate::block_entity::BlockEntity>,
     },
-    ChunkAck {
-        protocol_version: u32,
-        dimension: u8,
-        cx: i32,
-        cz: i32,
-        revision: u64,
-    },
     EntitySpawn {
         protocol_version: u32,
         dimension: u8,
@@ -1332,32 +1325,6 @@ pub enum Packet {
     Keepalive {
         protocol_version: u32,
     },
-    BlockActionRequest {
-        protocol_version: u32,
-        action: Action,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-        held_item: Option<ItemWire>,
-    },
-    BlockActionResult {
-        protocol_version: u32,
-        x: i32,
-        y: i32,
-        z: i32,
-        success: bool,
-        consumed_item: bool,
-        #[serde(deserialize_with = "deserialize_bounded_vec")]
-        drops: Vec<ItemWire>,
-    },
-    ContainerOpenRequest {
-        protocol_version: u32,
-        dimension: u8,
-        x: i32,
-        y: i32,
-        z: i32,
-    },
     PlayerRespawnRequest {
         protocol_version: u32,
     },
@@ -1365,12 +1332,6 @@ pub enum Packet {
         protocol_version: u32,
         position: [f32; 3],
         dimension: u8,
-    },
-    SleepRequest {
-        protocol_version: u32,
-        x: i32,
-        y: i32,
-        z: i32,
     },
     ContainerOpenResult {
         protocol_version: u32,
@@ -1382,14 +1343,6 @@ pub enum Packet {
         #[serde(deserialize_with = "deserialize_bounded_vec")]
         slots: Vec<Option<ItemWire>>,
         revision: u64,
-    },
-    ContainerClickRequest {
-        protocol_version: u32,
-        dimension: u8,
-        revision: u64,
-        slot_index: u16,
-        is_left: bool,
-        dragged: Option<ItemWire>,
     },
     ContainerClickResult {
         protocol_version: u32,
@@ -1490,9 +1443,6 @@ impl Packet {
             | Packet::BlockEntityDelta {
                 protocol_version, ..
             }
-            | Packet::ChunkAck {
-                protocol_version, ..
-            }
             | Packet::EntitySpawn {
                 protocol_version, ..
             }
@@ -1521,17 +1471,8 @@ impl Packet {
                 protocol_version, ..
             }
             | Packet::Keepalive { protocol_version }
-            | Packet::BlockActionRequest {
-                protocol_version, ..
-            }
-            | Packet::BlockActionResult {
-                protocol_version, ..
-            }
             | Packet::PlayerRespawnRequest { protocol_version }
             | Packet::PlayerRespawnResult {
-                protocol_version, ..
-            }
-            | Packet::SleepRequest {
                 protocol_version, ..
             }
             | Packet::SleepStateSync {
@@ -1550,13 +1491,7 @@ impl Packet {
             | Packet::ServerListPingResponse {
                 protocol_version, ..
             } => *protocol_version,
-            Packet::ContainerOpenRequest {
-                protocol_version, ..
-            }
-            | Packet::ContainerOpenResult {
-                protocol_version, ..
-            }
-            | Packet::ContainerClickRequest {
+            Packet::ContainerOpenResult {
                 protocol_version, ..
             }
             | Packet::ContainerClickResult {
@@ -1611,6 +1546,11 @@ mod tests {
 
     fn v() -> u32 {
         PROTOCOL_VERSION
+    }
+
+    #[test]
+    fn current_protocol_version_is_20() {
+        assert_eq!(PROTOCOL_VERSION, 20);
     }
 
     #[test]
@@ -1862,38 +1802,6 @@ mod tests {
             order_hole.validate_rich_bounds(false),
             Err(RejectReason::Malformed)
         );
-    }
-
-    #[test]
-    fn block_action_request_roundtrip() {
-        let held = ItemWire::from_stack(&ItemStack::new(Item::StonePickaxe, 1));
-        let p = Packet::BlockActionRequest {
-            protocol_version: v(),
-            action: Action::Break,
-            x: 10,
-            y: 64,
-            z: -5,
-            block: Item::Air as u32,
-            held_item: Some(held),
-        };
-        let decoded = Packet::decode(&p.encode()).unwrap();
-        assert_eq!(p, decoded);
-    }
-
-    #[test]
-    fn block_action_result_roundtrip() {
-        let drop = ItemWire::from_stack(&ItemStack::new(Item::Cobblestone, 1));
-        let p = Packet::BlockActionResult {
-            protocol_version: v(),
-            x: 10,
-            y: 64,
-            z: -5,
-            success: true,
-            consumed_item: false,
-            drops: vec![drop],
-        };
-        let decoded = Packet::decode(&p.encode()).unwrap();
-        assert_eq!(p, decoded);
     }
 
     #[test]
@@ -2331,15 +2239,6 @@ mod tests {
         };
         let decoded_delta = Packet::decode(&delta.encode()).unwrap();
         assert_eq!(delta, decoded_delta);
-
-        let ack = Packet::ChunkAck {
-            protocol_version: v(),
-            dimension: 0,
-            cx: 2,
-            cz: -3,
-            revision: 7,
-        };
-        assert_eq!(ack, Packet::decode(&ack.encode()).unwrap());
     }
 
     #[test]
@@ -2440,16 +2339,6 @@ mod tests {
             entity: Some(crate::block_entity::BlockEntity::Hopper(hopper)),
         };
         assert_eq!(delta, Packet::decode(&delta.encode()).unwrap());
-
-        let click = Packet::ContainerClickRequest {
-            protocol_version: v(),
-            dimension: 1,
-            revision: 99,
-            slot_index: 0,
-            is_left: true,
-            dragged: Some(ItemWire::from_stack(&ItemStack::new(Item::Diamond, 1))),
-        };
-        assert_eq!(click, Packet::decode(&click.encode()).unwrap());
     }
 
     fn rich_source(index: u8, item: Item, stack_count: u16, debit: u16) -> SlotRefWire {

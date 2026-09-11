@@ -31,14 +31,14 @@ Catch-up 假管線：
 
 ## 精確 acceptance
 
-- [ ] `PROTOCOL_VERSION == 20`；handshake 拒絕 v19。
-- [ ] 上列 leftover inbound 變體與 `BlockActionResult` 從 `Packet`／`HostToServer`／`ClientToGame`／`NetworkInbound` 消失。
-- [ ] Ingress 不再有「legacy drop」catch-all；未知／非該方向的 decode 失敗即斷線。
-- [ ] **保留** server→client `BlockChange` 投影與 server→client `ContainerClose`。
-- [ ] 刪 `ChunkAck` 與三個 `Catchup*` 通道；client 不再 ack chunk；`ServerRuntime` 不再 ignore 這些事件。
-- [ ] 刪 `state.rs` 三個 catch-up 死常數。
-- [ ] `leftover_inbound_packets_are_dropped_not_wrapped` 與 round-trip 測試改寫或刪除；對抗性手組 frame 測試仍手組。
-- [ ] `ARCHITECTURE.md` 改寫 v20：不再描述 decode-then-drop leftover。
+- [x] `PROTOCOL_VERSION == 20`；handshake 拒絕 v19。
+- [x] 上列 leftover inbound 變體與 `BlockActionResult` 從 `Packet`／`HostToServer`／`ClientToGame`／`NetworkInbound` 消失。
+- [x] Ingress 不再有「legacy drop」catch-all；未知／非該方向的 decode 失敗即斷線。
+- [x] **保留** server→client `BlockChange` 投影與 server→client `ContainerClose`。
+- [x] 刪 `ChunkAck` 與三個 `Catchup*` 通道；client 不再 ack chunk；`ServerRuntime` 不再 ignore 這些事件。
+- [x] 刪 `state.rs` 三個 catch-up 死常數。
+- [x] `leftover_inbound_packets_are_dropped_not_wrapped` 與 round-trip 測試改寫或刪除；對抗性手組 frame 測試仍手組。
+- [x] `ARCHITECTURE.md` 改寫 v20：不再描述 decode-then-drop leftover。
 
 ## 預計檔案與測試
 
@@ -61,3 +61,17 @@ Catch-up 假管線：
 - 刪 live `ContainerOpenResult`／`ContainerClickResult`／`ContainerSlotUpdate`。
 - 把 `HostToServer` 整層改成直接 enqueue `Packet`。
 - 簡化 `Packet::protocol_version()` 的 exhaustive match（可順便用 helper，但不是目標）。
+
+## 實作與證據
+
+Handshake is protocol v20. Leftover inbound variants (`BlockActionRequest`, `SleepRequest`, `ContainerOpenRequest`, `ContainerClickRequest`, `ChunkAck`) and the dead `BlockActionResult` / `SendBlockActionResult` / `Catchup*` channels are gone. Server→client `BlockChange` and `ContainerClose` remain. Ingress closes on unknown or wrong-direction packets instead of decode-then-drop. Clients no longer ACK chunks; `CLIENT_TO_GAME_QUEUE_CAPACITY` is 1024 so one presentation tick can enqueue without ACK pacing. `state.rs` catch-up dead constants are deleted. `Container { action: 1 }` wire gap, `Action::Use`, and live container open/click/slot projection are unchanged.
+
+Tests:
+
+- `cargo test --lib network::` — 99 passed (`current_protocol_version_is_20`, `rejects_old_protocol_during_handshake`, `leftover_inbound_packets_close_the_connection`, `inbound_block_change_closes_the_connection`, `container_close_roundtrip_keeps_v16_shape`, leftover request round-trips deleted).
+- `tests/review_hardening_ingress.rs` — 2 passed.
+- `tests/review_hardening_adversarial_frames.rs` — 2 passed (hand-built frames unchanged).
+- `tests/plan34_container_break_inventory_conservation.rs` — 4 passed (match arm no longer names `BlockActionResult`).
+- `tests/plan30_real_transport_acceptance.rs` — embedded case passed. TCP `plan30_real_tcp_gameplay_vector_listen_and_dedicated` fishing-hook assertion also fails on `tommy-dev` HEAD protocol v19 (same panic at line 597); not a v20 regression.
+
+Remaining: presentation `spawn_dropped_item` / `damage_selected_tool` / `trigger_advancement` are now unused after deleting the dead `BlockActionResult` join arm (Wave 09 Plan 10 / 03). Do not start Plan 02.

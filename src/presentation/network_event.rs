@@ -202,37 +202,6 @@ impl State {
                     }
                 }
             }
-            NetworkInbound::BlockActionResult {
-                x,
-                y,
-                z,
-                success,
-                consumed_item,
-                drops,
-            } => {
-                if success {
-                    if consumed_item {
-                        self.inventory
-                            .use_selected_item(self.game_mode == GameMode::Creative);
-                    }
-                    for drop_wire in drops {
-                        if let Some(stack) = drop_wire.to_stack() {
-                            if let Some(leftover) = self.inventory.add_stack(stack) {
-                                let sound_pos =
-                                    glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
-                                self.spawn_dropped_item(leftover.item, sound_pos);
-                            }
-                        }
-                    }
-                    let mined_block = self.chunk_manager.get_block(x, y, z);
-                    self.trigger_advancement(crate::advancements::AdvancementTrigger::MineBlock(
-                        mined_block,
-                    ));
-                    self.damage_selected_tool(
-                        (x as u32) ^ (y as u32).rotate_left(11) ^ (z as u32).rotate_left(22),
-                    );
-                }
-            }
             NetworkInbound::AuthoritativeBlockChange {
                 dimension,
                 revision,
