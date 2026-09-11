@@ -29,7 +29,7 @@ impl State {
                         Inventory::new()
                     }
                 };
-                self.weather = crate::weather::WeatherSystem::new(self.world_seed);
+                self.weather = crate::weather::WeatherPresentation::new(self.world_seed);
                 self.chunk_manager.chunks.clear();
                 self.teardown_terrain_runtime("network connect/reset");
                 self.pending_chunk_payloads.clear();
@@ -335,13 +335,10 @@ impl State {
                 if self.presentation_topology().is_join_client() {
                     self.world_time.ticks = ticks;
                     self.world_time.tick_accumulator = 0.0;
-                    if let Some(current) = crate::weather::Weather::from_wire(weather) {
-                        self.weather
-                            .apply_snapshot(crate::weather::WeatherSnapshot {
-                                current,
-                                remaining_ticks: weather_remaining_ticks,
-                            });
+                    if !self.weather.apply_wire(weather) {
+                        // Ignore malformed weather bytes; keep last good phase.
                     }
+                    let _ = weather_remaining_ticks;
                 }
             }
             NetworkInbound::WorldRulesSync { rules } => {

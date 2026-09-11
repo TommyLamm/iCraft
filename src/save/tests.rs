@@ -1333,7 +1333,7 @@ fn test_plan04_save_roundtrip_and_migration() {
     player_state.spawn_dimension = Some(crate::dimension::Dimension::Overworld);
 
     let inv = crate::inventory::Inventory::new();
-    let adv = crate::advancements::AdvancementProgressData::default();
+    let adv = crate::save::AdvancementProgressData::default();
     let player_data = PlayerData::from_state(
         glam::Vec3::ZERO,
         glam::Vec3::ZERO,

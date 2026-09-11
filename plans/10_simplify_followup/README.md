@@ -61,7 +61,7 @@
 | 03 | [刪 `State` leftover 本地突變與 join 端本地模擬](03_state_leftover_mutation_and_join_local_sim.md) | P0 | ~-450 行；每 tick 少一次仙人掌 AABB；join 不再 split-brain | 09 波 03 | 已完成 |
 | 04 | [權威／世界／玩法死 API 掃除](04_dead_api_authority_world_gameplay.md) | P0 | ~-900 行；修 `/sleep` 一次性閂鎖 bug | 09 波 02、14 | 已完成 |
 | 05 | [渲染／UI／存檔／資源死 API 與手寫 ZIP](05_dead_api_render_save_resources_zip.md) | P0 | ~-800 行 + `unicode-segmentation` | 無 | 已完成 |
-| 06 | [lib 圍籬：桌面模組移出、weather／advancements 收桌面](06_lib_fence_desktop_only_modules.md) | P0 | `icraft-server` 少編 ~3,000 行 UI／lang／wgpu layout | 無 | 未開始 |
+| 06 | [lib 圍籬：桌面模組移出、weather／advancements 收桌面](06_lib_fence_desktop_only_modules.md) | P0 | `icraft-server` 少編 ~3,000 行 UI／lang／wgpu layout | 無 | 已完成 |
 | 07 | [一種投影事件：`HostToServer`＋`RuntimePresentationEvent` → `Packet`](07_one_projection_event_type.md) | P1 | ~-700–900 行鏡像 enum 與雙 closure | 09 波 01 | 未開始 |
 | 08 | [`ClientToGame` 併入 `NetworkInbound`](08_client_to_game_into_network_inbound.md) | P1 | ~-450–800 行 1:1 map | 09 波 01 | 未開始 |
 | 09 | [v20 附帶項：`ContainerAction` 進 enum、剝每封包 `protocol_version`](09_v20_container_action_and_strip_packet_version.md) | P1 | -40 struct 欄位、-113 行 accessor、關 wire gap | **必須與 09 波 01 同 PR** | 未開始 |

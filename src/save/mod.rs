@@ -15,11 +15,11 @@ use std::path::{Path, PathBuf};
 
 pub use crate::inventory::{CreativeDragOrigin, GameMode};
 pub use format::{
-    load_world_creation_options, ChunkSaveData, DedicatedPlayerFile, EntitySaveData, IdentityError,
-    InventoryData, ItemStackData, LevelData, MutationRevisionIndexCapacityError,
-    NetworkTerrainPayload, PlayerData, SaveError, SaveResult, CHUNK_SAVE_DATA_VERSION,
-    DEDICATED_PLAYER_SAVE_VERSION, PLAYER_IDENTITY_MAX_LEN, PLAYER_SAVE_MAGIC, PLAYER_SAVE_VERSION,
-    WORLD_META_FILE,
+    load_world_creation_options, AdvancementProgressData, ChunkSaveData, DedicatedPlayerFile,
+    EntitySaveData, IdentityError, InventoryData, ItemStackData, LevelData,
+    MutationRevisionIndexCapacityError, NetworkTerrainPayload, PlayerData, SaveError, SaveResult,
+    CHUNK_SAVE_DATA_VERSION, DEDICATED_PLAYER_SAVE_VERSION, PLAYER_IDENTITY_MAX_LEN,
+    PLAYER_SAVE_MAGIC, PLAYER_SAVE_VERSION, WORLD_META_FILE,
 };
 pub use index::{
     default_mutation_revision_index_capacity, DirtyChunkSet, MutationRevisionIndex, SaveState,

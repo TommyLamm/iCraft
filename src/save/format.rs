@@ -3,11 +3,20 @@ use crate::inventory::{CreativeDragOrigin, GameMode, Inventory, Item, ItemStack}
 use crate::network::protocol::PlayerEffectWire;
 use crate::world::{BlockType, Chunk};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use super::region::{compress_bytes, decompress_bytes_limited};
+
+/// Persisted advancement unlock set. Lives in save so `icraft-server` can load
+/// player files without compiling the desktop advancement tree UI.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct AdvancementProgressData {
+    pub completed_ids: HashSet<String>,
+    pub criteria_progress: HashMap<String, u32>,
+}
 
 pub const PLAYER_SAVE_MAGIC: &[u8; 8] = b"ICRPLR01";
 pub const PLAYER_SAVE_VERSION: u16 = 1;
@@ -637,7 +646,7 @@ pub struct PlayerData {
     pub is_dead: bool,
     pub inventory: InventoryData,
     #[serde(default)]
-    pub advancements: crate::advancements::AdvancementProgressData,
+    pub advancements: AdvancementProgressData,
     #[serde(default)]
     pub spawn_point: Option<[i32; 3]>,
     #[serde(default)]
@@ -659,7 +668,7 @@ impl PlayerData {
         state: &crate::player::PlayerState,
         game_mode: GameMode,
         inventory: &Inventory,
-        advancements: crate::advancements::AdvancementProgressData,
+        advancements: AdvancementProgressData,
     ) -> Self {
         Self {
             position: [position.x, position.y, position.z],
@@ -1449,7 +1458,7 @@ pub(crate) struct PreviousPlayerData {
     pub experience_level: u32,
     pub game_mode: GameMode,
     pub inventory: PreviousInventoryData,
-    pub advancements: crate::advancements::AdvancementProgressData,
+    pub advancements: AdvancementProgressData,
 }
 
 impl From<PreviousInventoryData> for InventoryData {
@@ -1575,7 +1584,7 @@ impl From<LegacyPlayerData> for PlayerData {
             game_mode: old.game_mode,
             is_dead: false,
             inventory: old.inventory.into(),
-            advancements: crate::advancements::AdvancementProgressData::default(),
+            advancements: AdvancementProgressData::default(),
             spawn_point: None,
             spawn_dimension: None,
             unlocked_recipes: Default::default(),

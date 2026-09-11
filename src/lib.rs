@@ -55,8 +55,11 @@ pub mod world;
 
 // Desktop-shared. `pub` so `src/main.rs` can `pub use icraft::…` without
 // compiling these files a second time into the binary crate.
-pub mod accessibility;
-pub mod advancements;
+//
+// Wave 10 Plan 06: `accessibility`, `localization`, `advancements`, and
+// `weather` are desktop `mod`s in `main.rs` (not listed here). Culling
+// visibility / LOS worker stay out of this library — see `main.rs`'s
+// `culling` facade. Save keeps `AdvancementProgressData` only.
 pub mod block_model;
 pub mod boss;
 pub mod chunk_render;
@@ -65,7 +68,6 @@ pub mod commands;
 pub mod culling;
 pub mod interaction;
 pub mod lighting;
-pub mod localization;
 pub mod navigation;
 pub mod perf;
 pub mod physics;
@@ -73,7 +75,6 @@ pub mod resources;
 #[cfg(test)]
 pub mod vehicle;
 pub mod village;
-pub mod weather;
 
 // Shared simulation used by authority / ServerWorld. Not a dedicated-server
 // or integration-test import; desktop files do not `use crate::` these.

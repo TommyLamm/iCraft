@@ -1,8 +1,9 @@
-use crate::world::Biome;
-
-pub const TICKS_PER_DAY: f32 = 24_000.0;
-const MIN_WEATHER_TICKS: f32 = TICKS_PER_DAY * 0.5;
-const MAX_WEATHER_TICKS: f32 = TICKS_PER_DAY;
+//! Presentation weather driven by `TimeSync.weather` (wire u8).
+//!
+//! There is no second climate / RNG authority on the GPU thread. Live hosts
+//! currently always send Clear (`0`); particles and HUD react to that enum only.
+//! `GameRules.do_weather_cycle` remains a saved/synced field for a future
+//! authority weather owner.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Weather {
@@ -30,12 +31,6 @@ impl Weather {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct WeatherSnapshot {
-    pub current: Weather,
-    pub remaining_ticks: f32,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Precipitation {
     None,
@@ -43,135 +38,42 @@ pub enum Precipitation {
     Snow,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct WeatherUpdate {
-    pub changed: bool,
-    pub lightning_due: bool,
-}
-
-/// Pure weather timing and deterministic random state. Rendering, audio, and
-/// world mutations remain owned by `State`.
-pub struct WeatherSystem {
+/// GPU-thread weather presentation. Phase comes only from TimeSync / connect reset.
+pub struct WeatherPresentation {
     pub current: Weather,
-    remaining_ticks: f32,
-    lightning_timer: f32,
     flash_timer: f32,
     precipitation_accumulator: f32,
-    snow_accumulation_timer: f32,
-    authority_rng: u32,
     presentation_rng: u32,
-    pub climate: crate::worldgen::climate::ClimateSystem,
 }
 
-impl WeatherSystem {
+impl WeatherPresentation {
     pub fn new(seed: u32) -> Self {
-        let mut system = Self {
+        Self {
             current: Weather::Clear,
-            remaining_ticks: 0.0,
-            lightning_timer: f32::INFINITY,
             flash_timer: 0.0,
             precipitation_accumulator: 0.0,
-            snow_accumulation_timer: 0.0,
-            authority_rng: seed ^ 0xA5A5_1F3D,
             presentation_rng: seed ^ 0x5A5A_E1C2,
-            climate: crate::worldgen::climate::ClimateSystem::new(seed),
-        };
-        system.remaining_ticks = system.random_duration_ticks();
-        system
-    }
-
-    pub fn clear_weather(&mut self) {
-        self.current = Weather::Clear;
-        self.remaining_ticks = self.random_duration_ticks();
-        self.lightning_timer = f32::INFINITY;
-    }
-
-    /// Applies an authoritative command-style weather change. A zero
-    /// duration uses the normal deterministic cycle duration.
-    pub fn set_weather(&mut self, weather: Weather, duration_ticks: Option<u32>) {
-        self.current = weather;
-        self.remaining_ticks = duration_ticks
-            .map(|ticks| ticks as f32)
-            .filter(|ticks| *ticks > 0.0)
-            .unwrap_or_else(|| self.random_duration_ticks());
-        self.lightning_timer = if weather == Weather::Thunder {
-            self.random_lightning_interval()
-        } else {
-            f32::INFINITY
-        };
-        self.precipitation_accumulator = 0.0;
-        self.snow_accumulation_timer = 0.0;
-    }
-
-    pub fn is_thundering(&self) -> bool {
-        self.current == Weather::Thunder
-    }
-
-    pub fn snapshot(&self) -> WeatherSnapshot {
-        WeatherSnapshot {
-            current: self.current,
-            remaining_ticks: self.remaining_ticks.max(0.0),
         }
     }
 
-    pub fn apply_snapshot(&mut self, snapshot: WeatherSnapshot) -> bool {
-        if !snapshot.remaining_ticks.is_finite() || snapshot.remaining_ticks < 0.0 {
+    /// Apply host TimeSync weather. Ignores `remaining_ticks` (no local cycle).
+    pub fn apply_wire(&mut self, weather: u8) -> bool {
+        let Some(current) = Weather::from_wire(weather) else {
             return false;
-        }
-        if self.current != snapshot.current {
+        };
+        if self.current != current {
             self.precipitation_accumulator = 0.0;
-            self.snow_accumulation_timer = 0.0;
         }
-        self.current = snapshot.current;
-        self.remaining_ticks = snapshot.remaining_ticks;
-        // Lightning is an explicit authoritative network event. A client that
-        // applies a snapshot must never schedule its own strike.
-        self.lightning_timer = f32::INFINITY;
+        self.current = current;
         true
     }
 
-    pub fn update_authoritative(&mut self, elapsed_world_ticks: f32, dt: f32) -> WeatherUpdate {
-        let mut update = WeatherUpdate::default();
-        self.remaining_ticks -= elapsed_world_ticks.max(0.0);
-        while self.remaining_ticks <= 0.0 {
-            self.current = match self.current {
-                Weather::Clear => Weather::Rain,
-                Weather::Rain => Weather::Thunder,
-                Weather::Thunder => Weather::Clear,
-            };
-            self.remaining_ticks += self.random_duration_ticks();
-            update.changed = true;
-            self.lightning_timer = if self.current == Weather::Thunder {
-                self.random_lightning_interval()
-            } else {
-                f32::INFINITY
-            };
-        }
-
-        self.update_presentation(dt);
-        if self.current == Weather::Thunder {
-            self.lightning_timer -= dt.max(0.0);
-            if self.lightning_timer <= 0.0 {
-                update.lightning_due = true;
-                self.lightning_timer = self.random_lightning_interval();
-            }
-        }
-        update
-    }
-
-    pub fn update_client(&mut self, elapsed_world_ticks: f32, dt: f32) {
-        // Locally project the countdown for smooth diagnostics, but wait for
-        // the next host snapshot before changing phase.
-        self.remaining_ticks = (self.remaining_ticks - elapsed_world_ticks.max(0.0)).max(0.0);
-        self.update_presentation(dt);
+    pub fn tick_presentation(&mut self, dt: f32) {
+        self.flash_timer = (self.flash_timer - dt.max(0.0)).max(0.0);
     }
 
     pub fn trigger_lightning_flash(&mut self) {
         self.flash_timer = 0.32;
-    }
-
-    fn update_presentation(&mut self, dt: f32) {
-        self.flash_timer = (self.flash_timer - dt.max(0.0)).max(0.0);
     }
 
     pub fn sky_brightness(&self) -> f32 {
@@ -186,15 +88,12 @@ impl WeatherSystem {
         (self.flash_timer / 0.32).clamp(0.0, 1.0)
     }
 
-    pub fn biome_at(&self, world_x: i32, world_z: i32) -> Biome {
-        self.climate.biome_at(world_x, world_z)
-    }
-
-    pub fn precipitation_at(&self, world_x: i32, world_z: i32) -> Precipitation {
-        if self.current == Weather::Clear {
-            return Precipitation::None;
+    /// Without a presentation climate authority, non-clear weather rains everywhere.
+    pub fn precipitation_at(&self, _world_x: i32, _world_z: i32) -> Precipitation {
+        match self.current {
+            Weather::Clear => Precipitation::None,
+            Weather::Rain | Weather::Thunder => Precipitation::Rain,
         }
-        precipitation_for_biome(self.biome_at(world_x, world_z))
     }
 
     pub fn take_precipitation_spawn_count(&mut self, dt: f32) -> usize {
@@ -209,32 +108,14 @@ impl WeatherSystem {
         count.min(64)
     }
 
-    pub fn take_snow_accumulation_steps(&mut self, dt: f32) -> usize {
-        if self.current == Weather::Clear {
-            self.snow_accumulation_timer = 0.0;
-            return 0;
-        }
-        self.snow_accumulation_timer += dt.max(0.0);
-        let steps = (self.snow_accumulation_timer / 0.75).floor() as usize;
-        self.snow_accumulation_timer -= steps as f32 * 0.75;
-        steps.min(2)
-    }
-
     pub fn presentation_random_unit(&mut self) -> f32 {
         random_unit(&mut self.presentation_rng)
     }
 
     pub fn presentation_random_offset(&mut self, radius: i32) -> i32 {
-        random_offset(&mut self.presentation_rng, radius)
-    }
-
-    fn random_duration_ticks(&mut self) -> f32 {
-        MIN_WEATHER_TICKS
-            + random_unit(&mut self.authority_rng) * (MAX_WEATHER_TICKS - MIN_WEATHER_TICKS)
-    }
-
-    fn random_lightning_interval(&mut self) -> f32 {
-        4.0 + random_unit(&mut self.authority_rng) * 5.0
+        let width = (radius * 2 + 1).max(1) as u32;
+        let roll = next_random(&mut self.presentation_rng) % width;
+        roll as i32 - radius
     }
 }
 
@@ -243,27 +124,12 @@ fn next_random(state: &mut u32) -> u32 {
     *state
 }
 
-pub fn seeded_visual_unit(seed: &mut u32) -> f32 {
-    random_unit(seed)
-}
-
 fn random_unit(state: &mut u32) -> f32 {
     next_random(state) as f32 / u32::MAX as f32
 }
 
-fn random_offset(state: &mut u32, radius: i32) -> i32 {
-    let width = (radius * 2 + 1).max(1) as u32;
-    (random_unit(state) * width as f32).floor() as i32 - radius
-}
-
-fn precipitation_for_biome(biome: Biome) -> Precipitation {
-    use Biome::*;
-    match biome {
-        Desert | Badlands | Savanna => Precipitation::None,
-        SnowyPlains | Taiga | WindsweptHills => Precipitation::Snow,
-        Plains | Forest | BirchForest | Swamp | Jungle | Meadow | River | Beach | Ocean
-        | DeepOcean => Precipitation::Rain,
-    }
+pub fn seeded_visual_unit(seed: &mut u32) -> f32 {
+    random_unit(seed)
 }
 
 #[cfg(test)]
@@ -271,111 +137,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn weather_cycles_in_the_required_order() {
-        let mut weather = WeatherSystem::new(7);
-        weather.remaining_ticks = 1.0;
-        assert!(weather.update_authoritative(2.0, 0.0).changed);
-        assert_eq!(weather.current, Weather::Rain);
-        weather.remaining_ticks = 1.0;
-        weather.update_authoritative(2.0, 0.0);
+    fn wire_roundtrip_covers_known_values() {
+        for weather in [Weather::Clear, Weather::Rain, Weather::Thunder] {
+            assert_eq!(Weather::from_wire(weather.wire_value()), Some(weather));
+        }
+        assert_eq!(Weather::from_wire(9), None);
+    }
+
+    #[test]
+    fn time_sync_drives_phase_without_local_cycle() {
+        let mut weather = WeatherPresentation::new(23);
+        assert!(weather.apply_wire(2));
         assert_eq!(weather.current, Weather::Thunder);
-        weather.remaining_ticks = 1.0;
-        weather.update_authoritative(2.0, 0.0);
+        weather.tick_presentation(10_000.0);
+        assert_eq!(weather.current, Weather::Thunder);
+        assert_eq!(weather.flash_intensity(), 0.0);
+    }
+
+    #[test]
+    fn invalid_wire_is_rejected() {
+        let mut weather = WeatherPresentation::new(29);
+        assert!(!weather.apply_wire(99));
         assert_eq!(weather.current, Weather::Clear);
     }
 
     #[test]
-    fn random_durations_stay_between_half_and_one_day() {
-        let mut weather = WeatherSystem::new(11);
-        for _ in 0..128 {
-            let duration = weather.random_duration_ticks();
-            assert!((MIN_WEATHER_TICKS..=MAX_WEATHER_TICKS).contains(&duration));
-        }
+    fn clear_weather_spawns_no_precipitation() {
+        let mut weather = WeatherPresentation::new(31);
+        assert_eq!(weather.take_precipitation_spawn_count(1.0), 0);
+        assert_eq!(weather.precipitation_at(0, 0), Precipitation::None);
     }
 
     #[test]
-    fn desert_is_dry_and_cold_biomes_snow() {
-        assert_eq!(precipitation_for_biome(Biome::Desert), Precipitation::None);
-        assert_eq!(precipitation_for_biome(Biome::Taiga), Precipitation::Snow);
-        assert_eq!(
-            precipitation_for_biome(Biome::WindsweptHills),
-            Precipitation::Snow
-        );
-        assert_eq!(precipitation_for_biome(Biome::Forest), Precipitation::Rain);
+    fn rain_weather_spawns_particles() {
+        let mut weather = WeatherPresentation::new(31);
+        assert!(weather.apply_wire(1));
+        assert!(weather.take_precipitation_spawn_count(1.0) > 0);
+        assert_eq!(weather.precipitation_at(0, 0), Precipitation::Rain);
     }
 
     #[test]
-    fn thunder_schedules_a_flash_and_strike() {
-        let mut weather = WeatherSystem::new(17);
-        weather.current = Weather::Thunder;
-        weather.remaining_ticks = TICKS_PER_DAY;
-        weather.lightning_timer = 0.01;
-        let update = weather.update_authoritative(0.0, 0.02);
-        assert!(update.lightning_due);
-        assert_eq!(weather.flash_intensity(), 0.0);
+    fn lightning_flash_decays() {
+        let mut weather = WeatherPresentation::new(17);
         weather.trigger_lightning_flash();
         assert!(weather.flash_intensity() > 0.9);
-    }
-
-    #[test]
-    fn client_snapshot_never_advances_phase_or_schedules_lightning() {
-        let mut weather = WeatherSystem::new(23);
-        assert!(weather.apply_snapshot(WeatherSnapshot {
-            current: Weather::Thunder,
-            remaining_ticks: 1.0,
-        }));
-        let authority_rng = weather.authority_rng;
-
-        weather.update_client(10_000.0, 10_000.0);
-
-        assert_eq!(weather.current, Weather::Thunder);
-        assert_eq!(weather.remaining_ticks, 0.0);
-        assert_eq!(weather.lightning_timer, f32::INFINITY);
-        assert_eq!(weather.authority_rng, authority_rng);
+        weather.tick_presentation(0.4);
         assert_eq!(weather.flash_intensity(), 0.0);
     }
 
     #[test]
-    fn invalid_snapshot_is_rejected_without_mutating_client_weather() {
-        let mut weather = WeatherSystem::new(29);
-        let before = weather.snapshot();
-
-        assert!(!weather.apply_snapshot(WeatherSnapshot {
-            current: Weather::Rain,
-            remaining_ticks: f32::NAN,
-        }));
-        assert_eq!(weather.snapshot(), before);
-    }
-
-    #[test]
-    fn presentation_randomness_does_not_change_authority_sequence() {
-        let mut with_particles = WeatherSystem::new(31);
-        let mut without_particles = WeatherSystem::new(31);
-        for _ in 0..128 {
-            with_particles.presentation_random_unit();
-            with_particles.presentation_random_offset(14);
-        }
-
-        assert_eq!(with_particles.snapshot(), without_particles.snapshot());
-        with_particles.update_authoritative(1.0, 0.05);
-        without_particles.update_authoritative(1.0, 0.05);
-        assert_eq!(with_particles.snapshot(), without_particles.snapshot());
-    }
-
-    #[test]
-    fn wire_values_and_seeded_visuals_are_deterministic() {
-        for weather in [Weather::Clear, Weather::Rain, Weather::Thunder] {
-            assert_eq!(Weather::from_wire(weather.wire_value()), Some(weather));
-        }
-        assert_eq!(Weather::from_wire(3), None);
-
-        let mut left = 0xCAFE_BABE;
-        let mut right = 0xCAFE_BABE;
-        for _ in 0..24 {
-            assert_eq!(
-                seeded_visual_unit(&mut left),
-                seeded_visual_unit(&mut right)
-            );
+    fn seeded_visuals_are_deterministic() {
+        let mut left = 7u32;
+        let mut right = 7u32;
+        for _ in 0..8 {
+            assert_eq!(seeded_visual_unit(&mut left), seeded_visual_unit(&mut right));
         }
     }
 }

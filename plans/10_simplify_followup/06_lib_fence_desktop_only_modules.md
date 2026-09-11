@@ -21,13 +21,13 @@ weather 是 GPU 執行緒上的第二個氣候／RNG 權威：join 端永遠與 
 
 ## 精確 acceptance
 
-- [ ] `accessibility`、`localization`、`advancements`、`weather` 改為 `main.rs` 的 `mod`（或 `src/presentation/` 子模組）；`lib.rs` 不再 `pub mod` 它們。
-- [ ] `culling` 拆：`los.rs`＋`connectivity.rs`＋`is_section_occluder` 留 lib；`visibility.rs`（含 `EntityLosManager`、`SectionVisibilityScratch`）移桌面。
-- [ ] `TerrainVertex::desc` 移到 `state.rs`／`bootstrap.rs` pipeline 旁；`chunk_render.rs` 不再 `use wgpu`。
-- [ ] weather：刪 presentation 模擬與第二份 `ClimateSystem`；HUD／粒子／雨聲讀一個由 `TimeSync.weather` 驅動的 enum（目前永遠 Clear）。`GameRules.do_weather_cycle` 保留欄位。
-- [ ] advancements：保留桌面 UI／toast／save 欄位；權威 trigger 若要保留只留 `MineBlock`，其餘 trigger enum 變體刪除。
-- [ ] `cargo check --bin icraft-server` 不再編 wgpu vertex layout、lang JSON、LOS worker、advancement tree、weather。
-- [ ] `ARCHITECTURE.md` 「Do not add to `lib.rs`」列表補這些模組；Code map 更新。
+- [x] `accessibility`、`localization`、`advancements`、`weather` 改為 `main.rs` 的 `mod`（或 `src/presentation/` 子模組）；`lib.rs` 不再 `pub mod` 它們。
+- [x] `culling` 拆：`los.rs`＋`connectivity.rs`＋`is_section_occluder` 留 lib；`visibility.rs`（含 `EntityLosManager`、`SectionVisibilityScratch`）移桌面。
+- [x] `TerrainVertex::desc` 移到 `state.rs`／`bootstrap.rs` pipeline 旁；`chunk_render.rs` 不再 `use wgpu`。
+- [x] weather：刪 presentation 模擬與第二份 `ClimateSystem`；HUD／粒子／雨聲讀一個由 `TimeSync.weather` 驅動的 enum（目前永遠 Clear）。`GameRules.do_weather_cycle` 保留欄位。
+- [x] advancements：保留桌面 UI／toast／save 欄位；權威 trigger 若要保留只留 `MineBlock`，其餘 trigger enum 變體刪除。
+- [x] `cargo check --bin icraft-server` 不再編 wgpu vertex layout、lang JSON、LOS worker、advancement tree、weather。
+- [x] `ARCHITECTURE.md` 「Do not add to `lib.rs`」列表補這些模組；Code map 更新。
 
 ## 預計檔案與測試
 
@@ -46,3 +46,40 @@ weather 是 GPU 執行緒上的第二個氣候／RNG 權威：join 端永遠與 
 - 刪 `EntityLosManager` 本體（Plan 18）。
 - `State` UI 佈局搬家（Plan 27）。
 - 把 weather 權威化進 `ServerWorld`（另案；本波只刪桌面第二權威）。
+
+## 實作與證據
+
+### 改了什麼
+
+- `accessibility` / `localization` / `advancements` / `weather`：自 `lib.rs` 移除，改為 `main.rs` 的 desktop `mod`。
+- `culling`：lib 只留 `los` + `connectivity`；`visibility.rs` 移到 `src/presentation/visibility.rs`，由 `main.rs` 的 `culling` facade（`#[path]`）與 lib 合併 re-export。
+- `TerrainVertex` wgpu layout：`presentation/bootstrap.rs::terrain_vertex_layout()`；`chunk_render.rs` 無 `wgpu::` 型別引用。
+- weather：刪 `WeatherSystem`／`ClimateSystem`／本地 cycle；改為 `WeatherPresentation`，phase 只來自 `TimeSync` wire（`apply_wire`）；`do_weather_cycle` 欄位保留未刪。
+- advancements：樹／UI／toast 留桌面；`AdvancementProgressData` 移入 `save/format.rs`（server 讀玩家檔不必編樹）；`AdvancementTrigger` 只留 `MineBlock`；原 craft／kill／… 節點改 `MineBlock(Air)` 作 display-only。
+
+### 測了什麼
+
+- `cargo test --bin icraft accessibility::` → 6 ok
+- `cargo test --bin icraft localization::` → 10 ok
+- `cargo test --bin icraft weather::` → 7 ok
+- `cargo test --bin icraft advancements::` → 3 ok
+- `cargo test --lib culling::` → 4 ok
+- `cargo test --bin icraft culling_visibility::` → 8 ok
+- `cargo check --all-targets` → ok
+- `cargo check --bin icraft-server` → ok
+
+### 死路徑 grep 證據
+
+- `lib.rs` 無 `pub mod accessibility|localization|advancements|weather|visibility`
+- `chunk_render.rs` 無 `wgpu::`
+- `trigger_advancement(` 僅定義於 `state.rs`（0 生產 caller；原 plan 指的 network_event MineBlock 觸發已不存在）
+- `weather.rs` 無 `WeatherSystem`／`ClimateSystem`／`update_authoritative`
+- `server_runtime/ingress.rs` 仍 `weather: 0`（Clear）
+- `AdvancementTrigger` 僅 `MineBlock(BlockType)`
+
+### 留下的缺口
+
+- F3 BIOME 行改為「presentation has no climate」（不再掛第二份 ClimateSystem）；真 biome 標籤需之後由投影／權威提供。
+- Host 仍永遠送 Clear；權威 weather 進 `ServerWorld` 不在本計劃。
+- `EntityLosManager` 本體仍在桌面（Plan 18 再刪）。
+- `trigger_advancement` API 仍在，但無 caller；可之後隨 Plan 27／28 再清。

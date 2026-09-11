@@ -8,12 +8,29 @@
 //! `microbench` (`cargo run --features microbench -- --microbench`).
 
 pub use icraft::{
-    accessibility, advancements, authority, block_entity, block_model, boss, brewing,
-    chunk_manager, chunk_render, chunk_schedule, commands, culling, dimension,
-    enchantment, entity, fishing, game_rules, interaction, inventory, lighting, localization,
-    navigation, network, passive_mob, perf, physics, player, presentation_inventory_policy, recipes,
-    redstone, resources, save, server_runtime, server_world, structure, village, weather, world,
+    authority, block_entity, block_model, boss, brewing, chunk_manager, chunk_render,
+    chunk_schedule, commands, dimension, enchantment, entity, fishing, game_rules, interaction,
+    inventory, lighting, navigation, network, passive_mob, perf, physics, player,
+    presentation_inventory_policy, recipes, redstone, resources, save, server_runtime, server_world,
+    structure, village, world,
 };
+
+// Desktop-only (Wave 10 Plan 06): keep GPU/UI/lang/LOS worker out of icraft-server.
+mod accessibility;
+mod advancements;
+mod localization;
+mod weather;
+
+/// Section visibility + entity LOS worker (desktop-only; not in `icraft` lib).
+#[path = "presentation/visibility.rs"]
+mod culling_visibility;
+
+/// Lib LOS/connectivity plus desktop section-visibility / entity LOS worker.
+pub mod culling {
+    pub use icraft::culling::*;
+    pub use icraft::culling::{connectivity, los};
+    pub use crate::culling_visibility::*;
+}
 
 mod app;
 mod audio;

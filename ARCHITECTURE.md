@@ -16,10 +16,15 @@ Desktop `main.rs` re-exports the library (`pub use icraft::{world, …}`) so
 desktop files keep `crate::world` paths. Shared source compiles once.
 
 **Do not add to `lib.rs`:** `menu`, `camera`, `audio`, `texture`,
-`gpu_frame_resources`, `presentation_click`, `src/presentation/`. That would
-compile wgpu/audio/click policy into `icraft-server`.
+`gpu_frame_resources`, `presentation_click`, `src/presentation/`,
+`accessibility`, `localization`, `advancements`, `weather`, or culling
+`visibility` / `EntityLosManager`. That would compile wgpu/UI/lang/LOS
+worker / presentation climate into `icraft-server`.
 `presentation_inventory_policy` is the thin, GPU-free policy cut used by
-server and tests.
+server and tests. Save keeps only `AdvancementProgressData` (unlock set);
+the advancement tree UI is desktop-only. Presentation weather is a
+`TimeSync.weather`-driven enum (hosts currently always send Clear) — not a
+second `ClimateSystem` authority.
 
 `lib.rs` has two `pub` layers: the server/tests contract (authority, world,
 network, save, `presentation_inventory_policy`, …) and extra `pub` modules so
@@ -379,13 +384,13 @@ symlink escape from `saves/`).
 
 | Area | Files |
 | --- | --- |
-| Desktop loop | `src/main.rs`, `src/app.rs`, `src/menu.rs`, `src/state.rs`, `src/audio.rs` |
-| Presentation (desktop-only) | `src/presentation/` — `embedded_runtime.rs`, `network_event.rs`, `frame.rs` are `#[path]` children of `state`. `gpu_frame_resources` / `presentation_click` are `mod` in `main.rs`; `microbench` is the same behind feature `microbench`. |
+| Desktop loop | `src/main.rs` (`mod accessibility` / `localization` / `advancements` / `weather`; `culling` facade), `src/app.rs`, `src/menu.rs`, `src/state.rs`, `src/audio.rs` |
+| Presentation (desktop-only) | `src/presentation/` — `embedded_runtime.rs`, `network_event.rs`, `frame.rs` are `#[path]` children of `state`. `visibility.rs` (section visibility + entity LOS worker) is loaded via `main.rs`. `gpu_frame_resources` / `presentation_click` are `mod` in `main.rs`; `microbench` is the same behind feature `microbench`. |
 | Authority | `src/authority/` (`tick.rs`, `portals.rs`, `dispatch.rs`, `combat.rs`, `contract.rs`, `fishing.rs`, `interest.rs`, `mining.rs`, `transactions.rs`) |
 | Runtime | `src/server_runtime.rs` plus `ingress.rs`, `projection.rs`, `session_sync.rs`; `src/server_world.rs`; `src/bin/icraft-server.rs` |
 | World | `src/world/` (`block.rs`, `section.rs`, `chunk.rs`, `mesh.rs`), `src/chunk_manager.rs`, `src/dimension.rs`, `src/worldgen/`, `src/structure/` |
 | Gameplay | `src/player.rs`, `src/physics.rs`, `src/inventory/`, `src/block_entity.rs`, `src/redstone.rs`, `src/fluid.rs`, `src/world_tick.rs`, `src/entity.rs`, `src/mob.rs`, `src/passive_mob.rs`, `src/village/` (`VillagerProfession` / `TradeOffer`; POI/raid/merchant-session managers are `cfg(test)` only), `src/fishing.rs` (wire stages + authority helpers; presentation `FishingManager` is `cfg(test)` only) |
-| Render | `src/chunk_schedule.rs`, `src/chunk_render.rs`, `src/culling/`, `src/block_model.rs`, `src/shader.wgsl` |
+| Render | `src/chunk_schedule.rs`, `src/chunk_render.rs` (CPU mesh data; wgpu vertex layout lives next to desktop pipelines), `src/culling/` (`los` + `connectivity` in lib), `src/block_model.rs`, `src/shader.wgsl` |
 | Network | `src/network/` (`protocol.rs`, `transport.rs`, `server.rs`, `client.rs`, `ingress.rs`, `egress.rs`; `loopback_test.rs` is `cfg(test)` only) |
-| Save / assets | `src/save/` (`format.rs`, `region.rs`, `player.rs`, `index.rs`), `src/resources.rs` |
+| Save / assets | `src/save/` (`format.rs` includes `AdvancementProgressData`, `region.rs`, `player.rs`, `index.rs`), `src/resources.rs` |
 | Tests | inline `#[cfg(test)]`, `tests/` (`tests/common/tcp_harness.rs`, `authority_harness.rs`) |

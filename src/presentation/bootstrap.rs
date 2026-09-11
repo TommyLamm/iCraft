@@ -218,6 +218,33 @@ pub(crate) struct PipelineLayouts {
     pub terrain_pipeline_layout: wgpu::PipelineLayout,
 }
 
+/// wgpu vertex layout for [`crate::chunk_render::TerrainVertex`].
+/// Kept next to pipeline creation so `chunk_render` stays wgpu-free (lib fence).
+pub(crate) fn terrain_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<crate::chunk_render::TerrainVertex>()
+            as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &[
+            wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: wgpu::VertexFormat::Uint16x4,
+            },
+            wgpu::VertexAttribute {
+                offset: 8,
+                shader_location: 1,
+                format: wgpu::VertexFormat::Uint16x2,
+            },
+            wgpu::VertexAttribute {
+                offset: 12,
+                shader_location: 2,
+                format: wgpu::VertexFormat::Uint16x2,
+            },
+        ],
+    }
+}
+
 /// Shared shader + pipeline layouts used by `State::new`.
 /// Individual wgpu render pipelines stay in `new` because they are
 /// interleaved with buffer allocation.

@@ -2300,7 +2300,7 @@ pub struct State {
     pub potion_effects: crate::brewing::EffectManager,
     pub recipe_book_open: bool,
     pub recipe_book_search: String,
-    pub weather: crate::weather::WeatherSystem,
+    pub weather: crate::weather::WeatherPresentation,
     pub settings: GameSettings,
     /// Presentation-only timer for the End/dragon completion flash.
     pub end_flash_time: f32,
@@ -2750,7 +2750,7 @@ impl State {
                 vertex: wgpu::VertexState {
                     module: &shader,
                     entry_point: "vs_terrain",
-                    buffers: &[TerrainVertex::desc()],
+                    buffers: &[crate::presentation::bootstrap::terrain_vertex_layout()],
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
@@ -2828,7 +2828,7 @@ impl State {
                 vertex: wgpu::VertexState {
                     module: &shader,
                     entry_point: "vs_terrain",
-                    buffers: &[TerrainVertex::desc()],
+                    buffers: &[crate::presentation::bootstrap::terrain_vertex_layout()],
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
@@ -3366,7 +3366,7 @@ impl State {
             });
 
         let particles = crate::particles::ParticleSystem::new();
-        let weather = crate::weather::WeatherSystem::new(world_seed);
+        let weather = crate::weather::WeatherPresentation::new(world_seed);
         let network = match &role {
             // Embedded Singleplayer and listen-host sessions use the
             // ServerRuntime transport.  Keeping NetworkHandle::None here is
@@ -5888,17 +5888,10 @@ impl State {
             self.is_sprinting = false;
         }
 
-        // Weather presentation advances from local dt; world_time itself is
-        // authority-projected (TimeSync / session update) and never ticked here.
-        let elapsed_world_ticks = if self.world_rules.do_daylight_cycle {
-            dt * 20.0
-        } else {
-            0.0
-        };
+        // Weather phase is host TimeSync only — no GPU-thread climate/RNG cycle.
+        // `do_weather_cycle` remains a synced gamerule field for a future authority owner.
         if self.current_dimension == crate::dimension::Dimension::Overworld {
-            if self.world_rules.do_weather_cycle {
-                self.weather.update_client(elapsed_world_ticks, dt);
-            }
+            self.weather.tick_presentation(dt);
         } else {
             self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
         }

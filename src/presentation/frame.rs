@@ -2750,11 +2750,11 @@ impl State {
                         &mut ui_line_vertices,
                     );
 
-                    let biome = self
-                        .weather
-                        .biome_at(pos.x.floor() as i32, pos.z.floor() as i32);
                     self.debug_str_scratch.clear();
-                    let _ = write!(self.debug_str_scratch, "BIOME: {}", biome_debug_name(biome));
+                    let _ = write!(
+                        self.debug_str_scratch,
+                        "BIOME: (presentation has no climate)"
+                    );
                     render_line(
                         &self.debug_str_scratch,
                         [1.0, 1.0, 1.0, 1.0],

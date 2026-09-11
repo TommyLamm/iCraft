@@ -8,10 +8,10 @@ use std::thread;
 
 use crate::chunk_manager::ChunkManager;
 use crate::chunk_render::{Frustum, MeshBounds};
-use crate::culling::connectivity::{is_section_occluder, SectionConnectivity};
-use crate::culling::los::is_los_blocked;
 use crate::dimension::WorldHeight;
 use crate::entity::{Entity, EntityType};
+use icraft::culling::connectivity::{is_section_occluder, SectionConnectivity};
+use icraft::culling::los::is_los_blocked;
 
 #[derive(Debug)]
 struct SectionNode {
