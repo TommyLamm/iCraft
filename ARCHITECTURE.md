@@ -57,7 +57,10 @@ All server paths -> AuthorityCore -> BTreeMap<Dimension, ServerWorld>
 
 - `App` owns the menu/game transition and the OS/window loop.
 - `State` is the desktop composition root: GPU, input, camera, UI, render
-  caches, interpolation. It is not the world authority.
+  caches, interpolation. It is not the world authority. Desktop `State` does
+  not hold `RedstoneSystem`; live redstone ticks only in `ServerWorld`.
+  Join/embedded block facing comes from `ChunkData` / `BlockChange` /
+  block-entity projection, not client-side redstone restore.
 - Singleplayer and listen-host use `ServerRuntime::new_embedded`. Local and
   socket input share one bounded FIFO.
 - A join client never runs authority, worldgen, or `SaveManager`. It sends

@@ -517,7 +517,7 @@ impl RedstoneSystem {
     /// (re)loaded and `sync_loaded_chunks` has rebuilt default `ComponentState`
     /// entries. Entries whose block no longer matches a redstone component are
     /// ignored so stale metadata cannot resurrect facings on unrelated blocks.
-    pub fn restore_chunk_metadata(
+    pub(crate) fn restore_chunk_metadata(
         &mut self,
         manager: &ChunkManager,
         cx: i32,

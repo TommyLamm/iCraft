@@ -1091,7 +1091,6 @@ struct ChunkLoadResult {
     lifetime: u64,
     chunk: Chunk,
     restore_failed: bool,
-    redstone_metadata: Vec<crate::redstone::RedstoneComponentMetadata>,
 }
 
 struct SectionMeshResult {
@@ -1285,8 +1284,6 @@ impl State {
         self.chunk_manager = ChunkManager::new_in_dimension(render_distance, target);
         self.entity_manager = crate::entity::EntityManager::new();
         self.particles = crate::particles::ParticleSystem::new();
-        self.redstone = crate::redstone::RedstoneSystem::new();
-        self.redstone_tick_timer = 0.0;
         self.pending_chunk_payloads.clear();
         self.pending_block_changes.clear();
         self.client_chunk_revisions.clear();
@@ -1358,8 +1355,6 @@ impl State {
         self.entity_manager = crate::entity::EntityManager::new();
         self.mount_manager = crate::vehicle::MountManager::new();
         self.particles = crate::particles::ParticleSystem::new();
-        self.redstone = crate::redstone::RedstoneSystem::new();
-        self.redstone_tick_timer = 0.0;
         self.pending_chunk_payloads.clear();
         self.pending_block_changes.clear();
         self.client_chunk_revisions.clear();
@@ -2467,8 +2462,6 @@ pub struct State {
     pub brewing: crate::brewing::BrewingStandState,
     pub anvil: crate::enchantment::AnvilState,
     pub potion_effects: crate::brewing::EffectManager,
-    pub redstone: crate::redstone::RedstoneSystem,
-    redstone_tick_timer: f32,
     pub recipe_book_open: bool,
     pub recipe_book_search: String,
     pub weather: crate::weather::WeatherSystem,
@@ -3822,8 +3815,6 @@ impl State {
             brewing: crate::brewing::BrewingStandState::default(),
             anvil: crate::enchantment::AnvilState::default(),
             potion_effects: crate::brewing::EffectManager::default(),
-            redstone: crate::redstone::RedstoneSystem::new(),
-            redstone_tick_timer: 0.0,
             recipe_book_open: false,
             recipe_book_search: String::new(),
             weather,
@@ -5570,20 +5561,6 @@ impl State {
                     integrated_loads += 1;
                     integrated_load_bytes = integrated_load_bytes.saturating_add(load_bytes);
 
-                    // Restore persisted redstone component metadata before any
-                    // redstone tick runs, so freshly-rebuilt `ComponentState`
-                    // entries pick up the saved facing/delay/mode/note instead
-                    // of the runtime defaults. The next `RedstoneSystem::tick`
-                    // settles power against the restored facings.
-                    if !result.redstone_metadata.is_empty() {
-                        self.redstone.restore_chunk_metadata(
-                            &self.chunk_manager,
-                            cx,
-                            cz,
-                            &result.redstone_metadata,
-                        );
-                    }
-
                     let mut pending_base_revision = 0;
                     if let Some((revision, blocks, block_states, fluid_levels, block_entities)) =
                         self.pending_chunk_payloads.remove(&result.coord)
@@ -5765,7 +5742,6 @@ impl State {
                 lifetime,
                 chunk,
                 restore_failed: false,
-                redstone_metadata: Vec::new(),
             }));
         });
     }

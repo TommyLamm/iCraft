@@ -54,7 +54,7 @@
 | 02 | [刪 `AuthorityTopology` 與死 helper](02_authority_dead_topology_and_helpers.md) | P0 | 少一個從未讀的 enum + 測試 drift | 無 | 已完成 |
 | 03 | [刪桌面不可達啟動與 Pickup 死分支](03_presentation_dead_launch_and_pickup.md) | P0 | ~-180 行 `state.rs` 死路徑 | 無 | 已完成 |
 | 04 | [刪幽靈 `dynamic_resolution`／`render_scale`](04_ghost_dynamic_resolution_settings.md) | P0 | ~-300 行模組 + settings 鍵 | 無 | 已完成 |
-| 05 | [刪 presentation `RedstoneSystem` 空殼](05_presentation_redstone_shell.md) | P0 | ~-100 行 restore 空管線 | 03 | 未開始 |
+| 05 | [刪 presentation `RedstoneSystem` 空殼](05_presentation_redstone_shell.md) | P0 | ~-100 行 restore 空管線 | 03 | 已完成 |
 | 06 | [session 維度索引 + dirty `session_updates`](06_session_index_and_dirty_updates.md) | P1 | 20 Hz 少 O(sessions×dimensions) 與全量 clone | 無 | 未開始 |
 | 07 | [interest 未跨欄時跳過重建](07_interest_skip_stationary.md) | P1 | 靜止玩家每 tick 少兩次 `query_radius` | 無 | 未開始 |
 | 08 | [拿掉雙重 checksum 與實體全表排序](08_checksum_drop_double_and_entity_sort.md) | P1 | idle tick 不再對全部實體 sort+hash | 無 | 未開始 |

@@ -17,11 +17,11 @@
 
 ## 精確 acceptance
 
-- [ ] `State` 不再持有 `RedstoneSystem`／`redstone_tick_timer`。
-- [ ] `ChunkLoadResult` 不再帶 `redstone_metadata`；worker 不再分配空 Vec。
-- [ ] `restore_chunk_metadata` 若只被 presentation 呼叫，改 `pub(crate)` 測試專用或刪 presentation 呼叫點（權威仍用 `RedstoneSystem`）。
-- [ ] Join／embedded 方塊 facing 仍只靠 `ChunkData`／`BlockChange`／block-entity 投影，不依賴 client 端 redstone restore。
-- [ ] `cargo test --bin icraft` 中 chunk load／mesh 相關測試通過。
+- [x] `State` 不再持有 `RedstoneSystem`／`redstone_tick_timer`。
+- [x] `ChunkLoadResult` 不再帶 `redstone_metadata`；worker 不再分配空 Vec。
+- [x] `restore_chunk_metadata` 若只被 presentation 呼叫，改 `pub(crate)` 測試專用或刪 presentation 呼叫點（權威仍用 `RedstoneSystem`）。
+- [x] Join／embedded 方塊 facing 仍只靠 `ChunkData`／`BlockChange`／block-entity 投影，不依賴 client 端 redstone restore。
+- [x] `cargo test --bin icraft` 中 chunk load／mesh 相關測試通過。
 
 ## 預計檔案與測試
 
@@ -39,3 +39,28 @@
 
 - 改權威紅石 sleep／comparator index（Wave 08 已做 sleep；awake 全表掃描留給後續）。
 - 為 client mesh 重接 facing metadata sidecar。
+
+## 實作與證據
+
+### 改了什麼
+
+- 桌面 `State` 刪除 `redstone: RedstoneSystem` 與 `redstone_tick_timer`。`State::new`、維度切換、`reset_presented_dimension` 不再 init／reset 這兩個欄位。
+- `ChunkLoadResult` 刪 `redstone_metadata`。`schedule_chunk_load` worker 不再 `Vec::new()`。`process_terrain_worker_results` 不再呼叫 `restore_chunk_metadata`。
+- `RedstoneSystem::restore_chunk_metadata` 改 `pub(crate)`。權威仍走 `ServerWorld::restore_saved_chunk`；模組內 sidecar 測試仍呼叫。Presentation 不再持有 restore 管線。
+- Join／embedded facing 未改：`apply_remote_block_change` 仍只套 `ChunkData`／`BlockChange`／block-entity 投影，不掃 client redstone。
+- `ARCHITECTURE.md`：明確寫 desktop `State` 不持有 `RedstoneSystem`，live tick 只在 `ServerWorld`。
+
+### 測了什麼
+
+- `cargo test --lib redstone::`：30 passed（含 collect／restore sidecar、sleep、facing 相關單元測試）。
+- `cargo test --bin icraft -- terrain_worker`：1 passed。
+- `cargo test --bin icraft -- mesh`：10 passed（含 `mesh_invalidation_*`、`mesh_snapshot_*`、`runtime_mesh_*`、`remote_block_change_updates_light_and_boundary_mesh_dependencies`）。
+- `cargo test --bin icraft -- mutation_scheduler` / `boundary_and_diagonal`：2 passed。
+- `cargo test --test review_hardening_embedded_presentation`：3 passed。
+
+### 剩餘缺口
+
+- 權威紅石 sleep／comparator index／awake 全表掃描未動（刻意排除）。
+- 沒有為 client mesh 重接 facing metadata sidecar。
+- Packet／`PROTOCOL_VERSION` 未改。
+- Plan 06 未開始。
