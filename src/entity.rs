@@ -707,8 +707,16 @@ pub struct EntityManager {
     /// chunk-crossing sync / rebuild). Interest routing uses this to skip
     /// `query_radius` for stationary sessions while the index is quiet.
     spatial_revision: u64,
+    /// Bumped when checksum-relevant entity inputs change: membership
+    /// (spawn / despawn), pose, or `ai_phase`. `ServerWorld::checksum` uses
+    /// this to reuse the sorted entity fingerprint while the set is idle.
+    checksum_epoch: u64,
+    /// Sorted-entity FNV fingerprint for the current `checksum_epoch`.
+    cached_entity_fingerprint: Option<u64>,
     #[cfg(test)]
     position_sync_visits: u64,
+    #[cfg(test)]
+    entity_fingerprint_builds: u64,
 }
 
 impl EntityManager {
@@ -726,8 +734,12 @@ impl EntityManager {
             scratch: EntityScratch::default(),
             next_id: next_id.max(1),
             spatial_revision: 0,
+            checksum_epoch: 0,
+            cached_entity_fingerprint: None,
             #[cfg(test)]
             position_sync_visits: 0,
+            #[cfg(test)]
+            entity_fingerprint_builds: 0,
         }
     }
 
@@ -735,8 +747,40 @@ impl EntityManager {
         self.spatial_revision
     }
 
+    pub(crate) fn checksum_epoch(&self) -> u64 {
+        self.checksum_epoch
+    }
+
     fn bump_spatial_revision(&mut self) {
         self.spatial_revision = self.spatial_revision.wrapping_add(1);
+    }
+
+    fn bump_checksum_epoch(&mut self) {
+        self.checksum_epoch = self.checksum_epoch.wrapping_add(1);
+        self.cached_entity_fingerprint = None;
+    }
+
+    /// Mark pose / `ai_phase` (or other checksum-hashed fields) dirty without
+    /// necessarily changing spatial bucket membership.
+    pub(crate) fn mark_checksum_inputs_changed(&mut self) {
+        self.bump_checksum_epoch();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn entity_fingerprint_builds(&self) -> u64 {
+        self.entity_fingerprint_builds
+    }
+
+    pub(crate) fn cached_entity_fingerprint(&self) -> Option<u64> {
+        self.cached_entity_fingerprint
+    }
+
+    pub(crate) fn store_entity_fingerprint(&mut self, fingerprint: u64) {
+        self.cached_entity_fingerprint = Some(fingerprint);
+        #[cfg(test)]
+        {
+            self.entity_fingerprint_builds = self.entity_fingerprint_builds.wrapping_add(1);
+        }
     }
 
     pub fn rebuild_indexes(&mut self) {
@@ -762,6 +806,7 @@ impl EntityManager {
             self.entity_chunks.insert(entity.id, chunk_pos);
         }
         self.bump_spatial_revision();
+        self.bump_checksum_epoch();
     }
 
     fn chunk_for(position: Vec3) -> (i32, i32) {
@@ -799,6 +844,7 @@ impl EntityManager {
         self.spatial_buckets.entry(new_chunk).or_default().push(id);
         self.entity_chunks.insert(id, new_chunk);
         self.bump_spatial_revision();
+        self.bump_checksum_epoch();
     }
 
     /// Synchronize only entities whose positions may have changed.
@@ -858,6 +904,7 @@ impl EntityManager {
         self.spatial_buckets.entry(chunk_pos).or_default().push(id);
         self.entity_chunks.insert(id, chunk_pos);
         self.bump_spatial_revision();
+        self.bump_checksum_epoch();
         id
     }
 
@@ -875,6 +922,7 @@ impl EntityManager {
         self.spatial_buckets.entry(chunk_pos).or_default().push(id);
         self.entity_chunks.insert(id, chunk_pos);
         self.bump_spatial_revision();
+        self.bump_checksum_epoch();
         id
     }
 
@@ -911,6 +959,7 @@ impl EntityManager {
             self.spatial_buckets.remove(&removed_chunk_pos);
         }
         self.bump_spatial_revision();
+        self.bump_checksum_epoch();
         removed
     }
 
@@ -944,6 +993,7 @@ impl EntityManager {
         self.spatial_buckets.clear();
         self.entity_chunks.clear();
         self.bump_spatial_revision();
+        self.bump_checksum_epoch();
     }
 
     pub fn count_passive(&self) -> usize {

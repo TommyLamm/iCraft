@@ -197,9 +197,13 @@ which `ServerWorld` applies; durable writes stay on `ServerRuntime`.
 3. Apply dimension transfers, route snapshots by interest, evict uninteresting
    columns, close invalid containers, update metrics, autosave every 6,000
    ticks (log errors; shutdown still `save_all`).
-   `ServerWorld::checksum` mixes a running XOR of block-revision fingerprints
-   (updated on mutation/evict) plus one sorted entity pass. Idle ticks do not
-   scan `block_revisions`.
+  `ServerWorld::checksum` is computed only by `AuthorityCore` after pending
+  redstone dispense mutations are folded in; `ServerWorld::tick` leaves
+  snapshot `checksum` at 0. The hash mixes a running XOR of block-revision
+  fingerprints (updated on mutation/evict) plus a cached sorted-entity
+  fingerprint. Idle ticks skip the resident-map scan and, when there is no
+  entity spawn / despawn / pose / `ai_phase` change, reuse the prior entity
+  fingerprint instead of sorting and re-hashing the full table.
 
 Desktop: `App -> State::update(dt) -> State::render()`. Drain events, run
 capped 20 Hz catch-up (listen-host keeps ticking in pause/death UI;

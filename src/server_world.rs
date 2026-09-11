@@ -1625,11 +1625,12 @@ impl ServerWorld {
 
         self.tick_entities(players);
         mutations.sort_by_key(|mutation| mutation.revision);
-        let checksum = self.checksum(&mutations);
+        // Checksum is computed once by AuthorityCore after pending redstone
+        // dispense / mutations are folded in. Do not pay for a discarded value.
         AuthoritySnapshot {
             tick: self.time,
             revision: self.revisions.current(),
-            checksum,
+            checksum: 0,
             mutations,
             session_updates: Vec::new(),
         }
@@ -1983,10 +1984,13 @@ impl ServerWorld {
             }
         }
         let chunks = &self.chunks;
+        let mut checksum_inputs_changed = false;
         for entity in &mut self.entities.entities {
             if entity.entity_type == EntityType::FishingHook {
                 continue;
             }
+            let prev_position = entity.position;
+            let prev_ai_phase = entity.ai_phase;
             entity.action_cooldown = (entity.action_cooldown - FIXED_DT).max(0.0);
             entity.invulnerable_time = (entity.invulnerable_time - FIXED_DT).max(0.0);
             entity.fire_aspect_timer = (entity.fire_aspect_timer - FIXED_DT).max(0.0);
@@ -2010,11 +2014,22 @@ impl ServerWorld {
             entity.ai_phase = entity.ai_phase.wrapping_add(1);
             entity.ai_timer += FIXED_DT;
             entity.update_physics(FIXED_DT, chunks);
+            if entity.position != prev_position || entity.ai_phase != prev_ai_phase {
+                checksum_inputs_changed = true;
+            }
+        }
+        if checksum_inputs_changed {
+            self.entities.mark_checksum_inputs_changed();
         }
         self.entities.sync_positions();
 
         if let Some((_, first_pos)) = player_positions.first() {
             let player_vec = Vec3::from_array(*first_pos);
+            // When the AI loop already dirtied checksum inputs, skip the
+            // before/after key capture. Otherwise detect boss-path pose /
+            // ai_phase / membership changes (including within-chunk moves).
+            let epoch_before = self.entities.checksum_epoch();
+            let keys_before = (!checksum_inputs_changed).then(|| entity_checksum_keys(&self.entities));
             crate::boss::ensure_dimension_entities(
                 self.dimension,
                 &mut self.entities,
@@ -2031,6 +2046,12 @@ impl ServerWorld {
                 FIXED_DT,
                 crate::inventory::GameMode::Survival,
             );
+            if let Some(before) = keys_before {
+                let epoch_changed = self.entities.checksum_epoch() != epoch_before;
+                if !epoch_changed && before != entity_checksum_keys(&self.entities) {
+                    self.entities.mark_checksum_inputs_changed();
+                }
+            }
             if boss_events.dragon_completion.is_some() {
                 self.handle_dragon_completion();
             }
@@ -2055,11 +2076,12 @@ impl ServerWorld {
         }
     }
 
-    pub(crate) fn checksum(&self, mutations: &[WorldMutation]) -> u64 {
+    pub(crate) fn checksum(&mut self, mutations: &[WorldMutation]) -> u64 {
         // Stable FNV-1a over authoritative values. Block revisions are mixed
         // from the running XOR aggregate (updated on mutation) so idle ticks
-        // do not scan the resident map. Entities are sorted once and hashed
-        // in a single pass.
+        // do not scan the resident map. Entities contribute a cached sorted
+        // fingerprint so idle (no spawn / despawn / pose / ai_phase change)
+        // ticks skip sort + full-table hash.
         let mut hash = FNV_OFFSET;
         fnv1a_write(&mut hash, &self.time.to_le_bytes());
         fnv1a_write(&mut hash, &self.revisions.current().to_le_bytes());
@@ -2089,6 +2111,16 @@ impl ServerWorld {
             fnv1a_write(&mut hash, &mutation.revision.to_le_bytes());
         }
         fnv1a_write(&mut hash, &self.block_revision_checksum.to_le_bytes());
+        let entity_fingerprint = self.entity_checksum_fingerprint();
+        fnv1a_write(&mut hash, &entity_fingerprint.to_le_bytes());
+        hash
+    }
+
+    fn entity_checksum_fingerprint(&mut self) -> u64 {
+        if let Some(cached) = self.entities.cached_entity_fingerprint() {
+            return cached;
+        }
+        let mut hash = FNV_OFFSET;
         let mut order: Vec<usize> = (0..self.entities.entities.len()).collect();
         order.sort_unstable_by_key(|&index| {
             let entity = &self.entities.entities[index];
@@ -2134,8 +2166,25 @@ impl ServerWorld {
                 fnv1a_write(&mut hash, &[0]);
             }
         }
+        self.entities.store_entity_fingerprint(hash);
         hash
     }
+}
+
+fn entity_checksum_keys(entities: &EntityManager) -> Vec<(u64, u32, u32, u32, u8)> {
+    entities
+        .entities
+        .iter()
+        .map(|entity| {
+            (
+                entity.id,
+                entity.position.x.to_bits(),
+                entity.position.y.to_bits(),
+                entity.position.z.to_bits(),
+                entity.ai_phase,
+            )
+        })
+        .collect()
 }
 
 fn fnv1a_write(hash: &mut u64, bytes: &[u8]) {
@@ -2909,6 +2958,57 @@ mod tests {
         arrow.entities.spawn(EntityType::Arrow, position);
         dropped.entities.spawn(EntityType::DroppedItem, position);
         assert_ne!(arrow.checksum(&[]), dropped.checksum(&[]));
+    }
+
+    #[test]
+    fn idle_entity_fingerprint_skips_sort_and_hash_rebuild() {
+        let mut world = superflat_world(7);
+        world
+            .entities
+            .spawn(EntityType::EndCrystal, Vec3::new(4.0, 80.0, 4.0));
+        // No tick: pose / ai_phase stay put, so the second checksum must reuse
+        // the sorted entity fingerprint instead of rebuilding it.
+        let _ = world.checksum(&[]);
+        let builds_after_first = world.entities.entity_fingerprint_builds();
+        assert_eq!(builds_after_first, 1);
+        let first = world.checksum(&[]);
+        assert_eq!(world.entities.entity_fingerprint_builds(), builds_after_first);
+        let second = world.checksum(&[]);
+        assert_eq!(first, second);
+        assert_eq!(world.entities.entity_fingerprint_builds(), builds_after_first);
+
+        // Pose / ai_phase change must invalidate the cache.
+        world.entities.mark_checksum_inputs_changed();
+        let third = world.checksum(&[]);
+        assert_eq!(world.entities.entity_fingerprint_builds(), builds_after_first + 1);
+        assert_eq!(third, first);
+
+        // Membership change must invalidate and change the value.
+        world
+            .entities
+            .spawn(EntityType::Arrow, Vec3::new(5.0, 80.0, 5.0));
+        let fourth = world.checksum(&[]);
+        assert_eq!(world.entities.entity_fingerprint_builds(), builds_after_first + 2);
+        assert_ne!(fourth, first);
+    }
+
+    #[test]
+    fn empty_world_checksum_reuses_entity_fingerprint_across_idle_ticks() {
+        let mut world = superflat_world(11);
+        world.rules.do_mob_spawning = false;
+        world.rules.do_daylight_cycle = false;
+        let _ = world.checksum(&[]);
+        let builds = world.entities.entity_fingerprint_builds();
+        world.tick(&[]);
+        world.tick(&[]);
+        let after = world.checksum(&[]);
+        assert_eq!(world.entities.entity_fingerprint_builds(), builds);
+        let mut twin = superflat_world(11);
+        twin.rules.do_mob_spawning = false;
+        twin.rules.do_daylight_cycle = false;
+        twin.tick(&[]);
+        twin.tick(&[]);
+        assert_eq!(after, twin.checksum(&[]));
     }
 
     #[test]

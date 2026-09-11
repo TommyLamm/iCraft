@@ -88,7 +88,7 @@ impl AuthorityCore {
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
             let world = self
-                .world_ref(dimension)
+                .world_mut(dimension)
                 .expect("loaded dimension missing from world map");
             revision = revision.max(world.revisions.current());
             checksums.push((dimension, world.checksum(entries)));
