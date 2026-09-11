@@ -151,11 +151,11 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     assert_eq!(runtime.metrics.players_online, 2);
     assert_eq!(
         runtime.metrics.loaded_chunks,
-        runtime.authority.world_mut_active().chunks.chunks.len()
+        runtime.authority.world_mut(Dimension::Overworld).unwrap().chunks.chunks.len()
     );
     assert_eq!(
         runtime.metrics.entities,
-        runtime.authority.world_mut_active().entities.entities.len()
+        runtime.authority.world_mut(Dimension::Overworld).unwrap().entities.entities.len()
     );
     assert!(runtime.metrics.inbound_packets >= 2);
     assert!(runtime.metrics.outbound_packets >= 2);
@@ -217,10 +217,10 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     alice.clear_events();
     bob.clear_events();
 
-    let base_revision = runtime.authority.current_revision();
+    let base_revision = runtime.authority.current_revision(Dimension::Overworld);
     let chest_mutation = runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .set_block(
             CHEST_POSITION.0,
             CHEST_POSITION.1,
@@ -235,7 +235,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     assert_eq!(
         runtime
             .authority
-            .world()
+            .world(Dimension::Overworld)
             .get_block(CHEST_POSITION.0, CHEST_POSITION.1, CHEST_POSITION.2),
         BlockType::Chest
     );
@@ -275,7 +275,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     assert_eq!(
         runtime
             .authority
-            .world()
+            .world(Dimension::Overworld)
             .get_block(CHEST_POSITION.0, CHEST_POSITION.1, CHEST_POSITION.2),
         BlockType::Chest,
         "rejected BlockAction must not overwrite the seeded chest"
@@ -460,7 +460,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     chest.set_stack(0, Some(dirt));
     runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .chunks
         .set_block_entity(
             CHEST_POSITION.0,
@@ -558,14 +558,14 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     assert_eq!(
         restarted
             .authority
-            .world()
+            .world(Dimension::Overworld)
             .get_block(CHEST_POSITION.0, CHEST_POSITION.1, CHEST_POSITION.2),
         BlockType::Chest
     );
     assert_eq!(
         restarted
             .authority
-            .world_mut_active()
+            .world_mut(Dimension::Overworld).unwrap()
             .container_slot_wire(CHEST_POSITION, 0),
         Some(Some(stone)),
         "container mutation must survive server restart exactly once"
@@ -573,13 +573,13 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     assert!(
         restarted
             .authority
-            .world_mut_active()
+            .world_mut(Dimension::Overworld).unwrap()
             .container_viewers_at(CHEST_POSITION)
             .next()
             .is_none(),
         "ephemeral container viewers must not leak across restart"
     );
-    assert!(restarted.authority.current_revision() >= click_revision);
+    assert!(restarted.authority.current_revision(Dimension::Overworld) >= click_revision);
 
     let mut reconnected = TcpClient::connect(&address, "alice");
     drive_one_until(
@@ -693,17 +693,17 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
     let lever = (7, 80, 8);
     runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .set_block(source.0, source.1, source.2, BlockType::Dispenser, 0)
         .expect("place dispenser fixture");
     runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .set_block(front.0, front.1, front.2, BlockType::Air, 0)
         .expect("clear dispenser front");
     runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .set_block(lever.0, lever.1, lever.2, BlockType::LeverOn, 0)
         .expect("place powered lever fixture");
     let mut stack = ItemStack::new(Item::Stone, 2)
@@ -712,7 +712,7 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
     stack.custom_name.set("tcp-drop");
     if let Some(BlockEntity::Dispenser(dispenser)) = runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .chunks
         .get_block_entity_mut(source.0, source.1, source.2)
     {
@@ -723,14 +723,14 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
         panic!("dispenser block entity fixture is missing");
     }
     {
-        let world = runtime.authority.world_mut_active();
+        let world = runtime.authority.world_mut(Dimension::Overworld).unwrap();
 
         world
             .redstone
             .on_block_changed(&world.chunks, lever, Direction::East);
     }
     {
-        let world = runtime.authority.world_mut_active();
+        let world = runtime.authority.world_mut(Dimension::Overworld).unwrap();
 
         world
             .redstone
@@ -797,7 +797,7 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
     );
     let source_count = match runtime
         .authority
-        .world()
+        .world(Dimension::Overworld)
         .get_block_entity(source.0, source.1, source.2)
     {
         Some(BlockEntity::Dispenser(dispenser)) => dispenser.slots[0].map_or(0, |item| item.count),
@@ -810,11 +810,11 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
     // decrement and target merge; no second DroppedItem may be spawned.
     runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .set_block(lever.0, lever.1, lever.2, BlockType::Lever, 0)
         .expect("turn dispenser fixture off");
     {
-        let world = runtime.authority.world_mut_active();
+        let world = runtime.authority.world_mut(Dimension::Overworld).unwrap();
 
         world
             .redstone
@@ -832,24 +832,24 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
 
     runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .chunks
         .set_block_entity(source.0, source.1, source.2, None);
     runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .set_block(source.0, source.1, source.2, BlockType::Dropper, 0)
         .expect("replace source with dropper");
     runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .set_block(front.0, front.1, front.2, BlockType::Chest, 0)
         .expect("place dropper target chest");
     let mut dropper_stack = stack;
     dropper_stack.count = 2;
     if let Some(BlockEntity::Dropper(dropper)) = runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .chunks
         .get_block_entity_mut(source.0, source.1, source.2)
     {
@@ -861,7 +861,7 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
     }
     if let Some(BlockEntity::Chest(chest)) = runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .chunks
         .get_block_entity_mut(front.0, front.1, front.2)
     {
@@ -872,7 +872,7 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
         panic!("dropper target chest fixture is missing");
     }
     {
-        let world = runtime.authority.world_mut_active();
+        let world = runtime.authority.world_mut(Dimension::Overworld).unwrap();
 
         world
             .redstone
@@ -880,11 +880,11 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
     }
     runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .set_block(lever.0, lever.1, lever.2, BlockType::LeverOn, 0)
         .expect("raise dropper fixture edge");
     {
-        let world = runtime.authority.world_mut_active();
+        let world = runtime.authority.world_mut(Dimension::Overworld).unwrap();
 
         world
             .redstone
@@ -927,7 +927,7 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
     assert_eq!(chest_slot(&alice_chest).map(|slot| slot.count), Some(5));
     let authority_dropped_ids: BTreeSet<_> = runtime
         .authority
-        .world()
+        .world(Dimension::Overworld)
         .entities
         .entities
         .iter()

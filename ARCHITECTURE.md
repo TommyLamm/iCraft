@@ -116,8 +116,8 @@ policy variants are gone.
 | `State` / renderer `ChunkManager` | Presentation copies: streamed chunks, meshes, GPU, particles, UI, interpolation. |
 | `SaveManager` | Durable level, player, chunk, entity, dimension, mutation-revision data. |
 
-Worlds live in a `BTreeMap` keyed by `Dimension`. `active_dimension` is a
-compatibility key, not a moved slot.
+Worlds live in a `BTreeMap` keyed by `Dimension`. Callers pass an explicit
+`Dimension` (or `&mut ServerWorld`); there is no ambient active-world pointer.
 
 One contract plus a runtime overlay stay separate because interest, Instant
 pose clocks, and the save codec cannot enter the deterministic core:
@@ -175,10 +175,10 @@ input
   sides or roll back. Client-supplied item data is never echoed as truth.
 - Revisions are `(dimension, revision)`. The aggregate snapshot revision is
   a summary only.
-- `AuthorityCore::tick` walks worlds by `BTreeMap` key. It does not
-  `activate_dimension`. After the pass, `active_dimension` is restored to the
-  value from the start of the tick. `activate_dimension` is request routing
-  (submit, session dimension change, respawn).
+- `AuthorityCore::tick` walks worlds by `BTreeMap` key. Each dimension uses an
+  explicit `world_mut(dimension)` lookup; there is no tick-end restore of an
+  active key. Request routing (`submit_request`, session dimension change,
+  respawn) also takes an explicit `Dimension`.
 - Session chat commands: `AuthorityCore::apply_command`. Dedicated console
   is a separate admin surface. `commands::Command::surface` marks
   `GameplayAllowed` vs `ConsoleOnly`; console-only strings and non-food

@@ -142,7 +142,7 @@ fn runtime_reconnects_dimension_and_routes_without_cross_dimension_leak() {
     restarted.login_session(10, "Bob").unwrap();
     restarted.set_session_dimension(10, Dimension::End);
     let _ = restarted.drain_routed_updates();
-    let old = restarted.authority.world().get_block(8, 80, 8);
+    let old = restarted.authority.world(Dimension::Overworld).get_block(8, 80, 8);
     let response = restarted
         .submit_request(
             9,
@@ -151,7 +151,7 @@ fn runtime_reconnects_dimension_and_routes_without_cross_dimension_leak() {
                 client_sequence: 1,
                 session_id: 9,
                 dimension: Dimension::Overworld as u8,
-                client_revision: restarted.authority.current_revision(),
+                client_revision: restarted.authority.current_revision(Dimension::Overworld),
                 operation: GameplayOperation::BlockAction {
                     action: BlockActionKind::Place,
                     x: 8,
@@ -172,7 +172,7 @@ fn runtime_reconnects_dimension_and_routes_without_cross_dimension_leak() {
             reason: icraft::network::protocol::RejectReason::InvalidState
         }
     ));
-    assert_eq!(restarted.authority.world().get_block(8, 80, 8), old);
+    assert_eq!(restarted.authority.world(Dimension::Overworld).get_block(8, 80, 8), old);
     let updates = restarted.drain_routed_updates();
     assert!(updates.iter().all(|update| update.target != 10
         || update.dimension != Dimension::Overworld

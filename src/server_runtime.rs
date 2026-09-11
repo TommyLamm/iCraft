@@ -879,7 +879,9 @@ impl ServerRuntime {
             difficulty,
             render_distance: properties.simulation_distance as i32,
         });
-        authority.world_mut_active().time = level.time;
+        authority
+            .world_mut_expect(level.spawn_dimension)
+            .time = level.time;
         let mut runtime = Self {
             properties,
             level,
@@ -974,14 +976,12 @@ impl ServerRuntime {
         self.metrics.loaded_chunks = self
             .authority
             .dimensions()
-            .into_iter()
             .filter_map(|dimension| self.authority.world_ref(dimension))
             .map(|world| world.chunks.chunks.len())
             .sum();
         self.metrics.entities = self
             .authority
             .dimensions()
-            .into_iter()
             .filter_map(|dimension| self.authority.world_ref(dimension))
             .map(|world| world.entities.entities.len())
             .sum();
@@ -1059,7 +1059,7 @@ impl ServerRuntime {
             if chunks.is_empty()
                 && revisions.is_empty()
                 && entities.is_empty()
-                && dimension != self.authority.active_dimension()
+                && dimension != self.level.spawn_dimension
             {
                 continue;
             }
@@ -1084,9 +1084,17 @@ impl ServerRuntime {
     }
 
     fn save_authority_state(&mut self) -> io::Result<()> {
-        let active_dimension = self.authority.active_dimension();
+        // World-level dimension.dat follows the local / first session contract,
+        // not an ambient active-world pointer.
+        let persisted_dimension = self
+            .local_session_id
+            .and_then(|id| self.authority.session(id))
+            .or_else(|| self.authority.sessions.values().next())
+            .and_then(|session| Dimension::from_wire(session.dimension))
+            .unwrap_or(self.level.spawn_dimension);
         let mut merged_revisions = MutationRevisionIndex::default();
-        for dimension in self.authority.dimensions() {
+        let dimensions: Vec<_> = self.authority.dimensions().collect();
+        for dimension in dimensions {
             let (chunks, dirty_revs, entities, revisions) =
                 self.authority.with_world(dimension, |world| {
                     let mut dirty = world.chunks.dirty_chunks.dirty_revisions();
@@ -1136,7 +1144,8 @@ impl ServerRuntime {
         }
         self.save_manager
             .save_mutation_revision_index(&merged_revisions)?;
-        self.save_manager.save_current_dimension(active_dimension)?;
+        self.save_manager
+            .save_current_dimension(persisted_dimension)?;
         Ok(())
     }
 
@@ -1258,10 +1267,12 @@ impl ServerRuntime {
     }
 
     pub(super) fn ensure_spawn_chunk(&mut self) {
-        self.authority.world_mut_active().ensure_chunk(
-            self.level.spawn_x.div_euclid(16),
-            self.level.spawn_z.div_euclid(16),
-        );
+        let dimension = self.level.spawn_dimension;
+        let cx = self.level.spawn_x.div_euclid(16);
+        let cz = self.level.spawn_z.div_euclid(16);
+        self.authority.with_world(dimension, |world| {
+            world.ensure_chunk(cx, cz);
+        });
     }
 
     pub fn valid_coordinate(&self, dimension: Dimension, x: i32, y: i32, z: i32) -> bool {
@@ -1295,7 +1306,7 @@ impl ServerRuntime {
     }
 
     fn evict_uninteresting_chunks(&mut self) {
-        let dimensions = self.authority.dimensions();
+        let dimensions: Vec<_> = self.authority.dimensions().collect();
         for dimension in dimensions {
             let keep = self.residency_keep_set(dimension);
             let mut pending = Vec::new();
@@ -2341,8 +2352,11 @@ mod tests {
         let mut runtime = ServerRuntime::new(properties).unwrap();
         runtime.handle_join(1, "alex".into()).unwrap();
         runtime.handle_join(2, "steve".into()).unwrap();
-        let before = runtime.authority.world().get_block(8, 80, 8);
-        let revision_before = runtime.authority.current_revision();
+        let before = runtime
+            .authority
+            .world(Dimension::Overworld)
+            .get_block(8, 80, 8);
+        let revision_before = runtime.authority.current_revision(Dimension::Overworld);
         let first = runtime
             .submit_request(
                 1,
@@ -2401,10 +2415,19 @@ mod tests {
                 reason: RejectReason::InvalidState
             }
         ));
-        assert_eq!(runtime.authority.current_revision(), revision_before);
+        assert_eq!(
+            runtime.authority.current_revision(Dimension::Overworld),
+            revision_before
+        );
         assert_eq!(first.server_sequence, revision_before);
         assert_eq!(second.server_sequence, revision_before);
-        assert_eq!(runtime.authority.world().get_block(8, 80, 8), before);
+        assert_eq!(
+            runtime
+                .authority
+                .world(Dimension::Overworld)
+                .get_block(8, 80, 8),
+            before
+        );
         let _ = runtime.shutdown();
         let _ = fs::remove_dir_all(&runtime.world_dir);
     }
@@ -2890,13 +2913,15 @@ mod tests {
         runtime.run_for_ticks(8).unwrap();
         assert!(runtime
             .authority
-            .world_mut_active()
+            .world_mut(Dimension::Overworld)
+            .unwrap()
             .chunks
             .chunks
             .contains_key(&(0, 0)));
         assert!(!runtime
             .authority
-            .world_mut_active()
+            .world_mut(Dimension::Overworld)
+            .unwrap()
             .chunks
             .chunks
             .contains_key(&(8, 0)));
@@ -2904,14 +2929,14 @@ mod tests {
         runtime.tick().unwrap();
         assert!(!runtime
             .authority
-            .world_mut_active()
+            .world_mut(Dimension::Overworld)
+            .unwrap()
             .chunks
             .chunks
             .contains_key(&(0, 0)));
         let loaded: usize = runtime
             .authority
             .dimensions()
-            .into_iter()
             .filter_map(|dimension| runtime.authority.world_ref(dimension))
             .map(|world| world.chunks.chunks.len())
             .sum();

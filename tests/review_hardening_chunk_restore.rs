@@ -100,7 +100,7 @@ fn save_all_does_not_replace_empty_inner_zlib_with_generated_terrain() {
     assert!(
         !runtime
             .authority
-            .world_mut_active()
+            .world_mut(Dimension::Overworld).unwrap()
             .chunks
             .chunks
             .contains_key(&(0, 0)),
@@ -108,7 +108,7 @@ fn save_all_does_not_replace_empty_inner_zlib_with_generated_terrain() {
     );
     assert!(runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .failed_restore_chunks()
         .contains(&(0, 0)));
 
@@ -136,10 +136,10 @@ fn player_modified_chunk_with_corrupt_inner_zlib_is_not_rewritten_as_generated()
     overwrite_region_chunk_payload(&path, 0, 0, corrupt_payload.clone());
 
     let mut runtime = dedicated_runtime(world_dir.clone());
-    runtime.authority.world_mut_active().ensure_chunk(0, 0);
+    runtime.authority.world_mut(Dimension::Overworld).unwrap().ensure_chunk(0, 0);
     assert!(!runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .chunks
         .chunks
         .contains_key(&(0, 0)));

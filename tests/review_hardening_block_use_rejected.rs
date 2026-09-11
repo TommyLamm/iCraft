@@ -1,5 +1,6 @@
 mod common;
 
+use icraft::dimension::Dimension;
 use common::tcp_harness::{
     drive_until, gameplay_request as request, seeded_properties, session_slot as slot,
     wait_for_response, HeldLoopback, TcpClient,
@@ -28,10 +29,10 @@ fn properties(label: &str) -> ServerProperties {
 }
 
 fn seed_chest_and_inventory(runtime: &mut ServerRuntime, player_id: u64) {
-    runtime.authority.world_mut_active().ensure_chunk(0, 0);
+    runtime.authority.world_mut(Dimension::Overworld).unwrap().ensure_chunk(0, 0);
     runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .set_block(TARGET.0, TARGET.1, TARGET.2, BlockType::Chest, 0)
         .expect("seed chest through authoritative set_block");
     let mut gameplay = SessionGameplayState::default();
@@ -75,7 +76,7 @@ fn rejected_place(block: BlockType) -> GameplayOperation {
 fn dropped_item_count(runtime: &ServerRuntime) -> usize {
     runtime
         .authority
-        .world()
+        .world(Dimension::Overworld)
         .entities
         .entities
         .iter()
@@ -104,7 +105,7 @@ fn assert_block_action_rejected(
     assert_eq!(
         runtime
             .authority
-            .world()
+            .world(Dimension::Overworld)
             .get_block(TARGET.0, TARGET.1, TARGET.2),
         expected_block,
         "rejected BlockAction must not mutate the target cell"
@@ -141,7 +142,7 @@ fn embedded_block_use_diamond_ore_is_unsupported_and_preserves_world() {
     assert_eq!(
         runtime
             .authority
-            .world()
+            .world(Dimension::Overworld)
             .get_block(TARGET.0, TARGET.1, TARGET.2),
         BlockType::Chest
     );
@@ -222,7 +223,7 @@ fn embedded_block_use_air_cannot_clear_chest() {
     assert!(
         runtime
             .authority
-            .world()
+            .world(Dimension::Overworld)
             .get_block_entity(TARGET.0, TARGET.1, TARGET.2)
             .is_some(),
         "rejected Air BlockAction must not delete the chest block entity"

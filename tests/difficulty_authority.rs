@@ -1,5 +1,6 @@
 mod common;
 
+use icraft::dimension::Dimension;
 use common::tcp_harness::{temp_world, HeldLoopback};
 use glam::Vec3;
 use icraft::entity::EntityType;
@@ -46,10 +47,10 @@ fn server_difficulty_is_strict_and_pvp_remains_independent() {
     )
     .expect("peaceful config should construct");
     assert_eq!(
-        runtime.authority.world_mut_active().difficulty,
+        runtime.authority.world_mut(Dimension::Overworld).unwrap().difficulty,
         Difficulty::Peaceful
     );
-    assert!(runtime.authority.world_mut_active().rules.pvp);
+    assert!(runtime.authority.world_mut(Dimension::Overworld).unwrap().rules.pvp);
     runtime.shutdown().expect("shutdown should persist cleanly");
     let _ = fs::remove_dir_all(world_dir);
 }
@@ -116,7 +117,7 @@ fn difficulty_persists_through_server_properties_and_embedded_dedicated_parity()
     )
     .expect("embedded listen topology should construct");
     assert_eq!(
-        embedded.authority.world_mut_active().difficulty,
+        embedded.authority.world_mut(Dimension::Overworld).unwrap().difficulty,
         Difficulty::Hard
     );
     embedded
@@ -133,7 +134,7 @@ fn difficulty_persists_through_server_properties_and_embedded_dedicated_parity()
     )
     .expect("reloaded embedded runtime");
     assert_eq!(
-        reloaded.authority.world_mut_active().difficulty,
+        reloaded.authority.world_mut(Dimension::Overworld).unwrap().difficulty,
         Difficulty::Hard
     );
     reloaded.shutdown().expect("reloaded shutdown");
@@ -144,7 +145,7 @@ fn difficulty_persists_through_server_properties_and_embedded_dedicated_parity()
     let _port = reserved.release();
     let mut dedicated = ServerRuntime::new(dedicated_props).expect("dedicated runtime");
     assert_eq!(
-        dedicated.authority.world_mut_active().difficulty,
+        dedicated.authority.world_mut(Dimension::Overworld).unwrap().difficulty,
         Difficulty::Hard
     );
     dedicated.shutdown().expect("dedicated shutdown");

@@ -14,8 +14,7 @@ impl AuthorityCore {
     /// routing/persistence identity.
     pub fn tick(&mut self) -> AuthoritySnapshot {
         self.fixed_tick = self.fixed_tick.wrapping_add(1).max(1);
-        let active_before_tick = self.active_dimension;
-        let dimensions = self.dimensions();
+        let dimensions: Vec<Dimension> = self.dimensions().collect();
         let mut mutations_by_dimension: BTreeMap<Dimension, Vec<WorldMutation>> = BTreeMap::new();
 
         for dimension in dimensions.iter().copied() {
@@ -32,35 +31,26 @@ impl AuthorityCore {
                         .map(|session| (session.id, session.position))
                 })
                 .collect();
-            let world_snapshot = self
-                .world_mut(dimension)
-                .expect("loaded dimension missing from world map")
-                .tick(&players);
-            let mut world_mutations = world_snapshot.mutations;
-            // Redstone emits dispenser/dropper edges from inside the world
-            // tick, but entity ids belong to AuthorityCore's global namespace.
-            // Drain and execute them here before collecting pending revisions
-            // so source/target block entities and spawned entities share one
-            // deterministic snapshot boundary.
-            let actions = self
-                .world_mut(dimension)
-                .expect("loaded dimension missing from world map")
-                .take_pending_redstone_actions();
+            // One world_mut for tick + redstone drain; dispense needs a fresh
+            // borrow so AuthorityCore can allocate global entity ids.
+            let (mut world_mutations, actions) = {
+                let world = self
+                    .world_mut(dimension)
+                    .expect("loaded dimension missing from world map");
+                let world_snapshot = world.tick(&players);
+                let actions = world.take_pending_redstone_actions();
+                (world_snapshot.mutations, actions)
+            };
             for action in actions {
                 let candidate = self.next_unique_entity_id();
                 let spawned = self
-                    .world_mut(dimension)
-                    .expect("loaded dimension missing from world map")
+                    .world_mut_expect(dimension)
                     .execute_redstone_dispense(action, candidate);
                 if spawned {
                     self.claim_entity_id(candidate);
                 }
             }
-            world_mutations.extend(
-                self.world_mut(dimension)
-                    .expect("loaded dimension missing from world map")
-                    .take_pending_mutations(),
-            );
+            world_mutations.extend(self.world_mut_expect(dimension).take_pending_mutations());
             mutations_by_dimension.insert(dimension, world_mutations);
         }
 
@@ -93,9 +83,6 @@ impl AuthorityCore {
             revision = revision.max(world.revisions.current());
             checksums.push((dimension, world.checksum(entries)));
         }
-        // Portal travel still calls set_session_dimension -> activate_dimension.
-        // Restore the compatibility view for State / ServerRuntime / save.
-        self.activate_dimension(active_before_tick);
 
         let session_updates = self.take_dirty_session_updates();
         let snapshot = AuthoritySnapshot {

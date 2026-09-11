@@ -186,7 +186,7 @@ fn prepare_topology_fixture(harness: &mut TopologyHarness) {
         harness
             .runtime
             .authority
-            .world_mut_active()
+            .world_mut(Dimension::Overworld).unwrap()
             .set_block(position[0], position[1], position[2], block, 0)
             .unwrap();
     }
@@ -199,7 +199,7 @@ fn prepare_topology_fixture(harness: &mut TopologyHarness) {
     harness
         .runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .chunks
         .set_block_entity(
             furnace_position[0],
@@ -286,19 +286,19 @@ fn prepare_dispenser_fixture(harness: &mut TopologyHarness) -> ItemWire {
     harness
         .runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .set_block(source.0, source.1, source.2, BlockType::Dispenser, 0)
         .unwrap();
     harness
         .runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .set_block(front.0, front.1, front.2, BlockType::Air, 0)
         .unwrap();
     harness
         .runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .set_block(lever.0, lever.1, lever.2, BlockType::LeverOn, 0)
         .unwrap();
 
@@ -309,7 +309,7 @@ fn prepare_dispenser_fixture(harness: &mut TopologyHarness) -> ItemWire {
     if let Some(BlockEntity::Dispenser(dispenser)) = harness
         .runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .chunks
         .get_block_entity_mut(source.0, source.1, source.2)
     {
@@ -320,13 +320,13 @@ fn prepare_dispenser_fixture(harness: &mut TopologyHarness) -> ItemWire {
         panic!("dispenser block entity fixture is missing");
     }
     {
-        let world = harness.runtime.authority.world_mut_active();
+        let world = harness.runtime.authority.world_mut(Dimension::Overworld).unwrap();
         world
             .redstone
             .on_block_changed(&world.chunks, lever, icraft::redstone::Direction::East);
     }
     {
-        let world = harness.runtime.authority.world_mut_active();
+        let world = harness.runtime.authority.world_mut(Dimension::Overworld).unwrap();
         world
             .redstone
             .on_block_changed(&world.chunks, source, icraft::redstone::Direction::East);
@@ -557,13 +557,13 @@ fn plan24_plan22_gameplay_vectors_match_all_runtime_topologies() {
         let target_entity = harness
             .runtime
             .authority
-            .world_mut_active()
+            .world_mut(Dimension::Overworld).unwrap()
             .entities
             .spawn(EntityType::Zombie, Vec3::new(8.0, 80.0, 9.0));
         harness
             .runtime
             .authority
-            .world_mut_active()
+            .world_mut(Dimension::Overworld).unwrap()
             .entities
             .get_by_id_mut(target_entity)
             .unwrap()
@@ -576,7 +576,7 @@ fn plan24_plan22_gameplay_vectors_match_all_runtime_topologies() {
         assert!(harness
             .runtime
             .authority
-            .world_mut_active()
+            .world_mut(Dimension::Overworld).unwrap()
             .entities
             .get_by_id(target_entity)
             .is_none());
@@ -784,7 +784,7 @@ fn plan28_dispenser_item_projection_matches_all_runtime_topologies() {
         } else {
             baseline = Some(projection);
         }
-        let source_count = match harness.runtime.authority.world().get_block_entity(8, 80, 8) {
+        let source_count = match harness.runtime.authority.world(Dimension::Overworld).get_block_entity(8, 80, 8) {
             Some(BlockEntity::Dispenser(dispenser)) => {
                 dispenser.slots[0].map_or(0, |stack| stack.count)
             }
@@ -813,14 +813,14 @@ fn disabled_singleplayer_drains_local_request_through_fixed_tick_fifo() {
     let revision = runtime
         .authority
         .revision_for_dimension(Dimension::Overworld);
-    let before = runtime.authority.world().get_block(8, 80, 8);
+    let before = runtime.authority.world(Dimension::Overworld).get_block(8, 80, 8);
     input
         .submit_request(local_id, leftover_block_use(local_id, revision, 41))
         .unwrap();
 
     // Publication is queued: authority state cannot change before the fixed
     // tick consumes the same bounded FIFO used by listen transport events.
-    assert_eq!(runtime.authority.world().get_block(8, 80, 8), before);
+    assert_eq!(runtime.authority.world(Dimension::Overworld).get_block(8, 80, 8), before);
     let output = runtime.tick_with_output().unwrap();
     let response = response_for(&output.presentation_events, local_id, 41).unwrap();
     assert!(matches!(
@@ -834,7 +834,7 @@ fn disabled_singleplayer_drains_local_request_through_fixed_tick_fifo() {
         .mutations
         .iter()
         .any(|mutation| mutation.position == (8, 80, 8)));
-    assert_eq!(runtime.authority.world().get_block(8, 80, 8), before);
+    assert_eq!(runtime.authority.world(Dimension::Overworld).get_block(8, 80, 8), before);
     assert_eq!(runtime.metrics().queue_depth, 0);
     assert_eq!(runtime.metrics().queue_full, 0);
     assert_eq!(runtime.metrics().outbound_packets, 0);
@@ -859,7 +859,7 @@ fn listen_runtime_routes_local_response_to_tick_output() {
     let revision = runtime
         .authority
         .revision_for_dimension(Dimension::Overworld);
-    let before = runtime.authority.world().get_block(8, 80, 8);
+    let before = runtime.authority.world(Dimension::Overworld).get_block(8, 80, 8);
     input
         .submit_request(local_id, leftover_block_use(local_id, revision, 42))
         .unwrap();
@@ -879,7 +879,7 @@ fn listen_runtime_routes_local_response_to_tick_output() {
         .mutations
         .iter()
         .any(|mutation| mutation.position == (8, 80, 8)));
-    assert_eq!(runtime.authority.world().get_block(8, 80, 8), before);
+    assert_eq!(runtime.authority.world(Dimension::Overworld).get_block(8, 80, 8), before);
 
     runtime.shutdown().unwrap();
     drop(runtime);

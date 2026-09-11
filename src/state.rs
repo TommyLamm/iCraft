@@ -8573,6 +8573,7 @@ mod render_region_lifecycle_tests {
 #[cfg(test)]
 mod debug_tests {
     use super::*;
+    use crate::dimension::Dimension;
 
     fn embedded_test_world(name: &str) -> std::path::PathBuf {
         let unique = format!(
@@ -8612,7 +8613,7 @@ mod debug_tests {
             crate::server_runtime::LocalSessionStorage::WorldPlayer
         );
 
-        let before = bridge.runtime.authority.world().get_block(8, 80, 8);
+        let before = bridge.runtime.authority.world(Dimension::Overworld).get_block(8, 80, 8);
         bridge
             .queue_request(crate::network::protocol::GameplayRequest {
                 request_id: 0,
@@ -8633,7 +8634,7 @@ mod debug_tests {
                 },
             })
             .expect("request should enter bounded FIFO");
-        assert_eq!(bridge.runtime.authority.world().get_block(8, 80, 8), before);
+        assert_eq!(bridge.runtime.authority.world(Dimension::Overworld).get_block(8, 80, 8), before);
         let output = bridge.tick().expect("fixed tick should run");
         assert!(!output
             .snapshot
@@ -8641,7 +8642,7 @@ mod debug_tests {
             .iter()
             .any(|mutation| mutation.position == (8, 80, 8)
                 && mutation.block == BlockType::Glass.to_wire()));
-        assert_eq!(bridge.runtime.authority.world().get_block(8, 80, 8), before);
+        assert_eq!(bridge.runtime.authority.world(Dimension::Overworld).get_block(8, 80, 8), before);
         assert!(output.presentation_events.iter().any(|event| {
             matches!(
                 event,

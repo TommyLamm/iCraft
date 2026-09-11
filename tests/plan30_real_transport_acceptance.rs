@@ -1,5 +1,6 @@
 mod common;
 
+use icraft::dimension::Dimension;
 use common::tcp_harness::{
     current_revision, drive_until, gameplay_request as request, seeded_properties, session_slot,
     source, wait_for_response, HeldLoopback, TcpClient,
@@ -42,7 +43,7 @@ fn reset_persistent_domains(runtime: &mut ServerRuntime, id: u64) {
     if let Some(hook) = hook {
         runtime
             .authority
-            .world_mut_active()
+            .world_mut(Dimension::Overworld).unwrap()
             .remove_authority_entity(hook);
     }
     let revision = current_revision(runtime, id);
@@ -61,7 +62,7 @@ fn prepare_fixture(runtime: &mut ServerRuntime, owner: u64, victim: u64) {
     let anvil_position = (8, 80, 12);
     runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .set_block(
             furnace_position.0,
             furnace_position.1,
@@ -72,7 +73,7 @@ fn prepare_fixture(runtime: &mut ServerRuntime, owner: u64, victim: u64) {
         .expect("fixture furnace block");
     runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .set_block(
             brew_position.0,
             brew_position.1,
@@ -87,7 +88,7 @@ fn prepare_fixture(runtime: &mut ServerRuntime, owner: u64, victim: u64) {
     ] {
         runtime
             .authority
-            .world_mut_active()
+            .world_mut(Dimension::Overworld).unwrap()
             .set_block(position.0, position.1, position.2, block, 0)
             .expect("fixture workstation block");
     }
@@ -96,7 +97,7 @@ fn prepare_fixture(runtime: &mut ServerRuntime, owner: u64, victim: u64) {
     furnace.accumulated_xp = 4.0;
     runtime
         .authority
-        .world_mut_active()
+        .world_mut(Dimension::Overworld).unwrap()
         .chunks
         .set_block_entity(
             furnace_position.0,

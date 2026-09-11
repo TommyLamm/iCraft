@@ -87,8 +87,7 @@ impl AuthorityCore {
             return self.reject_for_session(id, request_id, RejectReason::InvalidDimension, None);
         };
         self.ensure_dimension(session_dimension);
-        self.activate_dimension(session_dimension);
-        let current_revision = self.current_revision();
+        let current_revision = self.current_revision(session_dimension);
         if let Err(reason) = request.validate_bounds() {
             // Bounds failures stay non-consuming so console-only / malformed
             // packets cannot burn the accepted-sequence watermark.
@@ -110,9 +109,12 @@ impl AuthorityCore {
                 }
             }
         };
-        if let Err(reason) =
-            self.world()
-                .validate_request(&request, ctx.dimension, ctx.position, ctx.operator)
+        if let Err(reason) = self.world(session_dimension).validate_request(
+            &request,
+            ctx.dimension,
+            ctx.position,
+            ctx.operator,
+        )
         {
             return self.reject_for_session(
                 id,
@@ -152,10 +154,10 @@ impl AuthorityCore {
                 slot,
             } => match action {
                 ContainerAction::Open => self
-                    .world_mut_active()
+                    .world_mut_expect(session_dimension)
                     .open_container(*x, *y, *z, *slot, id),
                 ContainerAction::Close => self
-                    .world_mut_active()
+                    .world_mut_expect(session_dimension)
                     .close_container(*x, *y, *z, *slot, id),
             },
             GameplayOperation::ContainerClick {
@@ -171,7 +173,7 @@ impl AuthorityCore {
                 self.apply_authoritative_combat(&request, id, *target, *action)
             }
             GameplayOperation::Sleep { x, y, z } => {
-                self.world_mut_active().sleep_player(*x, *y, *z, id)
+                self.world_mut_expect(session_dimension).sleep_player(*x, *y, *z, id)
             }
             GameplayOperation::Trade {
                 villager_id,
@@ -201,7 +203,7 @@ impl AuthorityCore {
                 self.apply_transaction_operation(id, &request.operation)
             }
         };
-        let pending_world_mutations = self.world_mut_active().take_pending_mutations();
+        let pending_world_mutations = self.world_mut_expect(session_dimension).take_pending_mutations();
         self.pending_mutations.extend(pending_world_mutations);
         let response = match result {
             Ok(mutation) => {
@@ -210,7 +212,7 @@ impl AuthorityCore {
                 }
                 let revision = mutation
                     .map(|mutation| mutation.revision)
-                    .unwrap_or_else(|| self.world_mut_active().revisions.allocate());
+                    .unwrap_or_else(|| self.world_mut_expect(session_dimension).revisions.allocate());
                 GameplayResponse {
                     request_id,
                     server_sequence: revision,
@@ -308,6 +310,13 @@ impl AuthorityCore {
         villager_id: u64,
         offer_index: u16,
     ) -> Result<Option<WorldMutation>, RejectReason> {
+        let Some(dimension) = self
+            .sessions
+            .get(&session_id)
+            .and_then(|session| Dimension::from_wire(session.dimension))
+        else {
+            return Err(RejectReason::Unauthorized);
+        };
         let Some(position) = self.sessions.get(&session_id).map(|s| s.position) else {
             return Err(RejectReason::Unauthorized);
         };
@@ -315,7 +324,7 @@ impl AuthorityCore {
             return Err(RejectReason::Unauthorized);
         };
         let original = gameplay;
-        self.world_mut_active()
+        self.world_mut_expect(dimension)
             .apply_trade(&mut gameplay, villager_id, offer_index, position)?;
         if !preserves_brew_locks(&original, &gameplay) {
             return Err(RejectReason::InvalidState);
@@ -331,11 +340,18 @@ impl AuthorityCore {
         session_id: PlayerId,
         entity_id: u64,
     ) -> Result<Option<WorldMutation>, RejectReason> {
+        let Some(dimension) = self
+            .sessions
+            .get(&session_id)
+            .and_then(|session| Dimension::from_wire(session.dimension))
+        else {
+            return Err(RejectReason::Unauthorized);
+        };
         let Some(position) = self.sessions.get(&session_id).map(|s| s.position) else {
             return Err(RejectReason::Unauthorized);
         };
         let mounted = self
-            .world_mut_active()
+            .world_mut_expect(dimension)
             .apply_mount(session_id, entity_id, position)?;
         if let Some(session) = self.sessions.get_mut(&session_id) {
             session.gameplay.mounted_entity = mounted;
@@ -360,7 +376,7 @@ impl AuthorityCore {
         let Some(dimension) = Dimension::from_wire(session.dimension) else {
             return Err(RejectReason::InvalidDimension);
         };
-        if dimension != self.world().dimension {
+        if dimension != self.world(dimension).dimension {
             return Err(RejectReason::InvalidDimension);
         }
         if matches!(action, BlockActionKind::CancelBreak) {
@@ -373,7 +389,7 @@ impl AuthorityCore {
             let expected =
                 crate::world::BlockType::from_wire(block_wire).ok_or(RejectReason::InvalidState)?;
             let actual = self
-                .world_mut_active()
+                .world_mut_expect(dimension)
                 .chunks
                 .get_loaded_block(position.0, position.1, position.2)
                 .ok_or(RejectReason::InvalidState)?;
@@ -425,7 +441,7 @@ impl AuthorityCore {
             }
         };
         if !self
-            .world()
+            .world(dimension)
             .valid_coordinate(position.0, position.1, position.2)
         {
             return Err(RejectReason::InvalidCoordinate);
@@ -434,14 +450,14 @@ impl AuthorityCore {
         match action {
             BlockActionKind::StartBreak => {
                 let Some(target_block) = self
-                    .world_mut_active()
+                    .world_mut_expect(dimension)
                     .chunks
                     .get_loaded_block(position.0, position.1, position.2)
                 else {
                     return Err(RejectReason::InvalidState);
                 };
                 if target_block == crate::world::BlockType::Air
-                    || !self.world_mut_active().has_block_line_of_sight(
+                    || !self.world_mut_expect(dimension).has_block_line_of_sight(
                         session.position,
                         look_milli,
                         position,
@@ -451,13 +467,13 @@ impl AuthorityCore {
                 }
                 let policy = crate::game_rules::GameModePolicy::for_rules(
                     session.game_mode,
-                    &self.world().rules,
+                    &self.world(dimension).rules,
                 );
                 if !policy.can_break_stack(current_stack.as_ref(), target_block) {
                     return Err(RejectReason::PermissionDenied);
                 }
                 let target_state = self
-                    .world()
+                    .world(dimension)
                     .get_block_state(position.0, position.1, position.2);
                 let progress = MiningProgressState {
                     dimension: dimension as u8,
@@ -500,7 +516,7 @@ impl AuthorityCore {
             BlockActionKind::Place => {
                 let block = crate::world::BlockType::from_wire(block_wire)
                     .ok_or(RejectReason::InvalidState)?;
-                if !self.world().has_block_line_of_sight(
+                if !self.world(dimension).has_block_line_of_sight(
                     session.position,
                     look_milli,
                     (
@@ -517,7 +533,7 @@ impl AuthorityCore {
                     position.2.saturating_sub(i32::from(face[2])),
                 );
                 let Some(support_block) = self
-                    .world_mut_active()
+                    .world_mut_expect(dimension)
                     .chunks
                     .get_loaded_block(support.0, support.1, support.2)
                 else {
@@ -525,7 +541,7 @@ impl AuthorityCore {
                 };
                 let policy = crate::game_rules::GameModePolicy::for_rules(
                     session.game_mode,
-                    &self.world().rules,
+                    &self.world(dimension).rules,
                 );
                 let Some(held_stack) = current_stack.as_ref() else {
                     return Err(RejectReason::PermissionDenied);
@@ -556,7 +572,7 @@ impl AuthorityCore {
                     }
                 }
                 let mutation = self
-                    .world_mut_active()
+                    .world_mut_expect(dimension)
                     .apply_block_place(position, face, block)?;
                 let Some(session) = self.sessions.get_mut(&session_id) else {
                     return Err(RejectReason::Unauthorized);
@@ -569,7 +585,7 @@ impl AuthorityCore {
                     return Err(RejectReason::PermissionDenied);
                 };
                 if held_stack.item != crate::inventory::Item::FlintAndSteel
-                    || self.world().get_block(position.0, position.1, position.2)
+                    || self.world(dimension).get_block(position.0, position.1, position.2)
                         != crate::world::BlockType::Air
                 {
                     return Err(RejectReason::InvalidState);
@@ -579,9 +595,9 @@ impl AuthorityCore {
                     position.1.saturating_sub(i32::from(face[1])),
                     position.2.saturating_sub(i32::from(face[2])),
                 );
-                if self.world().get_block(support.0, support.1, support.2)
+                if self.world(dimension).get_block(support.0, support.1, support.2)
                     != crate::world::BlockType::Obsidian
-                    || !self.world_mut_active().has_block_line_of_sight(
+                    || !self.world_mut_expect(dimension).has_block_line_of_sight(
                         session.position,
                         look_milli,
                         support,
@@ -606,7 +622,7 @@ impl AuthorityCore {
                 if !preserves_brew_locks(&session.gameplay, &next_gameplay) {
                     return Err(RejectReason::InvalidState);
                 }
-                let mutation = self.world_mut_active().set_block(
+                let mutation = self.world_mut_expect(dimension).set_block(
                     position.0,
                     position.1,
                     position.2,
@@ -627,9 +643,9 @@ impl AuthorityCore {
                     return Err(RejectReason::PermissionDenied);
                 };
                 if held_stack.item != crate::inventory::Item::EyeOfEnder
-                    || self.world().get_block(position.0, position.1, position.2)
+                    || self.world(dimension).get_block(position.0, position.1, position.2)
                         != crate::world::BlockType::EndPortalFrame
-                    || !self.world_mut_active().has_block_line_of_sight(
+                    || !self.world_mut_expect(dimension).has_block_line_of_sight(
                         session.position,
                         look_milli,
                         position,
@@ -655,7 +671,7 @@ impl AuthorityCore {
                 if !preserves_brew_locks(&session.gameplay, &next_gameplay) {
                     return Err(RejectReason::InvalidState);
                 }
-                let mutation = self.world_mut_active().set_block(
+                let mutation = self.world_mut_expect(dimension).set_block(
                     position.0,
                     position.1,
                     position.2,
@@ -767,6 +783,13 @@ impl AuthorityCore {
         use crate::authority::fishing;
         use crate::inventory::GameMode;
 
+        let Some(dimension) = self
+            .sessions
+            .get(&session_id)
+            .and_then(|session| Dimension::from_wire(session.dimension))
+        else {
+            return Err(RejectReason::Unauthorized);
+        };
         let Some((position, game_mode, original)) = self
             .sessions
             .get(&session_id)
@@ -784,8 +807,8 @@ impl AuthorityCore {
                 }
                 let hook_id = self.next_unique_entity_id();
                 let context = fishing::FishingDomainContext {
-                    world_seed: self.world().seed as u64
-                        ^ (u64::from(self.world().dimension as u8) << 32),
+                    world_seed: self.world(dimension).seed as u64
+                        ^ (u64::from(self.world(dimension).dimension as u8) << 32),
                     hook_entity_id: hook_id,
                     player_position_milli: position_to_milli(position)?,
                     open_water: false,
@@ -801,19 +824,19 @@ impl AuthorityCore {
                     return Err(RejectReason::InvalidState);
                 }
                 let context = self
-                    .world_mut_active()
+                    .world_mut_expect(dimension)
                     .fishing_context(&candidate, position, game_mode != GameMode::Creative)?;
                 fishing::reel(&mut candidate, session_id, hand, context)?;
             }
             2 => {
                 let context = self
-                    .world_mut_active()
+                    .world_mut_expect(dimension)
                     .fishing_context(&candidate, position, game_mode != GameMode::Creative)?;
                 fishing::cancel(&mut candidate, hand, context)?;
             }
             _ => return Err(RejectReason::InvalidState),
         }
-        self.world_mut_active().sync_authority_hook(
+        self.world_mut_expect(dimension).sync_authority_hook(
             previous_hook,
             candidate.fishing_hook,
             session_id,
@@ -833,6 +856,13 @@ impl AuthorityCore {
         is_left: bool,
         claimed: Option<&ItemWire>,
     ) -> Result<Option<WorldMutation>, RejectReason> {
+        let Some(dimension) = self
+            .sessions
+            .get(&session_id)
+            .and_then(|session| Dimension::from_wire(session.dimension))
+        else {
+            return Err(RejectReason::Unauthorized);
+        };
         let Some(original) = self
             .sessions
             .get(&session_id)
@@ -841,7 +871,7 @@ impl AuthorityCore {
             return Err(RejectReason::Unauthorized);
         };
         let is_viewer = self
-            .world_mut_active()
+            .world_mut_expect(dimension)
             .container_viewers
             .get(&position)
             .is_some_and(|viewers| viewers.contains(&session_id));
@@ -849,7 +879,7 @@ impl AuthorityCore {
             return Err(RejectReason::PermissionDenied);
         }
         let slot_index = usize::from(slot);
-        let Some(mut slots) = self.world_mut_active().container_item_slots(position) else {
+        let Some(mut slots) = self.world_mut_expect(dimension).container_item_slots(position) else {
             return Err(RejectReason::InvalidState);
         };
         if slot_index >= slots.len() {
@@ -897,7 +927,7 @@ impl AuthorityCore {
         };
         session.gameplay = candidate;
         match self
-            .world_mut_active()
+            .world_mut_expect(dimension)
             .commit_container_item_slots(position, &slots)
         {
             Ok(mutation) => Ok(Some(mutation)),
@@ -918,6 +948,13 @@ impl AuthorityCore {
         use crate::authority::transactions::{self, WorkstationContext};
         use crate::inventory::Item;
 
+        let Some(dimension) = self
+            .sessions
+            .get(&session_id)
+            .and_then(|session| Dimension::from_wire(session.dimension))
+        else {
+            return Err(RejectReason::Unauthorized);
+        };
         let Some(original) = self
             .sessions
             .get(&session_id)
@@ -929,7 +966,7 @@ impl AuthorityCore {
         let mut mutation = None;
         match operation {
             GameplayOperation::FurnaceTakeOutput { x, y, z, count } => {
-                mutation = Some(self.world_mut_active().take_furnace_output(
+                mutation = Some(self.world_mut_expect(dimension).take_furnace_output(
                     &mut candidate,
                     [*x, *y, *z],
                     *count,
@@ -951,14 +988,14 @@ impl AuthorityCore {
                     (2, None) => WorkstationContext::personal_crafting(),
                     (3, Some(position)) => WorkstationContext::at(
                         position,
-                        self.world()
+                        self.world(dimension)
                             .get_block(position[0], position[1], position[2]),
                     ),
                     _ => return Err(RejectReason::InvalidState),
                 };
                 transactions::execute_craft(
                     &mut candidate,
-                    &self.world().recipe_manager,
+                    &self.world(dimension).recipe_manager,
                     context,
                     *grid,
                     *sources,
@@ -977,8 +1014,8 @@ impl AuthorityCore {
                 let position = [*x, *y, *z];
                 let context = WorkstationContext::enchanting(
                     position,
-                    self.world().get_block(*x, *y, *z),
-                    self.world().bookshelf_power(position),
+                    self.world(dimension).get_block(*x, *y, *z),
+                    self.world(dimension).bookshelf_power(position),
                 );
                 transactions::execute_enchant(&mut candidate, context, *source, *option)?;
                 if !preserves_brew_locks(&original, &candidate) {
@@ -994,7 +1031,7 @@ impl AuthorityCore {
                 bottles,
             } => {
                 let position = [*x, *y, *z];
-                let context = WorkstationContext::at(position, self.world().get_block(*x, *y, *z));
+                let context = WorkstationContext::at(position, self.world(dimension).get_block(*x, *y, *z));
                 match *action {
                     0 => {
                         let ingredient = ingredient.ok_or(RejectReason::InvalidState)?;
@@ -1025,7 +1062,7 @@ impl AuthorityCore {
                     return Err(RejectReason::InvalidState);
                 }
                 let position = [*x, *y, *z];
-                let context = WorkstationContext::at(position, self.world().get_block(*x, *y, *z));
+                let context = WorkstationContext::at(position, self.world(dimension).get_block(*x, *y, *z));
                 transactions::execute_anvil(&mut candidate, context, *left, *right, rename)?;
             }
             GameplayOperation::UseState { hand, active } => {
@@ -1074,6 +1111,13 @@ impl AuthorityCore {
         if action != 0 || target == 0 || target == session_id {
             return Err(RejectReason::InvalidState);
         }
+        let Some(dimension) = self
+            .sessions
+            .get(&session_id)
+            .and_then(|session| Dimension::from_wire(session.dimension))
+        else {
+            return Err(RejectReason::Unauthorized);
+        };
         let Some(attacker) = self.sessions.get(&session_id).map(|s| s.action_view()) else {
             return Err(RejectReason::Unauthorized);
         };
@@ -1087,7 +1131,7 @@ impl AuthorityCore {
             attacker.gameplay.attack_cooldown_ticks >= super::ATTACK_COOLDOWN_TICKS;
 
         if let Some(target_session) = self.sessions.get(&target).map(|s| s.action_view()) {
-            if !self.world().rules.pvp
+            if !self.world(dimension).rules.pvp
                 || target_session.dimension != attacker.dimension
                 || matches!(
                     target_session.game_mode,
@@ -1109,7 +1153,7 @@ impl AuthorityCore {
                 target_look_milli: look_from_angles(target_session.yaw, target_session.pitch)?,
                 cooldown_ready,
                 has_line_of_sight: self
-                    .world_mut_active()
+                    .world_mut_expect(dimension)
                     .has_line_of_sight(attacker.position, target_session.position),
                 attacker_used_axe: profile.used_axe,
                 knockback_milli: profile.knockback_milli,
@@ -1127,14 +1171,14 @@ impl AuthorityCore {
             let mut attacker_gameplay = attacker.gameplay;
             attacker_gameplay.attack_cooldown_ticks = 0;
 
-            if outcome.death.is_some() && !self.world().rules.keep_inventory {
+            if outcome.death.is_some() && !self.world(dimension).rules.keep_inventory {
                 target_snapshot.gameplay.inventory = [None; contract::SESSION_INVENTORY_SLOTS];
                 target_snapshot.gameplay.experience = 0;
                 target_snapshot.gameplay.experience_level = 0;
             }
             if outcome.death.is_some() {
                 target_snapshot.gameplay.mounted_entity = None;
-                self.world_mut_active().remove_passenger(target);
+                self.world_mut_expect(dimension).remove_passenger(target);
             }
             self.sessions
                 .get_mut(&session_id)
@@ -1145,15 +1189,15 @@ impl AuthorityCore {
                 .ok_or(RejectReason::InvalidState)?
                 .gameplay = target_snapshot.gameplay;
             self.pending_session_revisions.insert(target);
-            if !self.world().rules.keep_inventory {
+            if !self.world(dimension).rules.keep_inventory {
                 if let Some(death) = outcome.death {
-                    self.spawn_death_outcome(target_session.position, death);
+                    self.spawn_death_outcome(dimension, target_session.position, death);
                 }
             }
             return Ok(None);
         }
 
-        let Some(entity) = self.world().entities.get_by_id(target) else {
+        let Some(entity) = self.world(dimension).entities.get_by_id(target) else {
             return Err(RejectReason::InvalidState);
         };
         let target_entity_type = entity.entity_type;
@@ -1194,7 +1238,7 @@ impl AuthorityCore {
             target_look_milli: look_from_angles(entity.yaw, entity.pitch)?,
             cooldown_ready,
             has_line_of_sight: self
-                .world_mut_active()
+                .world_mut_expect(dimension)
                 .has_line_of_sight(attacker.position, target_hit_position.to_array()),
             attacker_used_axe: profile.used_axe,
             knockback_milli: profile.knockback_milli,
@@ -1211,11 +1255,11 @@ impl AuthorityCore {
             .ok_or(RejectReason::Unauthorized)?
             .gameplay = attacker_gameplay;
         if target_snapshot.health_milli == 0 {
-            let _ = self.world_mut_active().entities.remove_by_id(target);
+            let _ = self.world_mut_expect(dimension).entities.remove_by_id(target);
             if target_entity_type == crate::entity::EntityType::EnderDragon {
-                self.world_mut_active().handle_dragon_completion();
+                self.world_mut_expect(dimension).handle_dragon_completion();
             }
-        } else if let Some(entity) = self.world_mut_active().entities.get_by_id_mut(target) {
+        } else if let Some(entity) = self.world_mut_expect(dimension).entities.get_by_id_mut(target) {
             entity.health = target_snapshot.health_milli as f32 / 1_000.0;
             entity.velocity = glam::Vec3::new(
                 target_snapshot.velocity_milli[0] as f32 / 1_000.0,
@@ -1227,24 +1271,29 @@ impl AuthorityCore {
             entity.player_kill_rewarded = target_snapshot.death_settled;
         }
         if let Some(death) = outcome.death {
-            self.spawn_death_outcome(target_position, death);
+            self.spawn_death_outcome(dimension, target_position, death);
         }
         Ok(None)
     }
 
-    fn spawn_death_outcome(&mut self, position: [f32; 3], death: combat::DeathOutcome) {
+    fn spawn_death_outcome(
+        &mut self,
+        dimension: Dimension,
+        position: [f32; 3],
+        death: combat::DeathOutcome,
+    ) {
         for slot in death.drops {
             let id = self.next_unique_entity_id();
             self.claim_entity_id(id);
             let _ = self
-                .world_mut_active()
+                .world_mut_expect(dimension)
                 .spawn_authority_drop(id, slot, position);
         }
         if death.experience > 0 {
             let id = self.next_unique_entity_id();
             self.claim_entity_id(id);
             let _ =
-                self.world_mut_active()
+                self.world_mut_expect(dimension)
                     .spawn_authority_experience(id, death.experience, position);
         }
     }
@@ -1259,6 +1308,13 @@ impl AuthorityCore {
         session_id: PlayerId,
         command: &str,
     ) -> Result<Option<WorldMutation>, RejectReason> {
+        let Some(dimension) = self
+            .sessions
+            .get(&session_id)
+            .and_then(|session| Dimension::from_wire(session.dimension))
+        else {
+            return Err(RejectReason::Unauthorized);
+        };
         if command.trim().eq_ignore_ascii_case("/respawn") {
             return if self.respawn_session(session_id) {
                 Ok(None)
@@ -1298,7 +1354,7 @@ impl AuthorityCore {
                 ) {
                     return Err(RejectReason::PermissionDenied);
                 }
-                if !self.world().dimension.height().contains_y(position[1]) {
+                if !self.world(dimension).dimension.height().contains_y(position[1]) {
                     return Err(RejectReason::InvalidCoordinate);
                 }
                 let Some(session) = self.sessions.get_mut(&session_id) else {
@@ -1338,16 +1394,16 @@ impl AuthorityCore {
                 Ok(None)
             }
             crate::commands::Command::GameRule { rule, value } => {
-                self.world_mut_active()
+                self.world_mut_expect(dimension)
                     .set_gamerule(&rule, value.as_deref())?;
                 Ok(None)
             }
             crate::commands::Command::Time(crate::commands::TimeCommand::Set(time)) => {
-                self.world_mut_active().set_time(time);
+                self.world_mut_expect(dimension).set_time(time);
                 Ok(None)
             }
             crate::commands::Command::Time(crate::commands::TimeCommand::Add(time)) => {
-                self.world_mut_active().add_time(time);
+                self.world_mut_expect(dimension).add_time(time);
                 Ok(None)
             }
             // ConsoleOnly arms are rejected above; keep a defensive catch-all.
@@ -1358,7 +1414,7 @@ impl AuthorityCore {
     fn rejected(&mut self, request_id: u128, reason: RejectReason) -> GameplayResponse {
         GameplayResponse {
             request_id,
-            server_sequence: self.world().revisions.current(),
+            server_sequence: self.current_revision(self.config.dimension),
             outcome: GameplayOutcome::Rejected { reason },
         }
     }
@@ -1370,7 +1426,16 @@ impl AuthorityCore {
         reason: RejectReason,
         consumed_sequence: Option<u64>,
     ) -> GameplayResponse {
-        let response = self.rejected(request_id, reason);
+        let dimension = self
+            .sessions
+            .get(&session_id)
+            .and_then(|session| Dimension::from_wire(session.dimension))
+            .unwrap_or(self.config.dimension);
+        let response = GameplayResponse {
+            request_id,
+            server_sequence: self.current_revision(dimension),
+            outcome: GameplayOutcome::Rejected { reason },
+        };
         if let Some(session) = self.sessions.get_mut(&session_id) {
             if let Some(sequence) = consumed_sequence {
                 session.last_client_sequence = sequence;

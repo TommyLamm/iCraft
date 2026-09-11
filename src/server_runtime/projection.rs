@@ -187,7 +187,7 @@ impl ServerRuntime {
             .authority
             .session(id)
             .and_then(|session| Dimension::from_wire(session.dimension))
-            .unwrap_or_else(|| self.authority.active_dimension());
+            .unwrap_or(self.level.spawn_dimension);
         if matches!(action, ContainerAction::Open) {
             let previous_positions = self
                 .players
@@ -253,7 +253,7 @@ impl ServerRuntime {
             .authority
             .session(id)
             .and_then(|session| Dimension::from_wire(session.dimension))
-            .unwrap_or_else(|| self.authority.active_dimension());
+            .unwrap_or(self.level.spawn_dimension);
         if let Some(session) = self.players.get_mut(&id) {
             session.interest.open_containers.insert(position);
         }
@@ -792,7 +792,7 @@ impl ServerRuntime {
         // Entity AI runs inside AuthorityCore::tick. Emit pose/health/anim
         // only when it changed, or when the entity newly entered a session's
         // simulation set. Stationary entities are not re-encoded.
-        for dimension in self.authority.dimensions() {
+        for dimension in self.authority.dimensions().collect::<Vec<_>>() {
             let revision = self.authority.revision_for_dimension(dimension);
             let mut session_ids: Vec<_> = self.players.keys().copied().collect();
             session_ids.sort_unstable();

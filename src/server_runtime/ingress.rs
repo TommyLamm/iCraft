@@ -535,7 +535,7 @@ impl ServerRuntime {
                             .authority
                             .session(id)
                             .and_then(|session| Dimension::from_wire(session.dimension))
-                            .unwrap_or_else(|| self.authority.active_dimension());
+                            .unwrap_or(self.level.spawn_dimension);
                         self.routed_mutations.insert((dimension, *revision));
                     }
                     _ => {}
