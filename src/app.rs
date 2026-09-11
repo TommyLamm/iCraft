@@ -624,21 +624,6 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent, shift_held: bool) -
         state.camera_perspective = state.camera_perspective.next();
         return false;
     }
-    // Q throws items onto the ground: the held hotbar stack while playing, or
-    // the stack under the mouse cursor while the inventory is open. Holding
-    // Shift throws the whole stack instead of a single item. This runs before
-    // the gameplay gate below so it stays reachable with the inventory open.
-    if code == KeyCode::KeyQ && pressed && !event.repeat {
-        if state.is_paused || state.player_state.is_dead {
-            return false;
-        }
-        if state.inventory.is_open {
-            state.drop_hovered_item(shift_held);
-        } else if !state.advancement_gui.is_open {
-            state.drop_held_item(shift_held);
-        }
-        return false;
-    }
     if code == state.settings.controls.chat && pressed && !event.repeat {
         if !state.is_paused
             && !state.inventory.is_open
@@ -677,10 +662,11 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent, shift_held: bool) -
     } else if code == controls.sneak {
         state.keys.shift = pressed;
     } else if code == controls.time_speed {
+        // F remains the offhand-swap binding; production no longer multiplies
+        // local world time by 60× while the key is held.
         if pressed && !event.repeat {
             state.handle_swap_offhand_pressed();
         }
-        state.keys.f = pressed;
     } else if pressed {
         if code == controls.hotbar_1 {
             state.select_hotbar_slot(0);

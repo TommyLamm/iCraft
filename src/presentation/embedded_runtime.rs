@@ -180,11 +180,6 @@ impl EmbeddedRuntimeBridge {
         self.runtime.shutdown()
     }
 
-    pub(super) fn set_session_dimension(&mut self, dimension: crate::dimension::Dimension) -> bool {
-        self.runtime
-            .set_session_dimension(self.session_id, dimension)
-    }
-
     /// Copy only presentation session inventory + selected hotbar into the
     /// embedded authority. Health, hunger, XP, mining, and mounts stay
     /// server-owned.

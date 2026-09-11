@@ -490,7 +490,6 @@ impl State {
                 }
 
                 self.player_state.reset_for_respawn();
-                self.void_damage_timer = 0.0;
                 self.sync_cursor_mode();
             }
             NetworkInbound::SleepStateSync {

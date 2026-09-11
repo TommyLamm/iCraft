@@ -46,13 +46,6 @@ impl State {
             );
         }
 
-        self.perf_counters.save_queue_depth = 0;
-        self.perf_counters.save_queue_bytes = 0;
-        self.perf_counters.save_in_flight = 0;
-        self.perf_counters.save_in_flight_bytes = 0;
-        self.perf_counters.save_drop = 0;
-        self.perf_counters.loaded_region_cache_bytes = 0;
-
         let lod_thresholds = LodThresholds::new(render_blocks * 0.5, render_blocks * 0.75);
         self.terrain_candidates_scratch.clear();
         let mut occluded_sections = 0u64;
@@ -2904,12 +2897,7 @@ impl State {
                     self.debug_str_scratch.clear();
                     let _ = write!(
                         self.debug_str_scratch,
-                        "SAVE Q: {} ({:.2} MB) | IN FLIGHT: {} | COALESCE: {} | REGION: {:.2} MB | NET Q: {} | NET FULL: {}",
-                        self.perf_counters.save_queue_depth,
-                        self.perf_counters.save_queue_bytes as f64 / (1024.0 * 1024.0),
-                        self.perf_counters.save_in_flight,
-                        self.perf_counters.save_drop,
-                        self.perf_counters.loaded_region_cache_bytes as f64 / (1024.0 * 1024.0),
+                        "NET Q: {} | NET FULL: {}",
                         self.perf_counters.network_queue_depth,
                         self.perf_counters.network_catchup_mailbox_full
                     );

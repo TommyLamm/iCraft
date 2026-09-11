@@ -15,7 +15,7 @@ use crate::inventory::{
     CREATIVE_VISIBLE_SLOTS,
 };
 use crate::menu::{GameSettings, MenuRect, WorldLaunch};
-use crate::physics::{player_aabb_at, BlockPlacementDecision, PlayerPhysics, AABB};
+use crate::physics::{player_aabb_at, BlockPlacementDecision, PlayerPhysics};
 use crate::player::{DamageSource, PlayerState};
 use crate::presentation::gpu_terrain::{
     chunk_mesh_is_registered_with_region, empty_region_rebuild_worthwhile,
@@ -1249,80 +1249,12 @@ impl State {
         }
     }
 
+    /// Reset only renderer/presentation caches after an authority-owned
+    /// dimension transfer (portal, respawn, or session projection). No local
+    /// worldgen, lighting, save, or gameplay mutation is allowed here;
+    /// subsequent ChunkData/Entity events repopulate the destination.
     fn switch_dimension(&mut self, target: crate::dimension::Dimension) {
-        if target == self.current_dimension {
-            return;
-        }
-        if self.presentation_topology().is_join_client() {
-            // Join Clients do not infer a portal transfer from their local
-            // chunk cache.  The authority changes the session dimension and
-            // the ordered PlayerSessionUpdate/ChunkData projection below
-            // rebuilds this presentation root.
-            return;
-        }
-        if let Some(runtime) = self.embedded_runtime.as_mut() {
-            if !runtime.set_session_dimension(target) {
-                return;
-            }
-        }
-        self.close_inventory();
-        self.player_physics.set_flying(false);
-        self.jump_taps.reset();
-        let source = self.current_dimension;
-
-        let mut destination =
-            crate::dimension::transform_position(source, target, self.player_physics.position);
-        if target == crate::dimension::Dimension::End {
-            destination = Vec3::new(0.5, 80.0, 0.5);
-        } else if source == crate::dimension::Dimension::End {
-            destination = Vec3::new(8.5, 80.0, 8.5);
-        }
-
-        self.current_dimension = target;
-        let render_distance = self.chunk_manager.render_distance;
-        self.teardown_terrain_runtime("dimension switch");
-        self.chunk_manager = ChunkManager::new_in_dimension(render_distance, target);
-        self.entity_manager = crate::entity::EntityManager::new();
-        self.particles = crate::particles::ParticleSystem::new();
-        self.pending_chunk_payloads.clear();
-        self.pending_block_changes.clear();
-        self.client_chunk_revisions.clear();
-        self.mining_target = None;
-        self.mining_progress = 0.0;
-        self.left_mouse_pressed = false;
-        self.lava_damage_timer = 0.0;
-        self.cactus_damage_timer = 0.0;
-        self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
-
-        let cx = (destination.x / CHUNK_WIDTH as f32).floor() as i32;
-        let cz = (destination.z / CHUNK_DEPTH as f32).floor() as i32;
-        let chunk = crate::dimension::generate_chunk_with_options(
-            target,
-            cx,
-            cz,
-            self.world_seed,
-            crate::dimension::WorldGenerationOptions {
-                world_type: self.world_type,
-                generate_structures: self.generate_structures,
-            },
-        );
-        self.chunk_manager.chunks.insert((cx, cz), chunk);
-        let lifetime = self.next_chunk_lifetime();
-        self.chunk_lifetimes.insert((cx, cz), lifetime);
-        self.chunk_meshes.insert((cx, cz), ChunkMesh::pending());
-        let mut dirty = std::collections::HashSet::new();
-        crate::lighting::propagate_chunk_lighting(&mut self.chunk_manager, cx, cz, &mut dirty);
-
-        let _ = (cx, cz);
-        self.player_physics.position = destination;
-        self.prev_player_position = destination;
-        self.player_physics.velocity = Vec3::ZERO;
-        self.player_physics.on_ground = false;
-        self.player_physics.highest_y = destination.y;
-        self.camera.position = destination + Vec3::new(0.0, 1.6, 0.0);
-        self.portal_contact_time = 0.0;
-        self.portal_cooldown = 3.0;
-        println!("[Dimension] {} -> {}", source.name(), target.name());
+        self.reset_presented_dimension(target);
     }
 
     /// Reset only renderer/presentation caches after an authority-owned
@@ -1357,8 +1289,6 @@ impl State {
         self.mining_target = None;
         self.mining_progress = 0.0;
         self.left_mouse_pressed = false;
-        self.lava_damage_timer = 0.0;
-        self.cactus_damage_timer = 0.0;
         self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
     }
 
@@ -1477,7 +1407,6 @@ pub struct KeyState {
     pub space: bool,
     pub ctrl: bool,
     pub shift: bool,
-    pub f: bool,
 }
 
 pub(crate) fn allows_camera_look(
@@ -2338,7 +2267,6 @@ pub struct State {
     crack_vertex_buffer: wgpu::Buffer,
     crack_index_buffer: wgpu::Buffer,
     pub player_state: PlayerState,
-    pub void_damage_timer: f32,
     pub world_time: crate::camera::WorldTime,
     pub show_debug: bool,
     /// F5 cycles first person, third-person back, and third-person front.
@@ -2398,8 +2326,6 @@ pub struct State {
     pub translation_catalog: crate::localization::TranslationCatalog,
     pub footstep_accumulator: f32,
     pub was_on_ground: bool,
-    pub lava_damage_timer: f32,
-    pub cactus_damage_timer: f32,
     pub is_saving: bool,
     pub save_error: Option<String>,
     pub is_sprinting: bool,
@@ -3688,7 +3614,6 @@ impl State {
             crack_vertex_buffer,
             crack_index_buffer,
             player_state,
-            void_damage_timer: 0.0,
             world_time,
             show_debug,
             camera_perspective: CameraPerspective::FirstPerson,
@@ -3736,8 +3661,6 @@ impl State {
             translation_catalog,
             footstep_accumulator: 0.0,
             was_on_ground: false,
-            lava_damage_timer: 0.0,
-            cactus_damage_timer: 0.0,
             is_saving: false,
             save_error: None,
             is_sprinting: false,
@@ -6037,11 +5960,6 @@ impl State {
 
         self.update_portal_travel(dt);
 
-        if !has_in_process_runtime {
-            self.brewing.update(dt);
-            let _ = self.potion_effects.update(dt);
-        }
-
         let can_sprint = sprint_allowed(self.game_mode, self.player_state.hunger);
 
         // Accessibility toggle controls are edge-triggered so holding a key
@@ -6101,19 +6019,13 @@ impl State {
             self.is_sprinting = false;
         }
 
-        // Update game time
-        let speed_multiplier = if self.keys.f { 60.0 } else { 1.0 };
+        // Weather presentation advances from local dt; world_time itself is
+        // authority-projected (TimeSync / session update) and never ticked here.
         let elapsed_world_ticks = if self.world_rules.do_daylight_cycle {
-            dt * 20.0 * speed_multiplier
+            dt * 20.0
         } else {
             0.0
         };
-        if !has_in_process_runtime {
-            self.world_time.tick_accumulator += elapsed_world_ticks;
-            let new_ticks = self.world_time.tick_accumulator.floor() as u64;
-            self.world_time.ticks += new_ticks;
-            self.world_time.tick_accumulator -= new_ticks as f32;
-        }
         if self.current_dimension == crate::dimension::Dimension::Overworld {
             if self.world_rules.do_weather_cycle {
                 self.weather.update_client(elapsed_world_ticks, dt);
@@ -6168,6 +6080,7 @@ impl State {
             sneak_input && !was_flying,
             self.is_sprinting,
         );
+        let _ = fall_damage; // Authority owns fall damage; local physics still computes it.
         self.perf_recorder.record(
             crate::perf::ScopeId::PlayerPhysics,
             physics_started.elapsed(),
@@ -6196,10 +6109,8 @@ impl State {
             }
         }
 
-        // Apply fall damage
-        if self.game_mode_policy().can_take_damage && fall_damage > 0.0 {
-            self.take_damage(fall_damage, DamageSource::Fall);
-        }
+        // Apply fall damage is authority-owned; presentation never submits
+        // self-damage Combat (rejected) or mutates health locally.
 
         // Movement exhaustion check
         let horizontal_dist = glam::Vec2::new(
@@ -6251,78 +6162,8 @@ impl State {
             self.player_state.sleep_timer += dt;
         }
 
-        // Void damage check: player below dimension floor
-        let void_y = self.chunk_manager.dimension.height().min_y as f32;
-        if self.player_physics.position.y < void_y {
-            self.void_damage_timer += dt;
-            if self.void_damage_timer >= 0.5 {
-                self.void_damage_timer = 0.0;
-                self.take_damage(2.0, DamageSource::Void);
-            }
-        } else {
-            self.void_damage_timer = 0.0;
-        }
-
-        // Lava damage check
-        let px = self.player_physics.position.x.floor() as i32;
-        let py = self.player_physics.position.y.floor() as i32;
-        let pz = self.player_physics.position.z.floor() as i32;
-        let block_at_feet = self.chunk_manager.get_block(px, py, pz);
-        let block_at_eyes = self.chunk_manager.get_block(
-            px,
-            (self.player_physics.position.y + 1.62).floor() as i32,
-            pz,
-        );
-        let player_in_lava = block_at_feet == BlockType::Lava || block_at_eyes == BlockType::Lava;
-
-        if player_in_lava && !self.potion_effects.has_fire_resistance() {
-            self.lava_damage_timer += dt;
-            if self.lava_damage_timer >= 0.5 {
-                self.lava_damage_timer = 0.0;
-                self.take_damage(4.0, DamageSource::Mob);
-            }
-        } else {
-            self.lava_damage_timer = 0.0;
-        }
-
-        // Cactus damage check
-        let player_aabb = self.player_physics.get_aabb();
-        let height = self.chunk_manager.dimension.height();
-        let min_x = player_aabb.min.x.floor() as i32;
-        let max_x = player_aabb.max.x.floor() as i32;
-        let min_y =
-            (player_aabb.min.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
-        let max_y =
-            (player_aabb.max.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
-        let min_z = player_aabb.min.z.floor() as i32;
-        let max_z = player_aabb.max.z.floor() as i32;
-
-        let mut touching_cactus = false;
-        for x in min_x..=max_x {
-            for y in min_y..=max_y {
-                for z in min_z..=max_z {
-                    if self.chunk_manager.get_block(x, y, z) == BlockType::Cactus {
-                        let block_aabb = AABB::new(
-                            Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
-                            Vec3::ONE,
-                        );
-                        if player_aabb.intersects(&block_aabb) {
-                            touching_cactus = true;
-                        }
-                    }
-                }
-            }
-        }
-
-        if touching_cactus {
-            self.cactus_damage_timer += dt;
-            if self.cactus_damage_timer >= 0.5 {
-                self.cactus_damage_timer = 0.0;
-                self.take_damage(1.0, DamageSource::Mob);
-            }
-        } else {
-            self.cactus_damage_timer = 0.0;
-        }
+        // Void / lava / cactus damage scans are authority-owned. Presentation
+        // health comes only from session projection (PlayerHealth / gameplay).
 
         self.total_time += dt;
         self.end_flash_time = (self.end_flash_time - dt.max(0.0)).max(0.0);
@@ -7164,175 +7005,6 @@ impl State {
             fluid_levels,
             block_entities,
         );
-    }
-
-    /// Spawn a `DroppedItem` entity in the world carrying the given `Item`.
-    /// The item is launched with a small random upward velocity and given a
-    /// brief pickup cooldown so it can't be instantly re-collected.
-    pub fn spawn_dropped_item(&mut self, item: crate::inventory::Item, pos: glam::Vec3) {
-        self.spawn_dropped_stack(crate::inventory::ItemStack::new(item, 1), pos);
-    }
-
-    pub fn spawn_dropped_stack(&mut self, stack: crate::inventory::ItemStack, pos: glam::Vec3) {
-        if stack.item == Item::Air || stack.count == 0 {
-            return;
-        }
-        let id = self
-            .entity_manager
-            .spawn(crate::entity::EntityType::DroppedItem, pos);
-        if let Some(entity) = self.entity_manager.entities.last_mut() {
-            entity.dropped_item = Some(stack.item);
-            entity.dropped_count = stack.count;
-            entity.dropped_stack = Some(stack);
-            let mut rng = self
-                .total_time
-                .to_bits()
-                .wrapping_add(id.wrapping_mul(2_654_435_761) as u32);
-            rng = rng.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-            let vx = ((rng / 65_536) as f32 / 32_768.0 - 0.5) * 1.5;
-            rng = rng.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-            let vz = ((rng / 65_536) as f32 / 32_768.0 - 0.5) * 1.5;
-            let vy = 2.0 + ((rng / 65_536) as f32 / 32_768.0);
-            entity.velocity = Vec3::new(vx, vy, vz);
-            entity.pickup_cooldown = 0.5;
-        }
-    }
-
-    pub fn throw_dropped_stack(&mut self, stack: crate::inventory::ItemStack) {
-        if stack.item == Item::Air || stack.count == 0 {
-            return;
-        }
-        let dir = Vec3::new(
-            self.camera.yaw.cos() * self.camera.pitch.cos(),
-            self.camera.pitch.sin(),
-            self.camera.yaw.sin() * self.camera.pitch.cos(),
-        )
-        .normalize_or_zero();
-        let spawn_pos = self.player_physics.position + Vec3::new(0.0, 1.5, 0.0) + dir * 0.5;
-        self.entity_manager
-            .spawn(crate::entity::EntityType::DroppedItem, spawn_pos);
-        if let Some(entity) = self.entity_manager.entities.last_mut() {
-            entity.dropped_item = Some(stack.item);
-            entity.dropped_count = stack.count;
-            entity.dropped_stack = Some(stack);
-            entity.velocity = dir * 4.0 + Vec3::new(0.0, 1.5, 0.0);
-            entity.pickup_cooldown = 1.0;
-        }
-    }
-
-    fn throw_dropped_item(&mut self, item: Item, count: u32) {
-        self.throw_dropped_stack(crate::inventory::ItemStack::new(item, count));
-    }
-
-    /// Q pressed in the world: throw the selected hotbar item. One item is
-    /// thrown, or the whole stack when `whole_stack` (Shift) is held.
-    pub fn drop_held_item(&mut self, whole_stack: bool) {
-        let selected = self.inventory.selected;
-        let Some(stack) = self.inventory.hotbar[selected] else {
-            return;
-        };
-        let count = if whole_stack { stack.count } else { 1 };
-        self.throw_dropped_item(stack.item, count);
-        if stack.count > count {
-            self.inventory.hotbar[selected] = Some(ItemStack {
-                count: stack.count - count,
-                ..stack
-            });
-        } else {
-            self.inventory.hotbar[selected] = None;
-        }
-    }
-
-    /// Q pressed while the inventory is open: throw the item under the mouse
-    /// cursor (or the stack being dragged with the cursor). One item is
-    /// thrown, or the whole stack when `whole_stack` (Shift) is held.
-    pub fn drop_hovered_item(&mut self, whole_stack: bool) {
-        // A stack dragged with the cursor takes precedence, matching the
-        // vanilla behaviour of throwing what is held in the hand.
-        if let Some(dragged) = self.inventory.dragged {
-            let count = if whole_stack { dragged.count } else { 1 };
-            self.throw_dropped_item(dragged.item, count);
-            if dragged.count > count {
-                self.inventory.dragged = Some(ItemStack {
-                    count: dragged.count - count,
-                    ..dragged
-                });
-            } else {
-                self.inventory.dragged = None;
-            }
-            return;
-        }
-
-        let mouse_x = self.mouse_ndc[0];
-        let mouse_y = self.mouse_ndc[1];
-        let hovered_slot = self
-            .get_inventory_slots()
-            .into_iter()
-            .find(|&(_, x0, x1, y0, y1)| {
-                mouse_x >= x0 && mouse_x <= x1 && mouse_y >= y0 && mouse_y <= y1
-            });
-        let Some((slot_type, _, _, _, _)) = hovered_slot else {
-            return;
-        };
-        match slot_type {
-            // The Creative catalog is a virtual infinite supply, and output
-            // slots are take-out-only: none of them can be thrown from.
-            SlotType::Creative(_) | SlotType::CraftOutput | SlotType::AnvilOutput => return,
-            _ => {}
-        }
-        let Some(stack) = self.get_item_at_slot(slot_type) else {
-            return;
-        };
-        let count = if whole_stack { stack.count } else { 1 };
-        self.throw_dropped_item(stack.item, count);
-        if stack.count > count {
-            self.set_item_at_slot(
-                slot_type,
-                Some(ItemStack {
-                    count: stack.count - count,
-                    ..stack
-                }),
-            );
-        } else {
-            self.set_item_at_slot(slot_type, None);
-        }
-
-        // Keep derived state consistent when throwing out of an input slot.
-        if let SlotType::CraftInput(_) = slot_type {
-            let grid_size = if self.inventory.is_table_open { 3 } else { 2 };
-            self.inventory.craft_output = self
-                .recipe_manager
-                .match_recipe(&self.inventory.craft_input, grid_size);
-        }
-        self.refresh_workstations();
-    }
-
-    pub fn take_damage(&mut self, amount: f32, source: DamageSource) {
-        self.take_damage_with_attacker(amount, source, None, None);
-    }
-
-    pub fn take_damage_with_attacker(
-        &mut self,
-        amount: f32,
-        source: DamageSource,
-        attacker_pos: Option<[f32; 3]>,
-        attacker_item: Option<Item>,
-    ) {
-        if self.has_in_process_runtime() {
-            // Encode a bounded tenth-heart damage amount in the typed Combat
-            // envelope.  The authority owns health/death; this root only
-            // projects the accepted session update and never drops items or
-            // mutates health locally.
-            let quantized = (amount.clamp(0.1, 12.7) * 10.0).round() as u8;
-            let _ = self.submit_local_authority_operation(
-                crate::network::protocol::GameplayOperation::Combat {
-                    target: 0,
-                    action: 0x80 | quantized.min(0x7f),
-                },
-            );
-            return;
-        }
-        let _ = (amount, source, attacker_pos, attacker_item);
     }
 
     pub fn respawn(&mut self) {

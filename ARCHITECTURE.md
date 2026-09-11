@@ -77,7 +77,12 @@ All server paths -> AuthorityCore -> BTreeMap<Dimension, ServerWorld>
   are not dropped. Player and terrain arrive from `ServerRuntime`.
   `State::new` does not generate spawn chunks, place a bonus chest, or collect
   dropped items / XP locally. Pickup is authority-only
-  (`inventory_decision(Pickup)` is always `Reject`).
+  (`inventory_decision(Pickup)` is always `Reject`). Presentation does not
+  Q-drop ghost entities, scan void/lava/cactus for local damage, tick
+  brew/effects/`world_time` on join, or worldgen on dimension switch —
+  health/time/effects arrive from session projection; portal/respawn teardown
+  is `reset_presented_dimension` only. F3 no longer hard-zeros absent
+  desktop save-queue counters.
 - `NetworkHandle` is `None` (embedded singleplayer / listen-host) or `Client`
   (join). Listen-host TCP is owned by `ServerRuntime`, not a GPU-thread server.
 - `State::tick_authority_boundary` is the embedded 20 Hz tick. There is no
