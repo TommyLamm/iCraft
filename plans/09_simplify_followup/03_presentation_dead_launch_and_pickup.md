@@ -21,14 +21,14 @@
 
 ## 精確 acceptance
 
-- [ ] `State::new` 沒有 `!in_process_authority` 的同步 worldgen／bonus chest／spawn mesh 路徑。
-- [ ] `pending_redstone_metadata` 與永遠空的 restore 迴圈消失。
-- [ ] 本地 Pickup／XP 收集區塊刪除；拾取只走 authority。
-- [ ] 刪 `furnace_tick_timer`、`autosave_timer`（若仍無 reader）。
-- [ ] 刪 `StationKind::Furnace` 與 `frame.rs` 對應 no-op 臂。
-- [ ] `open_chest` 不再假裝 generic；Join-only 路徑命名或內聯清楚。
-- [ ] 確認沒有測試／harness 以「無 embedded runtime 的非 client」啟動 `State`。
-- [ ] `cargo test --bin icraft -- presentation_inventory_policy` 與既有 embedded presentation 測試通過。
+- [x] `State::new` 沒有 `!in_process_authority` 的同步 worldgen／bonus chest／spawn mesh 路徑。
+- [x] `pending_redstone_metadata` 與永遠空的 restore 迴圈消失。
+- [x] 本地 Pickup／XP 收集區塊刪除；拾取只走 authority。
+- [x] 刪 `furnace_tick_timer`、`autosave_timer`（若仍無 reader）。
+- [x] 刪 `StationKind::Furnace` 與 `frame.rs` 對應 no-op 臂。
+- [x] `open_chest` 不再假裝 generic；Join-only 路徑命名或內聯清楚。
+- [x] 確認沒有測試／harness 以「無 embedded runtime 的非 client」啟動 `State`。
+- [x] `cargo test --bin icraft -- presentation_inventory_policy` 與既有 embedded presentation 測試通過。
 
 ## 預計檔案與測試
 
@@ -48,3 +48,35 @@
 - 合併 embedded 雙 block 投影（`project_authority_mutations` vs `BlockChange`）。
 - 補線 `handle_inventory_click` 的 `LocalMutate`（那是行為缺口，不是死碼；本計劃不改 click 語意）。
 - 刪 `dynamic_resolution` 設定（04）。
+
+## 實作與證據
+
+### 改了什麼
+
+- `State::new`：刪掉不可達的 `!is_client && !in_process_authority` 同步 worldgen、bonus chest、spawn lighting／spawn mesh，以及從未 push 的 `pending_redstone_metadata` restore 迴圈。連帶刪 `INITIAL_WORLD_CHUNK_RADIUS`／`initial_chunk_radius`（只服務該死路徑）。
+- `bootstrap.rs`：刪恆為 `false` 的 `LaunchWorldState.has_save`。
+- `State::update`：刪本地 Pickup／XP 收集。`inventory_decision(Pickup)` 仍永遠 `Reject`；拾取只走 authority。`PresentationInventoryTarget::Pickup` 留到 Plan 15。
+- 刪無 reader 的 `furnace_tick_timer`、`autosave_timer`。
+- 刪 `StationKind::Furnace` 與 `frame.rs`／slot 列表的 no-op 臂。熔爐仍是 container。
+- `open_chest` 改名為 `submit_join_container_open`：呼叫端已是 Join-only，函式不再假裝 generic（不再對 embedded 立即 return）。
+- `ARCHITECTURE.md`：寫明 presentation 不本地 worldgen／bonus chest／pickup。
+
+### 測試
+
+- `cargo test --offline presentation_inventory_policy`：4 passed（lib；`--bin icraft` 過濾器 0 tests，該模組在 lib）。
+- `cargo test --offline --bin icraft -- presentation`：11 passed。
+- `cargo test --offline --test review_hardening_embedded_presentation`：3 passed。
+- `cargo test --offline --bin icraft -- embedded_`：6 passed（含 `embedded_runtime_*`／`embedded_inventory_writeback_*`）。
+- `inventory_slot_hits_map_to_inventory_decision_targets`：ok。
+
+### 確認
+
+- `State::new` 只由 `app.rs` 以 menu `WorldLaunch` 呼叫（Singleplayer／Host／Client）。測試不建構無 embedded runtime 的非 client `State`；embedded 測試走 `EmbeddedRuntimeBridge` 或 policy gate。
+
+### 剩餘缺口
+
+- presentation `RedstoneSystem` 空殼仍在（Plan 05）。
+- `handle_inventory_click` 的 Embedded `LocalMutate` 行為缺口未改（刻意排除）。
+- `dynamic_resolution`／`render_scale` 未動（Plan 04）。
+- Packet／`PROTOCOL_VERSION` 未改。
+

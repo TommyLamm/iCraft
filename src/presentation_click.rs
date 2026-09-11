@@ -13,7 +13,7 @@
 //! | StartBreak | no `can_break` gate | reject if `!can_break` |
 //! | Empty-hand Place | not sent | Place(Air) |
 //! | OpenContainer set | automation + workstations | automation only |
-//! | After resolve | `open_chest` / no `Action::*` | Container Open + `Action::Break`/`Place` |
+//! | After resolve | `submit_join_container_open` / no `Action::*` | Container Open + `Action::Break`/`Place` |
 
 use crate::inventory::Item;
 use crate::presentation_inventory_policy::PresentationTopology;
@@ -162,7 +162,7 @@ pub fn resolve_world_click(
 }
 
 /// Automation containers both topologies open. Join also treats workstations
-/// as `open_chest` projections; Embedded lets those fall through to Place.
+/// as `submit_join_container_open` projections; Embedded lets those fall through to Place.
 fn is_authority_container(topology: PresentationTopology, block: BlockType) -> bool {
     if matches!(
         block,

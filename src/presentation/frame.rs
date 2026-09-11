@@ -2023,7 +2023,7 @@ impl State {
                             }
                         }
                     }
-                    None | Some(StationKind::Furnace) => {}
+                    None => {}
                 }
 
                 // 5. Draw dragged item at cursor position

@@ -138,7 +138,6 @@ pub(crate) struct LaunchWorldState {
     pub bonus_chest: bool,
     pub cheats_enabled: bool,
     pub advancement_progress: crate::advancements::AdvancementProgressData,
-    pub has_save: bool,
 }
 
 /// Load presentation launch defaults for `State::new`.
@@ -191,7 +190,6 @@ pub(crate) fn load_launch_world_state(
     let bonus_chest = creation_options.bonus_chest;
     let cheats_enabled = creation_options.cheats_enabled || is_client;
     let advancement_progress = crate::advancements::AdvancementProgressData::default();
-    let has_save = false;
 
     LaunchWorldState {
         current_dimension,
@@ -210,7 +208,6 @@ pub(crate) fn load_launch_world_state(
         bonus_chest,
         cheats_enabled,
         advancement_progress,
-        has_save,
     }
 }
 

@@ -66,6 +66,9 @@ All server paths -> AuthorityCore -> BTreeMap<Dimension, ServerWorld>
   `ServerRuntime`; join clients persist nothing locally.
 - Embedded presentation peeks `dimension.dat` so the first projected columns
   are not dropped. Player and terrain arrive from `ServerRuntime`.
+  `State::new` does not generate spawn chunks, place a bonus chest, or collect
+  dropped items / XP locally. Pickup is authority-only
+  (`inventory_decision(Pickup)` is always `Reject`).
 - `NetworkHandle` is `None` (embedded singleplayer / listen-host) or `Client`
   (join). Listen-host TCP is owned by `ServerRuntime`, not a GPU-thread server.
 - `State::tick_authority_boundary` is the embedded 20 Hz tick. There is no

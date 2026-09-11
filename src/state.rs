@@ -182,16 +182,6 @@ fn closest_melee_target(
         .map(|(id, _)| id)
 }
 
-// Creating an entire render distance while handling a menu click blocks the
-// window event loop and can allocate hundreds of chunk meshes at once.  Start
-// with a safe area around the player; `update_chunks` streams the rest in over
-// subsequent frames.
-const INITIAL_WORLD_CHUNK_RADIUS: i32 = 1;
-
-fn initial_chunk_radius(render_distance: i32) -> i32 {
-    render_distance.clamp(0, INITIAL_WORLD_CHUNK_RADIUS)
-}
-
 /// Apply a network-visible block value to CPU world state and return every
 /// chunk whose mesh/light data depends on it. Redstone and gameplay side
 /// effects remain the caller's responsibility.
@@ -1862,8 +1852,6 @@ pub enum StationKind {
     Enchanting,
     Brewing,
     Anvil,
-    #[allow(dead_code)]
-    Furnace,
     Merchant,
 }
 
@@ -2428,7 +2416,6 @@ pub struct State {
     pub lava_damage_timer: f32,
     pub cactus_damage_timer: f32,
     boss_maintenance_timer: f32,
-    pub autosave_timer: f32,
     pub is_saving: bool,
     pub save_error: Option<String>,
     pub is_sprinting: bool,
@@ -2482,8 +2469,6 @@ pub struct State {
     pub potion_effects: crate::brewing::EffectManager,
     pub redstone: crate::redstone::RedstoneSystem,
     redstone_tick_timer: f32,
-    #[allow(dead_code)]
-    furnace_tick_timer: f32,
     pub recipe_book_open: bool,
     pub recipe_book_search: String,
     pub weather: crate::weather::WeatherSystem,
@@ -2814,7 +2799,6 @@ impl State {
             bonus_chest,
             cheats_enabled,
             advancement_progress,
-            has_save,
         } = crate::presentation::bootstrap::load_launch_world_state(
             &launch,
             is_client,
@@ -3226,134 +3210,15 @@ impl State {
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        // Initialize ChunkManager and load spawn area chunks
+        // Live launches are Join (`is_client`) or Embedded (`in_process_authority`).
+        // Presentation chunk maps start empty; terrain arrives from ServerRuntime
+        // projection or join `ChunkData`, then `update_chunks`.
         let render_distance = settings.render_distance;
-        let mut chunk_manager = ChunkManager::new_in_dimension(render_distance, current_dimension);
-        let mut chunk_meshes = std::collections::HashMap::new();
+        let chunk_manager = ChunkManager::new_in_dimension(render_distance, current_dimension);
+        let chunk_meshes = std::collections::HashMap::new();
         let (terrain_worker_tx, terrain_worker_rx) = std::sync::mpsc::channel();
-        let mut chunk_lifetimes = std::collections::HashMap::new();
-        let mut next_chunk_lifetime = 1u64;
-
-        // Load only the immediate spawn area synchronously.  Loading every
-        // chunk in a large render distance here used to create all CPU/GPU
-        // meshes in one window event (625 chunks at distance 12), freezing the
-        // app and often causing the graphics driver to reset.  `update_chunks`
-        // loads the remaining requested chunks one at a time after the first
-        // frame is visible.
-        let player_chunk_x = (player_physics.position.x / CHUNK_WIDTH as f32).floor() as i32;
-        let player_chunk_z = (player_physics.position.z / CHUNK_DEPTH as f32).floor() as i32;
-        let mut pending_redstone_metadata: Vec<(
-            i32,
-            i32,
-            Vec<crate::redstone::RedstoneComponentMetadata>,
-        )> = Vec::new();
-        if !is_client && !in_process_authority {
-            let initial_radius = initial_chunk_radius(render_distance);
-            for cx in player_chunk_x - initial_radius..=player_chunk_x + initial_radius {
-                for cz in player_chunk_z - initial_radius..=player_chunk_z + initial_radius {
-                    let chunk = crate::dimension::generate_chunk_with_options(
-                        current_dimension,
-                        cx,
-                        cz,
-                        world_seed,
-                        crate::dimension::WorldGenerationOptions {
-                            world_type,
-                            generate_structures,
-                        },
-                    );
-                    chunk_manager.chunks.insert((cx, cz), chunk);
-                }
-            }
-        }
-
-        // A bonus chest is created exactly once for a newly-created Overworld.
-        // Keep it in the spawn column so the option is deterministic and does
-        // not require an additional chunk-load request.  The heightmap points
-        // at the highest non-air block, therefore placing at `surface + 1`
-        // leaves the chest on top of terrain in both default and superflat
-        // presets.
-        if !is_client
-            && !in_process_authority
-            && !has_save
-            && bonus_chest
-            && current_dimension == crate::dimension::Dimension::Overworld
-        {
-            let (spawn_x, _, spawn_z) = world_spawn;
-            let chunk_key = (
-                spawn_x.div_euclid(CHUNK_WIDTH as i32),
-                spawn_z.div_euclid(CHUNK_DEPTH as i32),
-            );
-            let local_x = spawn_x.rem_euclid(CHUNK_WIDTH as i32) as usize;
-            let local_z = spawn_z.rem_euclid(CHUNK_DEPTH as i32) as usize;
-            let surface_y = chunk_manager
-                .chunks
-                .get(&chunk_key)
-                .map(|chunk| chunk.heightmap[local_x][local_z] as i32);
-            if let Some(surface_y) = surface_y {
-                let chest_y = surface_y.saturating_add(1);
-                if chunk_manager.get_block(spawn_x, chest_y, spawn_z) == BlockType::Air {
-                    chunk_manager.set_block(spawn_x, chest_y, spawn_z, BlockType::Chest);
-                    let mut chest = crate::block_entity::ChestBlockEntity::default();
-                    chest.set_stack(
-                        0,
-                        Some(crate::inventory::ItemStack::new(
-                            crate::inventory::Item::OakLog,
-                            4,
-                        )),
-                    );
-                    chest.set_stack(
-                        1,
-                        Some(crate::inventory::ItemStack::new(
-                            crate::inventory::Item::OakPlanks,
-                            8,
-                        )),
-                    );
-                    chest.set_stack(
-                        2,
-                        Some(crate::inventory::ItemStack::new(
-                            crate::inventory::Item::Stick,
-                            8,
-                        )),
-                    );
-                    chest.set_stack(
-                        3,
-                        Some(crate::inventory::ItemStack::new(
-                            crate::inventory::Item::Bread,
-                            4,
-                        )),
-                    );
-                    chest.set_stack(
-                        4,
-                        Some(crate::inventory::ItemStack::new(
-                            crate::inventory::Item::Torch,
-                            8,
-                        )),
-                    );
-                    chunk_manager.set_block_entity(
-                        spawn_x,
-                        chest_y,
-                        spawn_z,
-                        Some(crate::block_entity::BlockEntity::Chest(chest)),
-                    );
-                }
-            }
-        }
-
-        // Propagate lighting for spawn chunks synchronously
-        let mut spawn_dirty = std::collections::HashSet::new();
-        let chunk_keys: Vec<(i32, i32)> = chunk_manager.chunks.keys().cloned().collect();
-        for &(cx, cz) in &chunk_keys {
-            crate::lighting::propagate_chunk_lighting(&mut chunk_manager, cx, cz, &mut spawn_dirty);
-        }
-
-        // Spawn-area meshes are also built by the background workers. The
-        // first frame can present immediately instead of blocking on nine CPU
-        // meshes and their three LODs.
-        for &coord in &chunk_keys {
-            chunk_meshes.insert(coord, ChunkMesh::pending());
-            chunk_lifetimes.insert(coord, next_chunk_lifetime);
-            next_chunk_lifetime = next_chunk_lifetime.wrapping_add(1).max(1);
-        }
+        let chunk_lifetimes = std::collections::HashMap::new();
+        let next_chunk_lifetime = 1u64;
 
         // Initialize UI Pipelines
         let ui_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -3903,7 +3768,6 @@ impl State {
             lava_damage_timer: 0.0,
             cactus_damage_timer: 0.0,
             boss_maintenance_timer: 0.0,
-            autosave_timer: 0.0,
             is_saving: false,
             save_error: None,
             is_sprinting: false,
@@ -3960,7 +3824,6 @@ impl State {
             potion_effects: crate::brewing::EffectManager::default(),
             redstone: crate::redstone::RedstoneSystem::new(),
             redstone_tick_timer: 0.0,
-            furnace_tick_timer: 0.0,
             recipe_book_open: false,
             recipe_book_search: String::new(),
             weather,
@@ -4013,21 +3876,6 @@ impl State {
             pending_block_changes: std::collections::HashMap::new(),
             client_chunk_revisions: std::collections::HashMap::new(),
         };
-
-        // Restore persisted redstone component metadata (facing/delay/comparator
-        // mode/note) for spawn-area chunks that were loaded before the redstone
-        // system existed. The first `RedstoneSystem::tick` will call
-        // `sync_loaded_chunks`, which rebuilds default `ComponentState` entries
-        // for every loaded component; applying the sidecar first ensures those
-        // rebuilt entries pick up the saved facing/delay/mode/note rather than
-        // the defaults. The runtime first tick then settles power against the
-        // restored facings. Subsequent streaming loads go through
-        // `schedule_chunk_load`, which restores metadata alongside the chunk.
-        for (cx, cz, metadata) in pending_redstone_metadata {
-            state
-                .redstone
-                .restore_chunk_metadata(&state.chunk_manager, cx, cz, &metadata);
-        }
 
         // Apply the centralized mode policy to the freshly loaded player (in
         // particular Spectator noclip/flight) before the first simulation tick.
@@ -6479,58 +6327,6 @@ impl State {
             self.player_state.sleep_timer += dt;
         }
 
-        // Dropped item & XP collection. Embedded / join-client presentations
-        // wait for authority pickup + SessionGameplayUpdate / EntityDespawn.
-        if self.game_mode_policy().can_pickup
-            && self
-                .presentation_topology()
-                .inventory_decision(PresentationInventoryTarget::Pickup)
-                == PresentationInventoryAction::LocalMutate
-        {
-            let player_pos = self.player_physics.position;
-            let to_collect: Vec<u64> = self
-                .entity_manager
-                .query_radius_types(player_pos, 1.5, &[crate::entity::EntityType::DroppedItem])
-                .filter(|entity| {
-                    entity.pickup_cooldown <= 0.0
-                        && (entity.dropped_stack.is_some() || entity.dropped_item.is_some())
-                })
-                .map(|entity| entity.id)
-                .collect();
-            for id in to_collect {
-                let stack = self.entity_manager.get_by_id(id).and_then(|entity| {
-                    entity.dropped_stack.or_else(|| {
-                        entity
-                            .dropped_item
-                            .map(|item| ItemStack::new(item, entity.dropped_count.max(1)))
-                    })
-                });
-                if let Some(incoming) = stack {
-                    let remainder = self.inventory.add_stack(incoming);
-                    if let Some(rem) = remainder {
-                        if let Some(index) = self.entity_manager.id_to_index.get(&id).copied() {
-                            self.entity_manager.entities[index].dropped_item = Some(rem.item);
-                            self.entity_manager.entities[index].dropped_count = rem.count;
-                            self.entity_manager.entities[index].dropped_stack = Some(rem);
-                        }
-                    } else {
-                        self.entity_manager.remove_by_id(id);
-                    }
-                }
-            }
-
-            let xp_orbs: Vec<(u64, u32)> = self
-                .entity_manager
-                .query_radius_types(player_pos, 1.5, &[crate::entity::EntityType::ExperienceOrb])
-                .filter(|entity| entity.pickup_cooldown <= 0.0 && entity.xp_value > 0)
-                .map(|entity| (entity.id, entity.xp_value))
-                .collect();
-            for (id, xp_val) in xp_orbs {
-                self.player_state.add_experience(xp_val);
-                self.entity_manager.remove_by_id(id);
-            }
-        }
-
         // Void damage check: player below dimension floor
         let void_y = self.chunk_manager.dimension.height().min_y as f32;
         if self.player_physics.position.y < void_y {
@@ -8008,10 +7804,7 @@ impl State {
             }
             WorldClickIntent::OpenContainer { x, y, z, .. } => {
                 if self.presentation_topology().is_join_client() {
-                    // `open_chest` emits the typed Container::Open envelope for
-                    // Join Clients and never opens a local inventory before an
-                    // authority result arrives.
-                    self.open_chest((x, y, z));
+                    self.submit_join_container_open((x, y, z));
                 } else {
                     let _ = self.submit_local_authority_operation(
                         crate::network::protocol::GameplayOperation::Container {
@@ -8265,7 +8058,7 @@ impl State {
                     0.10 + slot_h,
                 ));
             }
-            None | Some(StationKind::Furnace) | Some(StationKind::Merchant) => {}
+            None | Some(StationKind::Merchant) => {}
         }
 
         slots
@@ -8473,27 +8266,19 @@ impl State {
         self.sync_cursor_mode();
     }
 
-    fn open_chest(&mut self, pos: (i32, i32, i32)) {
-        if self.has_in_process_runtime() {
-            // Embedded / listen-host chests open through the authority
-            // Container::Open request; presentation must not mutate locally.
-            return;
-        }
+    fn submit_join_container_open(&mut self, pos: (i32, i32, i32)) {
         if !self.game_mode_policy().can_use_containers {
             return;
         }
-        if self.presentation_topology().is_join_client() {
-            let _ = self.submit_local_authority_operation(
-                crate::network::protocol::GameplayOperation::Container {
-                    action: crate::network::protocol::ContainerAction::Open.to_wire(),
-                    x: pos.0,
-                    y: pos.1,
-                    z: pos.2,
-                    slot: 0,
-                },
-            );
-            return;
-        }
+        let _ = self.submit_local_authority_operation(
+            crate::network::protocol::GameplayOperation::Container {
+                action: crate::network::protocol::ContainerAction::Open.to_wire(),
+                x: pos.0,
+                y: pos.1,
+                z: pos.2,
+                slot: 0,
+            },
+        );
     }
 
     pub fn open_merchant_trade_window(&mut self, villager_id: u64) {
@@ -9962,14 +9747,6 @@ mod debug_tests {
         assert_eq!(debug_chunk_coordinate(-0.001, CHUNK_WIDTH), -1);
         assert_eq!(debug_chunk_coordinate(-16.0, CHUNK_WIDTH), -1);
         assert_eq!(debug_chunk_coordinate(-16.001, CHUNK_WIDTH), -2);
-    }
-
-    #[test]
-    fn initial_world_load_is_bounded_independently_of_render_distance() {
-        assert_eq!(initial_chunk_radius(0), 0);
-        assert_eq!(initial_chunk_radius(2), INITIAL_WORLD_CHUNK_RADIUS);
-        assert_eq!(initial_chunk_radius(12), INITIAL_WORLD_CHUNK_RADIUS);
-        assert_eq!(initial_chunk_radius(16), INITIAL_WORLD_CHUNK_RADIUS);
     }
 
     #[test]
