@@ -336,7 +336,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
             OUT_OF_ORDER_REQUEST,
             1,
             block_revision,
-            GameplayOperation::ItemUse { item: 1, count: 1 },
+            GameplayOperation::ItemUse { item: Item::Bread as u32, count: 1 },
         ),
     });
     let out_of_order = wait_for_pair_response(&mut runtime, &mut alice, &mut bob, OUT_OF_ORDER_REQUEST);
@@ -353,7 +353,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
             STALE_REQUEST,
             2,
             0,
-            GameplayOperation::ItemUse { item: 1, count: 1 },
+            GameplayOperation::ItemUse { item: Item::Bread as u32, count: 1 },
         ),
     });
     let stale = wait_for_pair_response(&mut runtime, &mut alice, &mut bob, STALE_REQUEST);

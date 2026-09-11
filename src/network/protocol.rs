@@ -709,10 +709,29 @@ impl GameplayRequest {
             }
             GameplayOperation::ItemUse { item, count } => {
                 validate_item_count(*item, *count)?;
+                // Only food ItemUse is implemented; reject tools/weapons here so
+                // they never reach sequencing or dispatch Unsupported.
+                match Item::from_u32(*item) {
+                    Some(item_kind) if item_kind.food_properties().is_some() => {}
+                    Some(_) => return Err(RejectReason::InvalidState),
+                    None => return Err(RejectReason::Malformed),
+                }
             }
             GameplayOperation::Command { command } => {
                 if command.len() > MAX_COMMAND_BYTES {
                     return Err(RejectReason::StringTooLong);
+                }
+                // `/respawn` is a lifecycle string, not `commands::parse`.
+                if command.trim().eq_ignore_ascii_case("/respawn") {
+                    return Ok(());
+                }
+                let parsed =
+                    crate::commands::parse(command).map_err(|_| RejectReason::InvalidState)?;
+                if matches!(
+                    parsed.surface(),
+                    crate::commands::CommandSurface::ConsoleOnly
+                ) {
+                    return Err(RejectReason::Unsupported);
                 }
             }
             GameplayOperation::Fishing {

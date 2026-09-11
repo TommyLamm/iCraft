@@ -139,7 +139,10 @@ input
   value from the start of the tick. `activate_dimension` is request routing
   (submit, session dimension change, respawn).
 - Session chat commands: `AuthorityCore::apply_command`. Dedicated console
-  is a separate admin surface.
+  is a separate admin surface. `commands::Command::surface` marks
+  `GameplayAllowed` vs `ConsoleOnly`; console-only strings and non-food
+  `ItemUse` fail in `GameplayRequest::validate_bounds` before sequencing
+  (desktop Help UI stays local via `commands::parse` / `help_text`).
 - Per-session interest is both the projection boundary and the chunk
   materialization gate. Random ticks, fluids, hoppers, and furnaces walk the
   simulation union, not the unbounded residency map. Columns that leave every

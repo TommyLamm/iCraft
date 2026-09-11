@@ -1226,6 +1226,12 @@ impl AuthorityCore {
             };
         }
         let parsed = crate::commands::parse(command).map_err(|_| RejectReason::InvalidState)?;
+        if matches!(
+            parsed.surface(),
+            crate::commands::CommandSurface::ConsoleOnly
+        ) {
+            return Err(RejectReason::Unsupported);
+        }
         match parsed {
             crate::commands::Command::GameMode { mode, target } => {
                 if target.is_some_and(|target| {
@@ -1303,15 +1309,8 @@ impl AuthorityCore {
                 self.world_mut_active().add_time(time);
                 Ok(None)
             }
-            crate::commands::Command::Help(_)
-            | crate::commands::Command::Difficulty(_)
-            | crate::commands::Command::Weather(_)
-            | crate::commands::Command::Kill(_)
-            | crate::commands::Command::SpawnPoint { .. }
-            | crate::commands::Command::SetWorldSpawn(_)
-            | crate::commands::Command::Locate(_)
-            | crate::commands::Command::Seed
-            | crate::commands::Command::SaveAll => Err(RejectReason::Unsupported),
+            // ConsoleOnly arms are rejected above; keep a defensive catch-all.
+            _ => Err(RejectReason::Unsupported),
         }
     }
 

@@ -61,7 +61,7 @@
 | 09 | [實體 idle skip 與增量 `sync_positions`](09_entity_idle_and_incremental_sync.md) | P1 | 靜止生物不再每 tick 寫 velocity／掃空間索引 | 無 | 已完成 |
 | 10 | [出站封包只 encode 一次](10_encode_once_shared_bytes.md) | P1 | ChunkData／EntityState 尖峰少 2–3 次 bincode | 無 | 已完成 |
 | 11 | [mutation／block-entity fanout 反向索引](11_mutation_fanout_and_be_encode.md) | P1 | 紅石／流體 busy 時少 O(mutations×players) | 07 | 已完成 |
-| 12 | [Command／ItemUse fail-fast](12_command_itemuse_fail_fast.md) | P2 | 縮小永遠 Unsupported 的 dispatch | 無 | 未開始 |
+| 12 | [Command／ItemUse fail-fast](12_command_itemuse_fail_fast.md) | P2 | 縮小永遠 Unsupported 的 dispatch | 無 | 已完成 |
 | 13 | [`game_mode` 納入 session_sync 與座標常數](13_gamemode_sync_and_coord_helpers.md) | P2 | 少 split-brain 與三份 `position_to_milli` | 無 | 未開始 |
 | 14 | [random-tick eligible 索引](14_random_tick_eligible_index.md) | P1 | simulation union 不再每 tick 掃+sort | 無 | 未開始 |
 | 15 | [policy 幽靈 API 與 inventory hit 去重](15_policy_ghost_and_inventory_hit.md) | P2 | 少重複 chunk policy 與 hit probe | 03 | 未開始 |

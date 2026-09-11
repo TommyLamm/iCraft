@@ -744,7 +744,7 @@ pub fn common_gameplay_vectors() -> Vec<GameplayRequest> {
             session_id: 7,
             dimension: 0,
             client_revision: 3,
-            operation: GameplayOperation::ItemUse { item: 1, count: 1 },
+            operation: GameplayOperation::ItemUse { item: crate::inventory::Item::Bread as u32, count: 1 },
         },
         GameplayRequest {
             request_id: 0x1005,

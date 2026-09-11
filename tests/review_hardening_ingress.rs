@@ -7,6 +7,7 @@ mod common;
 
 use common::tcp_harness::{drive_until, temp_world, wait_for_response, HeldLoopback, TcpClient};
 use icraft::dimension::Dimension;
+use icraft::inventory::Item;
 use icraft::network::client::ClientToGame;
 use icraft::network::protocol::{GameplayOperation, GameplayRequest, Packet, PROTOCOL_VERSION};
 use icraft::server_runtime::{ServerProperties, ServerRuntime};
@@ -96,7 +97,7 @@ fn request(
         client_revision: runtime
             .authority
             .revision_for_dimension(Dimension::Overworld),
-        operation: GameplayOperation::ItemUse { item: 1, count: 1 },
+        operation: GameplayOperation::ItemUse { item: Item::Bread as u32, count: 1 },
     }
 }
 

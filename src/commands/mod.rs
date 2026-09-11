@@ -74,6 +74,15 @@ pub enum WeatherCommand {
     Thunder(Option<u32>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandSurface {
+    /// Implemented by `AuthorityCore::apply_command` for session chat.
+    GameplayAllowed,
+    /// Parsed for desktop Help UI / dedicated console, but never executed on
+    /// the gameplay request path (always Reject Unsupported).
+    ConsoleOnly,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Help(Option<String>),
@@ -125,6 +134,27 @@ impl Command {
             Self::Locate(_) => "locate",
             Self::Seed => "seed",
             Self::SaveAll => "save-all",
+        }
+    }
+
+    /// Whether session `GameplayOperation::Command` may execute this parse.
+    /// Desktop Help UI and dedicated console keep their own surfaces.
+    pub fn surface(&self) -> CommandSurface {
+        match self {
+            Self::GameMode { .. }
+            | Self::GameRule { .. }
+            | Self::Time(_)
+            | Self::Teleport { .. }
+            | Self::Give { .. } => CommandSurface::GameplayAllowed,
+            Self::Help(_)
+            | Self::Difficulty(_)
+            | Self::Weather(_)
+            | Self::Kill(_)
+            | Self::SpawnPoint { .. }
+            | Self::SetWorldSpawn(_)
+            | Self::Locate(_)
+            | Self::Seed
+            | Self::SaveAll => CommandSurface::ConsoleOnly,
         }
     }
 }
@@ -407,6 +437,30 @@ pub fn help_text(command: Option<&str>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parser_marks_console_only_vs_gameplay_allowed() {
+        assert_eq!(
+            parse("/gamemode creative").unwrap().surface(),
+            CommandSurface::GameplayAllowed
+        );
+        assert_eq!(
+            parse("/give @s diamond 1").unwrap().surface(),
+            CommandSurface::GameplayAllowed
+        );
+        assert_eq!(
+            parse("/help").unwrap().surface(),
+            CommandSurface::ConsoleOnly
+        );
+        assert_eq!(
+            parse("/weather clear").unwrap().surface(),
+            CommandSurface::ConsoleOnly
+        );
+        assert_eq!(
+            parse("/kill @s").unwrap().surface(),
+            CommandSurface::ConsoleOnly
+        );
+    }
 
     #[test]
     fn parser_covers_typed_commands() {

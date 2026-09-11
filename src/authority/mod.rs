@@ -611,7 +611,10 @@ mod tests {
             session_id: 7,
             dimension: 0,
             client_revision: 0,
-            operation: GameplayOperation::ItemUse { item: 1, count: 1 },
+            operation: GameplayOperation::ItemUse {
+                item: Item::Bread as u32,
+                count: 1,
+            },
         };
         let first = core.submit_request(request.clone());
         let duplicate = core.submit_request(request.clone());
@@ -1549,7 +1552,7 @@ mod tests {
         assert!(matches!(
             response.outcome,
             GameplayOutcome::Rejected {
-                reason: RejectReason::Unsupported
+                reason: RejectReason::InvalidState
             }
         ));
         assert_eq!(
@@ -1559,6 +1562,33 @@ mod tests {
                 .count_item(Item::DiamondSword as u32),
             1
         );
+        assert_eq!(
+            core.session(7).unwrap().last_client_sequence,
+            0,
+            "non-food ItemUse must fail in validate_bounds before sequencing"
+        );
+    }
+
+    #[test]
+    fn console_only_command_rejects_before_sequencing() {
+        let mut core = core();
+        let response = core.submit_request(GameplayRequest {
+            request_id: 41,
+            client_sequence: 1,
+            session_id: 7,
+            dimension: 0,
+            client_revision: 0,
+            operation: GameplayOperation::Command {
+                command: "/help".to_string(),
+            },
+        });
+        assert!(matches!(
+            response.outcome,
+            GameplayOutcome::Rejected {
+                reason: RejectReason::Unsupported
+            }
+        ));
+        assert_eq!(core.session(7).unwrap().last_client_sequence, 0);
     }
 
     #[test]

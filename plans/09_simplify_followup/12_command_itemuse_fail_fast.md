@@ -14,11 +14,11 @@
 
 ## 精確 acceptance
 
-- [ ] `GameplayRequest::validate_bounds`：`ItemUse` 在非食物時回 `InvalidState` 或既有 reject（更新 `unsupported_tool_item_use` 期望）。
-- [ ] `commands::parse` 能區分 `ConsoleOnly` vs `GameplayAllowed`，或 `validate_bounds` 拒絕 console-only 字串。
-- [ ] `apply_command` 只留已實作 arm；Help 等不再佔 match。
-- [ ] Desktop 本地 Help UI 不變；`/give` 等 live command 行為不變。
-- [ ] `cargo test --lib authority::` 通過。
+- [x] `GameplayRequest::validate_bounds`：`ItemUse` 在非食物時回 `InvalidState` 或既有 reject（更新 `unsupported_tool_item_use` 期望）。
+- [x] `commands::parse` 能區分 `ConsoleOnly` vs `GameplayAllowed`，或 `validate_bounds` 拒絕 console-only 字串。
+- [x] `apply_command` 只留已實作 arm；Help 等不再佔 match。
+- [x] Desktop 本地 Help UI 不變；`/give` 等 live command 行為不變。
+- [x] `cargo test --lib authority::` 通過。
 
 ## 預計檔案與測試
 
@@ -36,3 +36,26 @@
 - 實作 Weather／Kill 等新 gameplay 命令。
 - 刪 `Action::Use` wire。
 - 改 `Container { action: 1 }` gap。
+
+## 實作與證據
+
+### 改了什麼
+
+- `GameplayRequest::validate_bounds`：非食物 `ItemUse` → `InvalidState`（在 sequencing 之前）。
+- `commands::CommandSurface::{GameplayAllowed, ConsoleOnly}` + `Command::surface()`；console-only 字串在 `validate_bounds` 回 `Unsupported`（`/respawn` 仍為 lifecycle 特例）。
+- `AuthorityCore::apply_command`：只保留 `GameMode`／`Teleport`／`Give`／`GameRule`／`Time`；Help 等不再佔具名 arm（防禦性 `_`）。
+- Desktop `state.rs` `execute_command_line`／Help UI 未改；`ARCHITECTURE.md` 補 fail-fast 契約一句。
+- 需過 bounds 才能測 revision／sequence 的 fixture 改用 `Item::Bread`（authority／server_runtime／network／integration）。
+
+### 測了什麼
+
+- `cargo test --lib -- unsupported_tool_item_use` → ok（期望 `InvalidState`，且不消耗 sequence）。
+- `cargo test --lib -- console_only_command parser_marks_console_only` → ok。
+- `cargo test --lib authority::` → 66 passed。
+- 相關窄測：`duplicate_and_stale_revision`、`gameplay_requests_are_idempotent`、`request_rate_limit`、`headless_two_sessions` → ok。
+
+### 留下的缺口
+
+- Weather／Kill／Seed 等仍未實作 gameplay；僅提早 reject。
+- `apply_item_use`／`apply_command` 仍保留非食物／ConsoleOnly 的防禦性 reject（正常路徑已不會到達）。
+- 未跑完整 integration suite（只改了會被 fail-fast 誤傷的 fixture）。

@@ -464,7 +464,7 @@ fn run_singleplayer_embedded_contract() {
         HOST_SESSION_ID,
         0x40_00a,
         1,
-        GameplayOperation::ItemUse { item: 1, count: 1 },
+        GameplayOperation::ItemUse { item: Item::Bread as u32, count: 1 },
     );
     assert_eq!(
         embedded_response(&out_of_order_output, HOST_SESSION_ID, 0x40_00a).outcome,
@@ -479,7 +479,7 @@ fn run_singleplayer_embedded_contract() {
             HOST_SESSION_ID,
             0x40_00b,
             10,
-            GameplayOperation::ItemUse { item: 1, count: 1 },
+            GameplayOperation::ItemUse { item: Item::Bread as u32, count: 1 },
         )
     };
     input
@@ -871,7 +871,7 @@ fn run_topology(label: &str, listen: bool) {
         owner_id,
         0x30_00a,
         1,
-        GameplayOperation::ItemUse { item: 1, count: 1 },
+        GameplayOperation::ItemUse { item: Item::Bread as u32, count: 1 },
     );
     clients[0].send_request(out_of_order);
     let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
@@ -887,7 +887,7 @@ fn run_topology(label: &str, listen: bool) {
         owner_id,
         0x30_00b,
         10,
-        GameplayOperation::ItemUse { item: 1, count: 1 },
+        GameplayOperation::ItemUse { item: Item::Bread as u32, count: 1 },
     );
     let stale = GameplayRequest {
         client_revision: 0,

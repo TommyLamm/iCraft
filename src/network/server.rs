@@ -525,7 +525,7 @@ mod tests {
             session_id: 999_999,
             dimension: 0,
             client_revision: 0,
-            operation: crate::network::protocol::GameplayOperation::ItemUse { item: 1, count: 1 },
+            operation: crate::network::protocol::GameplayOperation::ItemUse { item: crate::inventory::Item::Bread as u32, count: 1 },
         };
         client
             .send(&Packet::GameplayRequest {
@@ -555,7 +555,7 @@ mod tests {
             session_id: 999_999,
             dimension: 0,
             client_revision: 0,
-            operation: GameplayOperation::ItemUse { item: 1, count: 1 },
+            operation: GameplayOperation::ItemUse { item: crate::inventory::Item::Bread as u32, count: 1 },
         };
         client
             .send(&Packet::GameplayRequest {
@@ -740,7 +740,7 @@ mod tests {
             session_id: id,
             dimension: 0,
             client_revision: 0,
-            operation: GameplayOperation::ItemUse { item: 1, count: 1 },
+            operation: GameplayOperation::ItemUse { item: crate::inventory::Item::Bread as u32, count: 1 },
         };
         client
             .send(&Packet::GameplayRequest {
@@ -1866,7 +1866,7 @@ mod tests {
             session_id: 999_999,
             dimension: 0,
             client_revision: 0,
-            operation: GameplayOperation::ItemUse { item: 1, count: 1 },
+            operation: GameplayOperation::ItemUse { item: crate::inventory::Item::Bread as u32, count: 1 },
         }
     }
 

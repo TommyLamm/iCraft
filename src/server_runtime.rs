@@ -2415,7 +2415,7 @@ mod tests {
             session_id: 1,
             dimension: 0,
             client_revision: 0,
-            operation: GameplayOperation::ItemUse { item: 1, count: 1 },
+            operation: GameplayOperation::ItemUse { item: crate::inventory::Item::Bread as u32, count: 1 },
         };
         let first = runtime.submit_request(1, request.clone()).unwrap();
         let duplicate = runtime.submit_request(1, request).unwrap();
@@ -2429,7 +2429,7 @@ mod tests {
                     session_id: 1,
                     dimension: 0,
                     client_revision: 0,
-                    operation: GameplayOperation::ItemUse { item: 1, count: 1 },
+                    operation: GameplayOperation::ItemUse { item: crate::inventory::Item::Bread as u32, count: 1 },
                 },
             )
             .unwrap();

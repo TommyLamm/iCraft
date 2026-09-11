@@ -320,7 +320,7 @@ fn run_tcp_travel(label: &str, listen: bool) {
         2,
         2,
         GameplayOperation::Command {
-            command: "/help".into(),
+            command: "/time set day".into(),
         },
     );
     assert!(stale.client_revision > 0, "Plan32 stale revision fixture");
