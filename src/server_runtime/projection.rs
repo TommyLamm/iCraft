@@ -1356,7 +1356,7 @@ fn entity_animation_state(entity: &crate::entity::Entity) -> u8 {
         | (u8::from(entity.fire_aspect_timer > 0.0) << 3)
 }
 
-pub(super) fn entity_state_wire(entity: &crate::entity::Entity) -> EntityStateWire {
+pub fn entity_state_wire(entity: &crate::entity::Entity) -> EntityStateWire {
     let animation_state = entity_animation_state(entity);
     let item = entity
         .dropped_stack

@@ -1646,6 +1646,7 @@ mod sprint_policy_tests {
 #[cfg(test)]
 mod authority_policy_tests {
     use super::*;
+    use crate::server_runtime::projection::entity_state_wire;
 
     #[test]
     fn multiplayer_host_keeps_world_ticks_running_while_paused_or_dead() {
@@ -1777,8 +1778,6 @@ pub enum StationKind {
 /// in Mapped and is consumed exactly once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuTimestampReadbackState {
-    #[allow(dead_code)]
-    Unsupported,
     Unmapped,
     CopyEncoded,
     Mapping,
@@ -1878,19 +1877,8 @@ struct GpuTimestampReadbackSlot {
 /// Capability gate used by the renderer and HUD. Pass-local timing is only
 /// valid when both feature bits are available.
 #[cfg(test)]
-pub const fn gpu_timestamp_capability(
-    timestamp_query: bool,
-    inside_passes: bool,
-) -> GpuTimestampReadbackState {
-    if timestamp_query {
-        if inside_passes {
-            GpuTimestampReadbackState::Unmapped
-        } else {
-            GpuTimestampReadbackState::Unsupported
-        }
-    } else {
-        GpuTimestampReadbackState::Unsupported
-    }
+pub const fn gpu_timestamp_capability(timestamp_query: bool, inside_passes: bool) -> bool {
+    timestamp_query && inside_passes
 }
 
 #[cfg(test)]
@@ -1903,7 +1891,6 @@ mod gpu_timestamp_state_tests {
         assert_eq!(S::Mapping.map_completed(true), S::Mapped);
         assert_eq!(S::Mapped.consume(), S::Consumed);
         assert_eq!(S::Mapping.map_completed(false), S::Unmapped);
-        assert_eq!(S::Unsupported.map_requested(), S::Unsupported);
         assert_eq!(S::Consumed.consume(), S::Consumed);
         assert_eq!(S::Mapped.map_requested(), S::Mapped);
     }
@@ -1929,50 +1916,9 @@ mod gpu_timestamp_state_tests {
 
     #[test]
     fn capability_requires_timestamp_query_and_inside_passes() {
-        assert_eq!(
-            super::gpu_timestamp_capability(false, false),
-            S::Unsupported
-        );
-        assert_eq!(super::gpu_timestamp_capability(true, false), S::Unsupported);
-        assert_eq!(super::gpu_timestamp_capability(true, true), S::Unmapped);
-    }
-}
-
-fn entity_animation_state(entity: &crate::entity::Entity) -> u8 {
-    u8::from(entity.on_ground)
-        | (u8::from(entity.target_player) << 1)
-        | (u8::from(entity.is_ignited) << 2)
-        | (u8::from(entity.fire_aspect_timer > 0.0) << 3)
-}
-
-fn entity_state_wire(entity: &crate::entity::Entity) -> crate::network::protocol::EntityStateWire {
-    let item = entity
-        .dropped_stack
-        .as_ref()
-        .map(crate::network::protocol::ItemWire::from_stack)
-        .or_else(|| {
-            entity.dropped_item.map(|item| {
-                let stack = ItemStack::new(item, entity.dropped_count.max(1));
-                crate::network::protocol::ItemWire::from_stack(&stack)
-            })
-        })
-        .or_else(|| {
-            entity.potion.map(|potion| {
-                let mut stack = ItemStack::new(Item::SplashPotion, 1);
-                stack.potion = Some(potion);
-                crate::network::protocol::ItemWire::from_stack(&stack)
-            })
-        });
-    crate::network::protocol::EntityStateWire {
-        entity_id: entity.id,
-        entity_type: entity.entity_type.to_wire(),
-        position: entity.position.to_array(),
-        velocity: entity.velocity.to_array(),
-        yaw: entity.yaw,
-        pitch: entity.pitch,
-        health: entity.health,
-        animation_state: entity_animation_state(entity),
-        item,
+        assert!(!super::gpu_timestamp_capability(false, false));
+        assert!(!super::gpu_timestamp_capability(true, false));
+        assert!(super::gpu_timestamp_capability(true, true));
     }
 }
 
@@ -2012,29 +1958,6 @@ fn is_replicated_entity_type(entity_type: crate::entity::EntityType) -> bool {
         || entity_type.is_projectile()
         || entity_type == crate::entity::EntityType::DroppedItem
         || entity_type == crate::entity::EntityType::EndCrystal
-}
-
-fn effect_to_wire(
-    effect: crate::brewing::PotionEffect,
-) -> crate::network::protocol::PlayerEffectWire {
-    use crate::brewing::PotionEffect;
-    let (kind, level) = match effect {
-        PotionEffect::Speed { level, .. } => (0, level),
-        PotionEffect::Strength { level, .. } => (1, level),
-        PotionEffect::Healing { level } => (2, level),
-        PotionEffect::Regeneration { level, .. } => (3, level),
-        PotionEffect::NightVision { .. } => (4, 1),
-        PotionEffect::Invisibility { .. } => (5, 1),
-        PotionEffect::FireResistance { .. } => (6, 1),
-        PotionEffect::WaterBreathing { .. } => (7, 1),
-        PotionEffect::Poison { level, .. } => (8, level),
-        PotionEffect::Slowness { level, .. } => (9, level),
-    };
-    crate::network::protocol::PlayerEffectWire {
-        kind,
-        level,
-        remaining_seconds: effect.remaining(),
-    }
 }
 
 fn effect_from_wire(
@@ -2233,7 +2156,6 @@ pub struct State {
     jump_taps: DoubleTapTracker,
     #[allow(dead_code)]
     texture_atlas: crate::texture::TextureAtlas,
-    crosshair_pipeline: wgpu::RenderPipeline,
     crosshair_buffer: wgpu::Buffer,
     pub is_paused: bool,
     mouse_ndc: [f32; 2],
@@ -3030,78 +2952,26 @@ impl State {
             multiview: None,
         });
 
-        // Initialize Crosshair Pipeline
-        let crosshair_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Crosshair Pipeline Layout"),
-                bind_group_layouts: &[],
-                push_constant_ranges: &[],
-            });
-
-        let crosshair_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Crosshair Render Pipeline"),
-            layout: Some(&crosshair_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_crosshair",
-                buffers: &[Vertex::desc()],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: "fs_crosshair",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Always,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-        });
-
-        // Crosshair Vertices (Horizontal and Vertical Lines)
+        // Crosshair uses the shared UI line pipeline (vs_ui / fs_ui).
         let aspect = size.width as f32 / size.height as f32;
         let crosshair_size = 0.02;
+        let crosshair_color = [1.0, 1.0, 1.0, 0.8];
         let crosshair_vertices = [
-            Vertex {
+            UiVertex {
                 position: [-crosshair_size, 0.0, 0.0],
-                tex_coords: [0.0, 0.0],
-                light_level: 1.0,
-                ao: 1.0,
+                color: crosshair_color,
             },
-            Vertex {
+            UiVertex {
                 position: [crosshair_size, 0.0, 0.0],
-                tex_coords: [0.0, 0.0],
-                light_level: 1.0,
-                ao: 1.0,
+                color: crosshair_color,
             },
-            Vertex {
+            UiVertex {
                 position: [0.0, -crosshair_size * aspect, 0.0],
-                tex_coords: [0.0, 0.0],
-                light_level: 1.0,
-                ao: 1.0,
+                color: crosshair_color,
             },
-            Vertex {
+            UiVertex {
                 position: [0.0, crosshair_size * aspect, 0.0],
-                tex_coords: [0.0, 0.0],
-                light_level: 1.0,
-                ao: 1.0,
+                color: crosshair_color,
             },
         ];
 
@@ -3587,7 +3457,6 @@ impl State {
             keys,
             jump_taps: DoubleTapTracker::default(),
             texture_atlas,
-            crosshair_pipeline,
             crosshair_buffer,
             is_paused: false,
             mouse_ndc: [0.0, 0.0],

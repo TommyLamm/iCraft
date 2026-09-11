@@ -33,11 +33,6 @@ pub struct SectionVisibilityScratch {
 }
 
 impl SectionVisibilityScratch {
-    #[allow(dead_code)]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Pre-reserve traversal storage when the render-distance budget is known.
     pub fn with_capacity(visited_capacity: usize, queue_capacity: usize) -> Self {
         Self {

@@ -41,22 +41,7 @@ struct VertexOutput {
 fn vs_main(model: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = camera.view_proj * vec4<f32>(model.position, 1.0);
-    
-    var out_tex = model.tex_coords;
-    let tx = model.tex_coords.x * 16.0;
-    let ty = model.tex_coords.y * 16.0;
-    let is_water = tx >= 10.0 && tx < 11.0 && ty >= 0.0 && ty < 1.0;
-    let is_lava = tx >= 15.0 && tx < 16.0 && ty >= 2.0 && ty < 3.0;
-    
-    if (is_water) {
-        let local_y = (model.tex_coords.y - 0.0 * 0.0625) / 0.0625 + camera.total_time * 0.8;
-        out_tex.y = 0.0 * 0.0625 + fract(local_y) * 0.0625;
-    } else if (is_lava) {
-        let local_y = (model.tex_coords.y - 2.0 * 0.0625) / 0.0625 + camera.total_time * 0.2;
-        out_tex.y = 2.0 * 0.0625 + fract(local_y) * 0.0625;
-    }
-    out.tex_coords = out_tex;
-    
+    out.tex_coords = model.tex_coords;
     out.light_level = model.light_level;
     out.world_pos = model.position;
     out.ao = model.ao;
@@ -196,23 +181,6 @@ fn fs_terrain(in: TerrainVertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
     return shade_world_fragment(color, in.light_level, in.world_pos, in.ao);
-}
-
-@vertex
-fn vs_crosshair(model: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    out.clip_position = vec4<f32>(model.position, 1.0);
-    out.tex_coords = model.tex_coords;
-    out.light_level = model.light_level;
-    out.world_pos = model.position;
-    out.ao = model.ao;
-    out.tint_color = vec4<f32>(1.0);
-    return out;
-}
-
-@fragment
-fn fs_crosshair(in: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(1.0, 1.0, 1.0, 0.8);
 }
 
 struct UiVertexInput {

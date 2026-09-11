@@ -46,67 +46,6 @@ impl Language {
     }
 }
 
-pub const REQUIRED_KEYS: &[&str] = &[
-    "menu.singleplayer",
-    "menu.multiplayer",
-    "menu.options",
-    "menu.quit_game",
-    "menu.select_world",
-    "menu.controls",
-    "menu.accessibility",
-    "menu.resource_packs",
-    "menu.done",
-    "menu.back",
-    "menu.apply",
-    "menu.reload",
-    "menu.create_world",
-    "menu.cancel",
-    "menu.enter_valid_multiplayer",
-    "menu.world_copied",
-    "menu.world_backed_up",
-    "menu.language",
-    "menu.ui_scale",
-    "menu.chat_scale",
-    "menu.chat_opacity",
-    "menu.subtitles",
-    "menu.high_contrast",
-    "menu.reduce_flashing",
-    "menu.toggle_sprint",
-    "menu.toggle_sneak",
-    "menu.camera_bobbing",
-    "menu.damage_tilt",
-    "hud.subtitle.direction_left",
-    "hud.subtitle.direction_right",
-    "hud.subtitle.direction_front",
-    "hud.subtitle.direction_back",
-    "hud.subtitle.center",
-    "sound.jump",
-    "sound.hurt",
-    "sound.death",
-    "sound.explosion",
-    "sound.thunder",
-    "sound.arrow",
-    "sound.creeper",
-    "sound.ui_click",
-    "sound.block",
-    "death.fall",
-    "death.void",
-    "death.starved",
-    "death.mob",
-    "death.explosion",
-    "death.drowned",
-    "death.lightning",
-    "death.generic",
-    "command.feedback",
-    "disconnect.generic",
-    "advancement.toast",
-];
-
-/// Stable player-facing labels covered by the catalog contract.  This list is
-/// intentionally bounded to interactive menu/HUD/inventory/station surfaces
-/// and stable command status templates; branding, diagnostics, command
-/// grammar/help, raw user input, and dynamic item/entity names remain outside
-/// the zero-literal goal.
 pub const VISIBLE_REQUIRED_KEYS: &[&str] = &[
     "menu.singleplayer",
     "menu.multiplayer",
@@ -397,25 +336,6 @@ impl TranslationCatalog {
         missing
     }
 
-    pub fn coverage(&self) -> f32 {
-        if REQUIRED_KEYS.is_empty() {
-            return 1.0;
-        }
-        REQUIRED_KEYS
-            .iter()
-            .filter(|key| self.active.contains_key(**key))
-            .count() as f32
-            / REQUIRED_KEYS.len() as f32
-    }
-
-    pub fn validate_required_keys(&self) -> Vec<String> {
-        REQUIRED_KEYS
-            .iter()
-            .filter(|key| !self.english.contains_key(**key))
-            .map(|key| (*key).to_string())
-            .collect()
-    }
-
     pub fn visible_coverage(&self) -> f32 {
         if VISIBLE_REQUIRED_KEYS.is_empty() {
             return 1.0;
@@ -440,13 +360,13 @@ fn parse_map(json: &str) -> Result<HashMap<String, String>, serde_json::Error> {
     serde_json::from_str(json)
 }
 
-fn merge_locale_layers(layers: Vec<Vec<u8>>) -> HashMap<String, String> {
+fn merge_locale_layers(layers: Vec<std::sync::Arc<[u8]>>) -> HashMap<String, String> {
     let mut merged = HashMap::new();
     for bytes in layers.into_iter().rev() {
-        let Ok(text) = String::from_utf8(bytes) else {
+        let Ok(text) = std::str::from_utf8(&bytes) else {
             continue;
         };
-        let Ok(layer) = parse_map(&text) else {
+        let Ok(layer) = parse_map(text) else {
             continue;
         };
         merged.extend(layer);
@@ -506,20 +426,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn english_required_keys_have_values_and_german_is_complete() {
-        let english = TranslationCatalog::builtin(Language::English);
-        let german = TranslationCatalog::builtin(Language::German);
-        assert!(english.validate_required_keys().is_empty());
-        assert!(german.validate_required_keys().is_empty());
-        assert!((english.coverage() - 1.0).abs() < f32::EPSILON);
-        assert!((german.coverage() - 1.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
     fn visible_keys_have_builtin_english_and_german_values() {
         let english = TranslationCatalog::builtin(Language::English);
         let german = TranslationCatalog::builtin(Language::German);
         assert!(english.validate_visible_keys().is_empty());
+        assert!(german.validate_visible_keys().is_empty());
         assert!((english.visible_coverage() - 1.0).abs() < f32::EPSILON);
         assert!((german.visible_coverage() - 1.0).abs() < f32::EPSILON);
     }
@@ -731,7 +642,7 @@ mod tests {
         assert_eq!(catalog.translate("hello"), "English");
         let count = manager.diagnostics().len();
         assert!(count >= 1);
-        manager.resolve_locale(Language::English.code());
+        let _ = manager.resolve_locale_layers(Language::English.code());
         assert_eq!(manager.diagnostics().len(), count);
         let _ = std::fs::remove_dir_all(root);
     }

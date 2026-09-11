@@ -494,6 +494,7 @@ impl AudioManager {
             let logical_path = format!("sounds/{filename}");
             let loaded_bytes = manager
                 .resolve_sound(&logical_path)
+                .map(|bytes| bytes.as_ref().to_vec())
                 .unwrap_or_else(|| create_wav_bytes(&synth_sound(id), 22050));
 
             sound_cache.insert(id, loaded_bytes);

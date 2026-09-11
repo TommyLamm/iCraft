@@ -1767,35 +1767,6 @@ fn legal_region_with_empty_inner_zlib_is_not_replaced_by_generated_terrain() {
 }
 
 #[test]
-fn persist_index_is_noop_when_in_process_runtime_owns_world() {
-    let world_dir = unique_test_dir("persist_index_runtime");
-    let manager = SaveManager::new(&world_dir);
-    let path = world_dir.join("mutation_revisions.bin");
-    atomic_write(&path, b"runtime-owned").unwrap();
-
-    let mut index = MutationRevisionIndex::default();
-    assert_eq!(
-        index
-            .bump(crate::dimension::Dimension::Overworld, 1, 1)
-            .unwrap(),
-        1
-    );
-
-    let wrote = manager
-        .save_mutation_revision_index_unless_runtime(&index, true)
-        .unwrap();
-    assert!(!wrote);
-    assert_eq!(fs::read(&path).unwrap(), b"runtime-owned");
-
-    let wrote = manager
-        .save_mutation_revision_index_unless_runtime(&index, false)
-        .unwrap();
-    assert!(wrote);
-    assert_ne!(fs::read(&path).unwrap(), b"runtime-owned");
-    fs::remove_dir_all(world_dir).unwrap();
-}
-
-#[test]
 fn oversized_zlib_inflate_is_rejected_without_unbounded_output() {
     let expected = 64;
     let bomb = vec![0u8; expected + 256];

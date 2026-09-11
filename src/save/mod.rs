@@ -493,23 +493,6 @@ impl SaveManager {
         atomic_write(self.world_dir.join("mutation_revisions.bin"), &bytes)
     }
 
-    /// Presentation must not write `mutation_revisions.bin` while an
-    /// in-process `ServerRuntime` already owns this world directory.
-    /// Desktop presentation no longer holds a `SaveManager`; this skip is
-    /// retained for tests and any leftover caller.
-    /// Returns `Ok(false)` when the write is skipped.
-    pub fn save_mutation_revision_index_unless_runtime(
-        &self,
-        index: &MutationRevisionIndex,
-        has_in_process_runtime: bool,
-    ) -> io::Result<bool> {
-        if has_in_process_runtime {
-            return Ok(false);
-        }
-        self.save_mutation_revision_index(index)?;
-        Ok(true)
-    }
-
     pub fn load_mutation_revision_index(&self) -> MutationRevisionIndex {
         fs::read(self.world_dir.join("mutation_revisions.bin"))
             .ok()

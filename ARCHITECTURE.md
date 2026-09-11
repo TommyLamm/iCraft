@@ -356,7 +356,7 @@ configured `world_dir` (default `world/`).
 | `<world>/dimensions/{nether,end}/` | Per-dimension regions and `entities.dat`. |
 | `<world>/mutation_revisions.bin` | Latest dimension/chunk revisions. |
 | `server.properties` | Dedicated config; effective policy also lives in the world dir. |
-| `assets/`, `resourcepacks/` | Built-in pack plus optional directory/ZIP packs. |
+| `assets/`, `resourcepacks/` | Built-in pack plus optional directory/ZIP packs (`zip` crate; entries stored as `Arc<[u8]>`). |
 
 Writes are atomic. Chunk restore is fail-closed: corrupt/empty/oversized/
 dimension-inconsistent streams error; the column is never generated or

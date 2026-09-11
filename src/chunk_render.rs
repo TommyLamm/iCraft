@@ -205,10 +205,6 @@ impl MeshBounds {
         }
     }
 
-    pub fn translated(self, offset: Vec3) -> Self {
-        Self::new(self.min + offset, self.max + offset)
-    }
-
     /// Squared distance to the closest point on this AABB.
     pub fn distance_squared_to_point(self, point: Vec3) -> f32 {
         let closest = point.clamp(self.min, self.max);
@@ -504,17 +500,6 @@ impl DrawPlan {
                 .then_with(|| left.chunk_coord.cmp(&right.chunk_coord))
                 .then_with(|| left.section_y.cmp(&right.section_y))
         });
-    }
-
-    #[allow(dead_code)] // Convenience constructor used by tests; production uses build_into.
-    pub fn build(
-        candidates: impl IntoIterator<Item = DrawCandidate>,
-        frustum: &Frustum,
-        _camera_position: Vec3,
-    ) -> Self {
-        let mut plan = Self::default();
-        plan.build_into(candidates, frustum);
-        plan
     }
 
     pub fn draw_call_count(&self) -> usize {
@@ -1208,7 +1193,8 @@ mod tests {
             candidate((2, 0), 200.0, 6, DrawLayer::Transparent),
         ];
 
-        let plan = DrawPlan::build(candidates, &frustum, Vec3::ZERO);
+        let mut plan = DrawPlan::default();
+        plan.build_into(candidates, &frustum);
         assert_eq!(plan.opaque.len(), 1);
         assert!(plan.transparent.is_empty());
         assert_eq!(plan.draw_call_count(), 1);
@@ -1224,7 +1210,8 @@ mod tests {
             candidate((-4, 4), 10.0, 6, DrawLayer::Opaque),
         ];
 
-        let plan = DrawPlan::build(candidates, &frustum, Vec3::ZERO);
+        let mut plan = DrawPlan::default();
+        plan.build_into(candidates, &frustum);
         let coords: Vec<_> = plan
             .opaque
             .iter()
@@ -1243,7 +1230,8 @@ mod tests {
             candidate((-4, 4), 10.0, 6, DrawLayer::Transparent),
         ];
 
-        let plan = DrawPlan::build(candidates, &frustum, Vec3::ZERO);
+        let mut plan = DrawPlan::default();
+        plan.build_into(candidates, &frustum);
         let coords: Vec<_> = plan
             .transparent
             .iter()
@@ -1260,7 +1248,8 @@ mod tests {
             candidate((0, 0), 10.0, 6, DrawLayer::Transparent),
             candidate((1, 0), 20.0, 18, DrawLayer::Opaque),
         ];
-        let plan = DrawPlan::build(candidates, &frustum, Vec3::ZERO);
+        let mut plan = DrawPlan::default();
+        plan.build_into(candidates, &frustum);
         assert_eq!(plan.visible_chunk_count(), 2);
         assert_eq!(plan.draw_call_count(), 3);
         assert_eq!(plan.submitted_triangle_count(), 12);

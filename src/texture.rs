@@ -1747,11 +1747,6 @@ fn make_dragon_tiles_opaque(img: &mut RgbaImage) {
 }
 
 impl TextureAtlas {
-    pub fn new_procedural(device: &Device, queue: &Queue) -> Self {
-        let mut manager = ResourcePackManager::discover_default();
-        Self::new_procedural_with_manager(device, queue, &mut manager)
-    }
-
     /// Build the compact atlas while resolving assets through an already
     /// configured pack manager. Keeping the manager at the call site lets the
     /// menu/state selection apply consistently to textures and audio.

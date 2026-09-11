@@ -3750,8 +3750,8 @@ impl State {
                     render_pass.draw(0..self.num_ui_textured_vertices, 0..1);
                 }
 
-                // 3. Draw Crosshair
-                render_pass.set_pipeline(&self.crosshair_pipeline);
+                // 3. Draw Crosshair (shared UI line pipeline)
+                render_pass.set_pipeline(&self.ui_line_pipeline);
                 render_pass.set_vertex_buffer(0, self.crosshair_buffer.slice(..));
                 render_pass.draw(0..4, 0..1);
 

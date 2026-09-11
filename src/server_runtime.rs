@@ -43,7 +43,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod ingress;
-mod projection;
+pub mod projection;
 mod session_sync;
 
 pub(super) const TICK_INTERVAL: Duration = Duration::from_millis(50);

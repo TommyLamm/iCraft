@@ -18,7 +18,6 @@ const SIXTEENTH: f32 = 1.0 / 16.0;
 /// atlas tile without asking the world/state layer to understand JSON.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModelDescriptor {
-    pub parent: Option<String>,
     pub atlas_tile: Option<(u32, u32)>,
 }
 
@@ -229,6 +228,8 @@ fn normalize_model_path(path: &str) -> Result<String, ()> {
 
 fn parse_model_descriptor(bytes: &[u8]) -> Option<ModelDescriptor> {
     let raw = serde_json::from_slice::<RawModelDescriptor>(bytes).ok()?;
+    // Parent is accepted for format compatibility but never consulted; only
+    // reject oversized strings so a pack cannot force unbounded allocations.
     if raw.parent.as_ref().is_some_and(|parent| parent.len() > 256) {
         return None;
     }
@@ -236,10 +237,7 @@ fn parse_model_descriptor(bytes: &[u8]) -> Option<ModelDescriptor> {
     if atlas_tile.is_some_and(|(x, y)| x >= 16 || y >= 16) {
         return None;
     }
-    Some(ModelDescriptor {
-        parent: raw.parent,
-        atlas_tile,
-    })
+    Some(ModelDescriptor { atlas_tile })
 }
 
 fn push_quad(
