@@ -270,10 +270,15 @@ Join `ChunkData` that omits light streams zeros them then
 ## Network
 
 Protocol v20: bincode over TCP, 4-byte big-endian length, 2 MiB cap.
-`Packet::encode_frame` is the length-prefix helper. Older versions fail
-handshake. Malformed pre-auth frames close that connection only.
-Unknown or wrong-direction post-auth packets close that connection; there
-is no decode-then-drop leftover path.
+`Packet::encode_payload` / `encode_frame` build the wire body. Outbound
+queues hold `EncodedPacket` (`Arc<[u8]>` payload plus the logical `Packet`):
+metering, mailbox replace, and `ConnectionWriter::send_payload` share one
+encode. Broadcast fanout clones the `Arc` so N connections do not
+re-serialize. Authenticated sessions speak a single `PROTOCOL_VERSION`
+(handshake rejects others), so shared payload Arcs are never mixed across
+protocol versions. Older versions fail handshake. Malformed pre-auth frames
+close that connection only. Unknown or wrong-direction post-auth packets
+close that connection; there is no decode-then-drop leftover path.
 
 Player identity is `normalize_player_identity`: lowercase ASCII
 `[a-z0-9_-]`, 1–16 bytes, no Windows reserved stems. `online-mode=true`

@@ -1111,7 +1111,7 @@ mod tests {
         let pending = pose_mailbox.drain().await;
         assert_eq!(pending.len(), 2);
         assert!(matches!(
-            pending[0],
+            pending[0].packet(),
             Packet::PlayerPosition {
                 id: 9,
                 sequence: 5,
@@ -1121,7 +1121,7 @@ mod tests {
             }
         ));
         assert!(matches!(
-            pending[1],
+            pending[1].packet(),
             Packet::PlayerPosition {
                 id: 12,
                 sequence: 8,
@@ -1138,12 +1138,15 @@ mod tests {
         let (observer_out_tx, mut observer_out_rx) = mpsc::channel(1);
         let metrics = NetworkMetrics::default();
         observer_out_tx
-            .try_send(QueuedPacket::Outbound(TrackedPacket::new(
-                Packet::Keepalive {
-                    protocol_version: PROTOCOL_VERSION,
-                },
-                &metrics,
-            )))
+            .try_send(QueuedPacket::Outbound(
+                TrackedPacket::try_from_packet(
+                    Packet::Keepalive {
+                        protocol_version: PROTOCOL_VERSION,
+                    },
+                    &metrics,
+                )
+                .expect("keepalive encodes"),
+            ))
             .unwrap();
         sessions.lock().await.insert(
             1,
@@ -1241,12 +1244,15 @@ mod tests {
         let (out_tx, _out_rx) = mpsc::channel(1);
         let metrics = NetworkMetrics::default();
         out_tx
-            .try_send(QueuedPacket::Outbound(TrackedPacket::new(
-                Packet::Keepalive {
-                    protocol_version: PROTOCOL_VERSION,
-                },
-                &metrics,
-            )))
+            .try_send(QueuedPacket::Outbound(
+                TrackedPacket::try_from_packet(
+                    Packet::Keepalive {
+                        protocol_version: PROTOCOL_VERSION,
+                    },
+                    &metrics,
+                )
+                .expect("keepalive encodes"),
+            ))
             .unwrap();
         let (cancel_tx, mut cancel_rx) = watch::channel(false);
         sessions.lock().await.insert(

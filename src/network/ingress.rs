@@ -10,11 +10,11 @@ use super::protocol::{
     GameplayRequest, Packet, PlayerId, RejectReason, PROTOCOL_VERSION,
 };
 use super::session::{
-    packet_bytes, queue_now_ms, queue_stats, reliable_send, reliable_send_and_wait,
-    send_connection_packet, send_writer_packet, CatchupMailbox, ClientSession,
+    queue_now_ms, queue_stats, reliable_send, reliable_send_and_wait, send_connection_packet,
+    send_encoded_packet, send_writer_packet, CatchupMailbox, ClientSession, EncodedPacket,
     GameplaySessionState, NetworkMetrics, PoseMailbox, PreAuthSlot, QueuedPacket,
-    RequestRateLimiter, Sessions, StateMailbox, CLIENT_QUEUE_CAPACITY, CLIENT_TIMEOUT,
-    KEEPALIVE_INTERVAL, MAX_CHAT_CHARS,
+    RequestRateLimiter, Sessions, StateMailbox, TrackedPacket, CLIENT_QUEUE_CAPACITY,
+    CLIENT_TIMEOUT, KEEPALIVE_INTERVAL, MAX_CHAT_CHARS,
 };
 use super::transport::Connection;
 
@@ -37,15 +37,16 @@ pub(crate) async fn queue_initial_roster(
             id,
             username,
         };
-        let bytes = packet_bytes(&packet);
+        let Ok(encoded) = EncodedPacket::new(packet) else {
+            return Err(());
+        };
+        let bytes = encoded.frame_bytes();
         let permit = match tx.reserve().await {
             Ok(permit) => permit,
             Err(_) => return Err(()),
         };
         queue_stats().enqueue(bytes, queue_now_ms());
-        permit.send(QueuedPacket::Outbound(super::session::TrackedPacket::new(
-            packet, metrics,
-        )));
+        permit.send(QueuedPacket::Outbound(TrackedPacket::new(encoded, metrics)));
     }
     Ok(())
 }
@@ -348,7 +349,7 @@ pub(crate) async fn run_client<S: HostEventSender>(
                 queued = out_rx.recv() => {
                     match queued {
                         Some(queued) => {
-                            let (packet, stats, completion) = match queued {
+                            let (tracked, stats, completion) = match queued {
                                 QueuedPacket::Reliable(packet) => (packet, crate::perf::QueueCategory::Reliable, None),
                                 QueuedPacket::ReliableWithAck(packet, completion) => (
                                     packet,
@@ -357,9 +358,9 @@ pub(crate) async fn run_client<S: HostEventSender>(
                                 ),
                                 QueuedPacket::Outbound(packet) => (packet, crate::perf::QueueCategory::Outbound, None),
                             };
-                            let packet = packet.into_packet();
-                            crate::perf::queue_stats(stats).dequeue(packet_bytes(&packet));
-                            let sent = send_writer_packet(&mut writer, &packet, &writer_metrics)
+                            let encoded = tracked.into_encoded();
+                            crate::perf::queue_stats(stats).dequeue(encoded.frame_bytes());
+                            let sent = send_encoded_packet(&mut writer, &encoded, &writer_metrics)
                                 .await
                                 .is_ok();
                             if let Some(completion) = completion {
@@ -377,8 +378,8 @@ pub(crate) async fn run_client<S: HostEventSender>(
                     }
                 }
                 _ = writer_pose_mailbox.notify.notified() => {
-                    for packet in writer_pose_mailbox.drain().await {
-                        if send_writer_packet(&mut writer, &packet, &writer_metrics)
+                    for encoded in writer_pose_mailbox.drain().await {
+                        if send_encoded_packet(&mut writer, &encoded, &writer_metrics)
                             .await
                             .is_err()
                         {
@@ -388,8 +389,8 @@ pub(crate) async fn run_client<S: HostEventSender>(
                     }
                 }
                 _ = writer_state_mailbox.notify.notified() => {
-                    for packet in writer_state_mailbox.drain().await {
-                        if send_writer_packet(&mut writer, &packet, &writer_metrics)
+                    for encoded in writer_state_mailbox.drain().await {
+                        if send_encoded_packet(&mut writer, &encoded, &writer_metrics)
                             .await
                             .is_err()
                         {
@@ -402,8 +403,8 @@ pub(crate) async fn run_client<S: HostEventSender>(
                     if !config.catchup_drain_delay.is_zero() {
                         time::sleep(config.catchup_drain_delay).await;
                     }
-                    if let Some(packet) = writer_catchup_mailbox.pop().await {
-                        if send_writer_packet(&mut writer, &packet, &writer_metrics)
+                    if let Some(encoded) = writer_catchup_mailbox.pop().await {
+                        if send_encoded_packet(&mut writer, &encoded, &writer_metrics)
                             .await
                             .is_err()
                         {

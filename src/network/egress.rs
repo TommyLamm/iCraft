@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use super::channels::{HostEventSender, HostToServer, ServerToHost};
 use super::protocol::{GameplayResponse, Packet, PlayerId, PROTOCOL_VERSION};
-use super::session::{best_effort_send, reliable_send, NetworkMetrics, Sessions};
+use super::session::{
+    best_effort_send_encoded, reliable_send, reliable_send_encoded, NetworkMetrics, Sessions,
+};
 
 pub(crate) async fn normalize_host_response(
     sessions: &Sessions,
@@ -538,6 +540,9 @@ pub(crate) async fn send_to(sessions: &Sessions, id: PlayerId, packet: Packet) -
 }
 
 pub(crate) async fn broadcast_reliably(sessions: &Sessions, packet: Packet) -> Vec<PlayerId> {
+    let Ok(encoded) = super::session::EncodedPacket::new(packet) else {
+        return Vec::new();
+    };
     let senders: Vec<_> = sessions
         .lock()
         .await
@@ -546,9 +551,9 @@ pub(crate) async fn broadcast_reliably(sessions: &Sessions, packet: Packet) -> V
         .collect();
     let mut sends = tokio::task::JoinSet::new();
     for (id, tx, metrics) in senders {
-        let packet = packet.clone();
+        let encoded = encoded.clone();
         sends.spawn(async move {
-            let delivered = reliable_send(&tx, packet, &metrics).await;
+            let delivered = reliable_send_encoded(&tx, encoded, &metrics).await;
             (!delivered).then_some(id)
         });
     }
@@ -600,6 +605,9 @@ pub(crate) async fn broadcast_pose_inner(sessions: &Sessions, packet: Packet) {
         Packet::PlayerPosition { id, .. } => *id,
         _ => return,
     };
+    let Ok(encoded) = super::session::EncodedPacket::new(packet) else {
+        return;
+    };
     let mailboxes: Vec<_> = sessions
         .lock()
         .await
@@ -607,11 +615,14 @@ pub(crate) async fn broadcast_pose_inner(sessions: &Sessions, packet: Packet) {
         .map(|session| Arc::clone(&session.pose_mailbox))
         .collect();
     for mailbox in mailboxes {
-        mailbox.replace(player_id, packet.clone()).await;
+        mailbox.replace_encoded(player_id, encoded.clone()).await;
     }
 }
 
 pub(crate) async fn broadcast_state(sessions: &Sessions, packet: Packet) {
+    let Ok(encoded) = super::session::EncodedPacket::new(packet) else {
+        return;
+    };
     let mailboxes: Vec<_> = sessions
         .lock()
         .await
@@ -619,11 +630,14 @@ pub(crate) async fn broadcast_state(sessions: &Sessions, packet: Packet) {
         .map(|session| Arc::clone(&session.state_mailbox))
         .collect();
     for mailbox in mailboxes {
-        mailbox.replace(packet.clone()).await;
+        mailbox.replace_encoded(encoded.clone()).await;
     }
 }
 
 pub(crate) async fn broadcast_to(sessions: &Sessions, packet: Packet) {
+    let Ok(encoded) = super::session::EncodedPacket::new(packet) else {
+        return;
+    };
     let senders: Vec<_> = sessions
         .lock()
         .await
@@ -631,6 +645,6 @@ pub(crate) async fn broadcast_to(sessions: &Sessions, packet: Packet) {
         .map(|session| (session.out_tx.clone(), session.metrics.clone()))
         .collect();
     for (tx, metrics) in senders {
-        best_effort_send(&tx, packet.clone(), &metrics);
+        best_effort_send_encoded(&tx, encoded.clone(), &metrics);
     }
 }

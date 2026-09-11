@@ -47,6 +47,10 @@ impl Connection {
         self.writer.send(packet).await
     }
 
+    pub async fn send_payload(&mut self, payload: &[u8]) -> io::Result<()> {
+        self.writer.send_payload(payload).await
+    }
+
     pub(super) fn into_split(self) -> (ConnectionReader, ConnectionWriter) {
         (self.reader, self.writer)
     }
@@ -91,12 +95,27 @@ impl ConnectionReader {
 }
 
 impl ConnectionWriter {
-    pub async fn send(&mut self, packet: &Packet) -> io::Result<()> {
-        let frame = packet
-            .encode_frame()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        self.stream.write_all(&frame).await?;
+    /// Write a pre-encoded bincode payload with the standard 4-byte BE length
+    /// prefix. Callers that already hold shared outbound bytes use this so the
+    /// socket path never re-serializes.
+    pub async fn send_payload(&mut self, payload: &[u8]) -> io::Result<()> {
+        if payload.len() > MAX_PACKET_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "packet payload exceeds maximum",
+            ));
+        }
+        let len = (payload.len() as u32).to_be_bytes();
+        self.stream.write_all(&len).await?;
+        self.stream.write_all(payload).await?;
         Ok(())
+    }
+
+    pub async fn send(&mut self, packet: &Packet) -> io::Result<()> {
+        let payload = packet
+            .encode_payload()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        self.send_payload(&payload).await
     }
 }
 

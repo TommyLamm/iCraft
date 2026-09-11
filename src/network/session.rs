@@ -77,8 +77,7 @@ impl NetworkMetrics {
     /// peer may observe a successful frame as soon as `write_all` completes,
     /// so publishing after the await leaves a visibility race. The guard
     /// rolls the reservation back when the write fails.
-    pub(crate) fn reserve_outbound(&self, packet: &Packet) -> OutboundMetricReservation {
-        let bytes = packet_bytes(packet);
+    pub(crate) fn reserve_outbound_bytes(&self, bytes: u64) -> OutboundMetricReservation {
         Self::add(&self.inner.outbound_packets, 1);
         Self::add(&self.inner.outbound_bytes, bytes);
         OutboundMetricReservation {
@@ -86,6 +85,10 @@ impl NetworkMetrics {
             bytes,
             committed: false,
         }
+    }
+
+    pub(crate) fn reserve_outbound(&self, packet: &Packet) -> OutboundMetricReservation {
+        self.reserve_outbound_bytes(packet_bytes(packet))
     }
 
     pub(crate) fn enqueue(&self) {
@@ -153,37 +156,119 @@ impl Drop for OutboundMetricReservation {
     }
 }
 
+/// Pre-encoded outbound packet. The bincode payload is shared via `Arc` so
+/// broadcast/fanout meters and writes the same bytes without re-serializing.
+///
+/// Assumption: authenticated live sessions speak a single `PROTOCOL_VERSION`
+/// (handshake rejects others). Shared payload Arcs are therefore never mixed
+/// across protocol versions on the current wire.
+#[derive(Clone, Debug)]
+pub(crate) struct EncodedPacket {
+    packet: Packet,
+    payload: Arc<[u8]>,
+    protocol_version: u32,
+}
+
+impl EncodedPacket {
+    pub(crate) fn new(packet: Packet) -> Result<Self, &'static str> {
+        let protocol_version = packet.protocol_version();
+        // Live sessions speak one protocol after handshake; stored so a future
+        // multi-version fanout can refuse to share bytes across dialects.
+        debug_assert_eq!(
+            protocol_version,
+            crate::network::protocol::PROTOCOL_VERSION,
+            "outbound EncodedPacket assumes single live PROTOCOL_VERSION"
+        );
+        let payload = packet.encode_payload()?;
+        Ok(Self {
+            packet,
+            payload: Arc::<[u8]>::from(payload),
+            protocol_version,
+        })
+    }
+
+    pub(crate) fn packet(&self) -> &Packet {
+        &self.packet
+    }
+
+    pub(crate) fn payload(&self) -> &Arc<[u8]> {
+        &self.payload
+    }
+
+    pub(crate) fn protocol_version(&self) -> u32 {
+        self.protocol_version
+    }
+
+    /// TCP frame size: 4-byte BE length prefix + payload.
+    pub(crate) fn frame_bytes(&self) -> u64 {
+        frame_byte_len(self.payload.len())
+    }
+
+    pub(crate) fn into_packet(self) -> Packet {
+        self.packet
+    }
+}
+
+impl PartialEq for EncodedPacket {
+    fn eq(&self, other: &Self) -> bool {
+        self.packet == other.packet
+    }
+}
+
+impl PartialEq<Packet> for EncodedPacket {
+    fn eq(&self, other: &Packet) -> bool {
+        &self.packet == other
+    }
+}
+
 pub(crate) struct TrackedPacket {
-    packet: Option<Packet>,
+    encoded: Option<EncodedPacket>,
     metrics: NetworkMetrics,
 }
 
 impl TrackedPacket {
-    pub(crate) fn new(packet: Packet, metrics: &NetworkMetrics) -> Self {
+    pub(crate) fn new(encoded: EncodedPacket, metrics: &NetworkMetrics) -> Self {
         metrics.enqueue();
         Self {
-            packet: Some(packet),
+            encoded: Some(encoded),
             metrics: metrics.clone(),
         }
     }
 
+    pub(crate) fn try_from_packet(packet: Packet, metrics: &NetworkMetrics) -> Option<Self> {
+        EncodedPacket::new(packet)
+            .ok()
+            .map(|encoded| Self::new(encoded, metrics))
+    }
+
     pub(crate) fn packet(&self) -> &Packet {
-        self.packet
+        self.encoded
+            .as_ref()
+            .expect("queued packet is present until it leaves its backlog")
+            .packet()
+    }
+
+    pub(crate) fn encoded(&self) -> &EncodedPacket {
+        self.encoded
             .as_ref()
             .expect("queued packet is present until it leaves its backlog")
     }
 
-    pub(crate) fn into_packet(mut self) -> Packet {
+    pub(crate) fn into_encoded(mut self) -> EncodedPacket {
         self.metrics.dequeue();
-        self.packet
+        self.encoded
             .take()
             .expect("queued packet is consumed exactly once")
+    }
+
+    pub(crate) fn into_packet(self) -> Packet {
+        self.into_encoded().into_packet()
     }
 }
 
 impl Drop for TrackedPacket {
     fn drop(&mut self) {
-        if self.packet.is_some() {
+        if self.encoded.is_some() {
             self.metrics.dequeue();
         }
     }
@@ -195,11 +280,17 @@ pub(crate) enum QueuedPacket {
     Outbound(TrackedPacket),
 }
 
+/// TCP frame byte count from an already-encoded payload length.
+pub(crate) fn frame_byte_len(payload_len: usize) -> u64 {
+    (payload_len as u64).saturating_add(4)
+}
+
 pub(crate) fn packet_bytes(packet: &Packet) -> u64 {
     // `ConnectionWriter` emits a four-byte big-endian frame length before the
     // bincode payload. Count the bytes that actually cross TCP, not just the
-    // serialized message body.
-    (packet.encode().len() as u64).saturating_add(4)
+    // serialized message body. Prefer `EncodedPacket::frame_bytes` on the
+    // outbound hot path so metering reuses the same encode.
+    frame_byte_len(packet.encode().len())
 }
 
 pub(crate) fn queue_stats() -> Arc<crate::perf::SharedQueueStats> {
@@ -217,12 +308,23 @@ pub(crate) async fn reliable_send(
     packet: Packet,
     metrics: &NetworkMetrics,
 ) -> bool {
-    let bytes = packet_bytes(&packet);
+    let Ok(encoded) = EncodedPacket::new(packet) else {
+        return false;
+    };
+    reliable_send_encoded(tx, encoded, metrics).await
+}
+
+pub(crate) async fn reliable_send_encoded(
+    tx: &mpsc::Sender<QueuedPacket>,
+    encoded: EncodedPacket,
+    metrics: &NetworkMetrics,
+) -> bool {
+    let bytes = encoded.frame_bytes();
     let stats = crate::perf::queue_stats(crate::perf::QueueCategory::Reliable);
     match time::timeout(RELIABLE_ENQUEUE_TIMEOUT, tx.reserve()).await {
         Ok(Ok(permit)) => {
             stats.enqueue(bytes, queue_now_ms());
-            permit.send(QueuedPacket::Reliable(TrackedPacket::new(packet, metrics)));
+            permit.send(QueuedPacket::Reliable(TrackedPacket::new(encoded, metrics)));
             true
         }
         Ok(Err(_)) => {
@@ -243,7 +345,10 @@ pub(crate) async fn reliable_send_and_wait(
     packet: Packet,
     metrics: &NetworkMetrics,
 ) -> bool {
-    let bytes = packet_bytes(&packet);
+    let Ok(encoded) = EncodedPacket::new(packet) else {
+        return false;
+    };
+    let bytes = encoded.frame_bytes();
     let stats = crate::perf::queue_stats(crate::perf::QueueCategory::Reliable);
     let permit = match time::timeout(RELIABLE_ENQUEUE_TIMEOUT, tx.reserve()).await {
         Ok(Ok(permit)) => permit,
@@ -261,7 +366,7 @@ pub(crate) async fn reliable_send_and_wait(
     let (completion_tx, completion_rx) = oneshot::channel();
     stats.enqueue(bytes, queue_now_ms());
     permit.send(QueuedPacket::ReliableWithAck(
-        TrackedPacket::new(packet, metrics),
+        TrackedPacket::new(encoded, metrics),
         completion_tx,
     ));
     matches!(
@@ -275,11 +380,22 @@ pub(crate) fn best_effort_send(
     packet: Packet,
     metrics: &NetworkMetrics,
 ) {
-    let bytes = packet_bytes(&packet);
+    let Ok(encoded) = EncodedPacket::new(packet) else {
+        return;
+    };
+    best_effort_send_encoded(tx, encoded, metrics);
+}
+
+pub(crate) fn best_effort_send_encoded(
+    tx: &mpsc::Sender<QueuedPacket>,
+    encoded: EncodedPacket,
+    metrics: &NetworkMetrics,
+) {
+    let bytes = encoded.frame_bytes();
     match tx.try_reserve() {
         Ok(permit) => {
             queue_stats().enqueue(bytes, queue_now_ms());
-            permit.send(QueuedPacket::Outbound(TrackedPacket::new(packet, metrics)));
+            permit.send(QueuedPacket::Outbound(TrackedPacket::new(encoded, metrics)));
         }
         Err(mpsc::error::TrySendError::Full(_)) => {
             queue_stats().drop_item();
@@ -294,7 +410,20 @@ pub(crate) async fn send_connection_packet(
     packet: Packet,
     metrics: &NetworkMetrics,
 ) -> std::io::Result<()> {
-    send_with_outbound_metrics(&packet, metrics, || connection.send(&packet)).await
+    let encoded = EncodedPacket::new(packet)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    send_encoded_connection_packet(connection, &encoded, metrics).await
+}
+
+pub(crate) async fn send_encoded_connection_packet(
+    connection: &mut Connection,
+    encoded: &EncodedPacket,
+    metrics: &NetworkMetrics,
+) -> std::io::Result<()> {
+    send_with_outbound_byte_metrics(encoded.frame_bytes(), metrics, || {
+        connection.send_payload(encoded.payload())
+    })
+    .await
 }
 
 pub(crate) async fn send_writer_packet(
@@ -302,7 +431,24 @@ pub(crate) async fn send_writer_packet(
     packet: &Packet,
     metrics: &NetworkMetrics,
 ) -> std::io::Result<()> {
-    send_with_outbound_metrics(packet, metrics, || writer.send(packet)).await
+    let payload = packet
+        .encode_payload()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    send_with_outbound_byte_metrics(frame_byte_len(payload.len()), metrics, || {
+        writer.send_payload(&payload)
+    })
+    .await
+}
+
+pub(crate) async fn send_encoded_packet(
+    writer: &mut super::transport::ConnectionWriter,
+    encoded: &EncodedPacket,
+    metrics: &NetworkMetrics,
+) -> std::io::Result<()> {
+    send_with_outbound_byte_metrics(encoded.frame_bytes(), metrics, || {
+        writer.send_payload(encoded.payload())
+    })
+    .await
 }
 
 pub(crate) async fn send_with_outbound_metrics<F, Fut>(
@@ -314,7 +460,19 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = std::io::Result<()>>,
 {
-    let reservation = metrics.reserve_outbound(packet);
+    send_with_outbound_byte_metrics(packet_bytes(packet), metrics, send).await
+}
+
+pub(crate) async fn send_with_outbound_byte_metrics<F, Fut>(
+    bytes: u64,
+    metrics: &NetworkMetrics,
+    send: F,
+) -> std::io::Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::io::Result<()>>,
+{
+    let reservation = metrics.reserve_outbound_bytes(bytes);
     match send().await {
         Ok(()) => {
             reservation.commit();
@@ -381,28 +539,35 @@ impl PoseMailbox {
     }
 
     pub(crate) async fn replace(&self, player_id: PlayerId, packet: Packet) {
-        let bytes = packet_bytes(&packet);
+        let Ok(encoded) = EncodedPacket::new(packet) else {
+            return;
+        };
+        self.replace_encoded(player_id, encoded).await;
+    }
+
+    pub(crate) async fn replace_encoded(&self, player_id: PlayerId, encoded: EncodedPacket) {
+        let bytes = encoded.frame_bytes();
         let mut pending = self.pending.lock().await;
-        if let Some(old) = pending.insert(player_id, TrackedPacket::new(packet, &self.metrics)) {
-            self.stats.dequeue(packet_bytes(old.packet()));
+        if let Some(old) = pending.insert(player_id, TrackedPacket::new(encoded, &self.metrics)) {
+            self.stats.dequeue(old.encoded().frame_bytes());
         }
         self.stats.enqueue(bytes, queue_now_ms());
         drop(pending);
         self.notify.notify_one();
     }
 
-    pub(crate) async fn drain(&self) -> Vec<Packet> {
+    pub(crate) async fn drain(&self) -> Vec<EncodedPacket> {
         let mut packets: Vec<_> = self
             .pending
             .lock()
             .await
             .drain()
-            .map(|(_, packet)| packet.into_packet())
+            .map(|(_, packet)| packet.into_encoded())
             .collect();
         for packet in &packets {
-            self.stats.dequeue(packet_bytes(packet));
+            self.stats.dequeue(packet.frame_bytes());
         }
-        packets.sort_by_key(|packet| match packet {
+        packets.sort_by_key(|packet| match packet.packet() {
             Packet::PlayerPosition { id, .. } => *id,
             _ => PlayerId::MAX,
         });
@@ -442,7 +607,14 @@ impl StateMailbox {
     }
 
     pub(crate) async fn replace(&self, packet: Packet) {
-        let (key, sequence) = match &packet {
+        let Ok(encoded) = EncodedPacket::new(packet) else {
+            return;
+        };
+        self.replace_encoded(encoded).await;
+    }
+
+    pub(crate) async fn replace_encoded(&self, encoded: EncodedPacket) {
+        let (key, sequence) = match encoded.packet() {
             Packet::EntityState {
                 sequence, state, ..
             } => (StateMailboxKey::Entity(state.entity_id), *sequence),
@@ -476,24 +648,24 @@ impl StateMailbox {
         if existing_sequence.is_some_and(|existing| existing > sequence) {
             return;
         }
-        let bytes = packet_bytes(&packet);
-        if let Some(old) = pending.insert(key, TrackedPacket::new(packet, &self.metrics)) {
-            self.stats.dequeue(packet_bytes(old.packet()));
+        let bytes = encoded.frame_bytes();
+        if let Some(old) = pending.insert(key, TrackedPacket::new(encoded, &self.metrics)) {
+            self.stats.dequeue(old.encoded().frame_bytes());
         }
         self.stats.enqueue(bytes, queue_now_ms());
         drop(pending);
         self.notify.notify_one();
     }
 
-    pub(crate) async fn drain(&self) -> Vec<Packet> {
+    pub(crate) async fn drain(&self) -> Vec<EncodedPacket> {
         let mut packets: Vec<_> = self.pending.lock().await.drain().collect();
         for (_, packet) in &packets {
-            self.stats.dequeue(packet_bytes(packet.packet()));
+            self.stats.dequeue(packet.encoded().frame_bytes());
         }
         packets.sort_by_key(|(key, _)| *key);
         packets
             .into_iter()
-            .map(|(_, packet)| packet.into_packet())
+            .map(|(_, packet)| packet.into_encoded())
             .collect()
     }
 }
@@ -524,7 +696,14 @@ impl CatchupMailbox {
     }
 
     pub(crate) async fn replace(&self, packet: Packet) -> Result<(), u64> {
-        let key = match &packet {
+        let Ok(encoded) = EncodedPacket::new(packet) else {
+            return Ok(());
+        };
+        self.replace_encoded(encoded).await
+    }
+
+    pub(crate) async fn replace_encoded(&self, encoded: EncodedPacket) -> Result<(), u64> {
+        let key = match encoded.packet() {
             Packet::ChunkData {
                 dimension,
                 cx,
@@ -535,7 +714,7 @@ impl CatchupMailbox {
             _ => return Ok(()),
         };
         let mut guard = self.pending.lock().await;
-        let incoming_bytes = packet_bytes(&packet);
+        let incoming_bytes = encoded.frame_bytes();
         if let Some(existing) = guard.iter_mut().find(|candidate| {
             matches!(
                 candidate.packet(),
@@ -547,13 +726,13 @@ impl CatchupMailbox {
                 } if (*dimension, *cx, *cz) == (key.0, key.1, key.2)
             )
         }) {
-            let old_bytes = packet_bytes(existing.packet());
+            let old_bytes = existing.encoded().frame_bytes();
             let existing_revision = match existing.packet() {
                 Packet::ChunkData { revision, .. } => *revision,
                 _ => 0,
             };
             if key.3 >= existing_revision {
-                *existing = TrackedPacket::new(packet, &self.metrics);
+                *existing = TrackedPacket::new(encoded, &self.metrics);
                 self.stats.dequeue(old_bytes);
                 self.stats.enqueue(incoming_bytes, queue_now_ms());
             }
@@ -566,23 +745,23 @@ impl CatchupMailbox {
             self.metrics.record_queue_full();
             return Err(count);
         }
-        let bytes = packet_bytes(&packet);
-        guard.push_back(TrackedPacket::new(packet, &self.metrics));
+        let bytes = encoded.frame_bytes();
+        guard.push_back(TrackedPacket::new(encoded, &self.metrics));
         self.stats.enqueue(bytes, queue_now_ms());
         self.notify.notify_one();
         Ok(())
     }
 
-    pub(crate) async fn pop(&self) -> Option<Packet> {
+    pub(crate) async fn pop(&self) -> Option<EncodedPacket> {
         let mut guard = self.pending.lock().await;
         let packet = guard.pop_front();
         if let Some(packet) = &packet {
-            self.stats.dequeue(packet_bytes(packet.packet()));
+            self.stats.dequeue(packet.encoded().frame_bytes());
         }
         if !guard.is_empty() {
             self.notify.notify_one();
         }
-        packet.map(TrackedPacket::into_packet)
+        packet.map(TrackedPacket::into_encoded)
     }
 
     #[allow(dead_code)]
@@ -900,9 +1079,9 @@ mod tests {
         assert_eq!(mailbox.len().await, 1);
         assert_eq!(mailbox.replace(p3.clone()).await, Err(1));
 
-        assert_eq!(mailbox.pop().await, Some(p2));
+        assert_eq!(mailbox.pop().await.as_ref().map(|p| p.packet()), Some(&p2));
         assert!(mailbox.replace(p3.clone()).await.is_ok());
-        assert_eq!(mailbox.pop().await, Some(p3));
+        assert_eq!(mailbox.pop().await.as_ref().map(|p| p.packet()), Some(&p3));
     }
 
     #[tokio::test]
@@ -936,8 +1115,11 @@ mod tests {
         };
         mailbox.replace(near.clone()).await.unwrap();
         mailbox.replace(farther.clone()).await.unwrap();
-        assert_eq!(mailbox.pop().await, Some(near));
-        assert_eq!(mailbox.pop().await, Some(farther));
+        assert_eq!(mailbox.pop().await.as_ref().map(|p| p.packet()), Some(&near));
+        assert_eq!(
+            mailbox.pop().await.as_ref().map(|p| p.packet()),
+            Some(&farther)
+        );
     }
 
     #[tokio::test]
@@ -965,7 +1147,7 @@ mod tests {
         assert_eq!(metrics.snapshot().queue_full, 1);
         fast.replace(packet(2, 3)).await.unwrap();
         assert_eq!(metrics.snapshot().queue_depth, 2);
-        assert_eq!(fast.pop().await, Some(packet(2, 3)));
+        assert_eq!(fast.pop().await.as_ref().map(|p| p.packet()), Some(&packet(2, 3)));
         assert_eq!(slow.len().await, 1);
         assert_eq!(metrics.snapshot().queue_depth, 1);
         drop(slow);
@@ -1022,7 +1204,7 @@ mod tests {
         let packets = mailbox.drain().await;
         assert_eq!(packets.len(), 2);
         assert!(packets.iter().any(|packet| matches!(
-            packet,
+            packet.packet(),
             Packet::EntityState {
                 sequence: 2,
                 state,
@@ -1030,8 +1212,33 @@ mod tests {
             } if state.entity_id == 7 && state.position[0] == 2.0
         )));
         assert!(packets.iter().any(|packet| matches!(
-            packet,
+            packet.packet(),
             Packet::EntityState { state, .. } if state.entity_id == 8
         )));
+    }
+
+    #[test]
+    fn encoded_packet_fanout_shares_one_payload_arc() {
+        let packet = Packet::EntityState {
+            protocol_version: PROTOCOL_VERSION,
+            dimension: 0,
+            sequence: 1,
+            state: EntityStateWire {
+                entity_id: 1,
+                entity_type: 0,
+                position: [0.0; 3],
+                velocity: [0.0; 3],
+                yaw: 0.0,
+                pitch: 0.0,
+                health: 20.0,
+                animation_state: 0,
+                item: None,
+            },
+        };
+        let first = EncodedPacket::new(packet).unwrap();
+        let second = first.clone();
+        assert!(std::sync::Arc::ptr_eq(first.payload(), second.payload()));
+        assert_eq!(first.protocol_version(), PROTOCOL_VERSION);
+        assert_eq!(first.frame_bytes(), packet_bytes(first.packet()));
     }
 }
