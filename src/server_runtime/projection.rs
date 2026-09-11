@@ -10,10 +10,10 @@ use crate::authority::interest::{
 };
 use crate::dimension::Dimension;
 use crate::network::protocol::{
-    ContainerAction, EntityStateWire, GameplayResponse, ItemWire, PlayerEffectWire,
-    SessionGameplayWire,
+    ContainerAction, EntityStateWire, GameplayResponse, ItemWire, Packet, PlayerEffectWire,
+    SessionGameplayWire, PROTOCOL_VERSION,
 };
-use crate::network::server::HostToServer;
+use crate::network::server::{HostToServer, ProjectionEvent};
 use crate::save::ChunkSaveData;
 use glam::Vec3;
 use std::collections::{HashMap, HashSet};
@@ -226,17 +226,8 @@ impl ServerRuntime {
                 .unwrap_or_default();
             self.send_targeted(
                 id,
-                slots,
-                |slots| RuntimePresentationEvent::ContainerOpenResult {
-                    target: id,
-                    dimension: dimension as u8,
-                    success: true,
-                    position,
-                    slots,
-                    revision,
-                },
-                |slots| HostToServer::SendContainerOpenResult {
-                    to: id,
+                Packet::ContainerOpenResult {
+                    protocol_version: PROTOCOL_VERSION,
                     dimension: dimension as u8,
                     success: true,
                     x,
@@ -287,17 +278,8 @@ impl ServerRuntime {
         }
         self.send_targeted(
             id,
-            (),
-            |_| RuntimePresentationEvent::ContainerClickResult {
-                target: id,
-                dimension: dimension as u8,
-                success: true,
-                slot_index: slot,
-                slot: slot_value,
-                dragged,
-            },
-            |_| HostToServer::SendContainerClickResult {
-                to: id,
+            Packet::ContainerClickResult {
+                protocol_version: PROTOCOL_VERSION,
                 dimension: dimension as u8,
                 success: true,
                 slot_index: slot,
@@ -314,29 +296,22 @@ impl ServerRuntime {
         }
     }
 
-    fn send_targeted<T>(
-        &mut self,
-        to: u64,
-        payload: T,
-        local: impl FnOnce(T) -> RuntimePresentationEvent,
-        remote: impl FnOnce(T) -> HostToServer,
-    ) {
+    fn send_targeted(&mut self, to: u64, packet: Packet) {
+        let event = ProjectionEvent::session(to, packet);
         if self.local_session_id == Some(to) {
-            self.push_presentation_event(local(payload));
+            self.push_presentation_event(event);
         } else {
-            self.enqueue_host(remote(payload));
+            self.enqueue_host(HostToServer::Project(event));
         }
     }
 
     pub(super) fn send_response(&mut self, to: u64, response: GameplayResponse) {
         self.send_targeted(
             to,
-            response,
-            |response| RuntimePresentationEvent::GameplayResponse {
-                target: to,
+            Packet::GameplayResponse {
+                protocol_version: PROTOCOL_VERSION,
                 response,
             },
-            |response| HostToServer::SendGameplayResponse { to, response },
         );
     }
 
@@ -348,14 +323,8 @@ impl ServerRuntime {
     ) {
         self.send_targeted(
             to,
-            (),
-            |_| RuntimePresentationEvent::PlayerRespawnResult {
-                target: to,
-                position,
-                dimension: dimension as u8,
-            },
-            |_| HostToServer::SendPlayerRespawnResult {
-                to,
+            Packet::PlayerRespawnResult {
+                protocol_version: PROTOCOL_VERSION,
                 position,
                 dimension: dimension as u8,
             },
@@ -373,18 +342,8 @@ impl ServerRuntime {
         let (x, y, z) = position;
         self.send_targeted(
             to,
-            entity,
-            |entity| RuntimePresentationEvent::BlockEntityDelta {
-                target: to,
-                dimension: dimension as u8,
-                revision,
-                x,
-                y,
-                z,
-                entity,
-            },
-            |entity| HostToServer::BlockEntityDelta {
-                to: Some(to),
+            Packet::BlockEntityDelta {
+                protocol_version: PROTOCOL_VERSION,
                 dimension: dimension as u8,
                 revision,
                 x,
@@ -404,15 +363,8 @@ impl ServerRuntime {
     ) {
         self.send_targeted(
             to,
-            state,
-            |state| RuntimePresentationEvent::EntitySpawn {
-                target: to,
-                dimension: dimension as u8,
-                sequence,
-                state,
-            },
-            |state| HostToServer::EntitySpawn {
-                to: Some(to),
+            Packet::EntitySpawn {
+                protocol_version: PROTOCOL_VERSION,
                 dimension: dimension as u8,
                 sequence,
                 state,
@@ -429,15 +381,8 @@ impl ServerRuntime {
     ) {
         self.send_targeted(
             to,
-            state,
-            |state| RuntimePresentationEvent::EntityState {
-                target: to,
-                dimension: dimension as u8,
-                sequence,
-                state,
-            },
-            |state| HostToServer::EntityState {
-                to: Some(to),
+            Packet::EntityState {
+                protocol_version: PROTOCOL_VERSION,
                 dimension: dimension as u8,
                 sequence,
                 state,
@@ -454,15 +399,8 @@ impl ServerRuntime {
     ) {
         self.send_targeted(
             to,
-            (),
-            |_| RuntimePresentationEvent::EntityDespawn {
-                target: to,
-                dimension: dimension as u8,
-                sequence,
-                entity_id,
-            },
-            |_| HostToServer::EntityDespawn {
-                to: Some(to),
+            Packet::EntityDespawn {
+                protocol_version: PROTOCOL_VERSION,
                 dimension: dimension as u8,
                 sequence,
                 entity_id,
@@ -480,16 +418,8 @@ impl ServerRuntime {
         let state = SessionGameplayWire::from(state);
         self.send_targeted(
             to,
-            state,
-            |state| RuntimePresentationEvent::PlayerSessionUpdate {
-                target: to,
-                sequence,
-                player_id: to,
-                dimension: dimension as u8,
-                state,
-            },
-            |state| HostToServer::SendPlayerSessionUpdate {
-                to,
+            Packet::PlayerSessionUpdate {
+                protocol_version: PROTOCOL_VERSION,
                 sequence,
                 player_id: to,
                 dimension: dimension as u8,
@@ -506,15 +436,8 @@ impl ServerRuntime {
     ) {
         self.send_targeted(
             to,
-            effects,
-            |effects| RuntimePresentationEvent::PlayerEffect {
-                target: to,
-                sequence,
-                player_id: to,
-                effects,
-            },
-            |effects| HostToServer::PlayerEffect {
-                to: Some(to),
+            Packet::PlayerEffect {
+                protocol_version: PROTOCOL_VERSION,
                 sequence,
                 player_id: to,
                 effects,
@@ -534,17 +457,8 @@ impl ServerRuntime {
         let (x, y, z) = position;
         self.send_targeted(
             to,
-            (),
-            |_| RuntimePresentationEvent::ContainerSlotUpdate {
-                target: to,
-                dimension: dimension as u8,
-                revision,
-                position,
-                slot_index,
-                slot,
-            },
-            |_| HostToServer::ContainerSlotUpdate {
-                to: Some(to),
+            Packet::ContainerSlotUpdate {
+                protocol_version: PROTOCOL_VERSION,
                 dimension: dimension as u8,
                 revision,
                 x,
@@ -565,14 +479,8 @@ impl ServerRuntime {
         let (x, y, z) = position;
         self.send_targeted(
             to,
-            (),
-            |_| RuntimePresentationEvent::ContainerClose {
-                target: to,
-                dimension: dimension as u8,
-                position,
-            },
-            |_| HostToServer::SendContainerClose {
-                to,
+            Packet::ContainerClose {
+                protocol_version: PROTOCOL_VERSION,
                 dimension: dimension as u8,
                 x,
                 y,
@@ -639,23 +547,8 @@ impl ServerRuntime {
     ) {
         self.send_targeted(
             to,
-            (blocks, block_states, fluid_levels, block_entities),
-            |(blocks, block_states, fluid_levels, block_entities)| {
-                RuntimePresentationEvent::ChunkData {
-                    target: to,
-                    dimension: dimension as u8,
-                    cx,
-                    cz,
-                    revision,
-                    min_section_y,
-                    section_count,
-                    blocks,
-                    block_states,
-                    fluid_levels,
-                    block_entities,
-                }
-            },
-            |(blocks, block_states, fluid_levels, block_entities)| HostToServer::SendChunk {
+            Packet::ChunkData {
+                protocol_version: PROTOCOL_VERSION,
                 dimension: dimension as u8,
                 cx,
                 cz,
@@ -666,7 +559,6 @@ impl ServerRuntime {
                 block_states,
                 fluid_levels,
                 block_entities,
-                to,
             },
         );
     }
@@ -675,13 +567,13 @@ impl ServerRuntime {
     /// floods to evict request acknowledgements or authoritative lifecycle
     /// changes. Returns `false` only when a replaceable update is discarded or
     /// the bounded critical overflow is exhausted; both paths emit QueueFull.
-    pub(super) fn push_presentation_event(&mut self, event: RuntimePresentationEvent) -> bool {
-        let replaceable_key = event.replaceable_key();
+    pub(super) fn push_presentation_event(&mut self, event: ProjectionEvent) -> bool {
+        let replaceable_key = presentation_replaceable_key(&event);
         if let Some(key) = replaceable_key {
             if let Some(index) = self
                 .presentation_events
                 .iter()
-                .position(|queued| queued.replaceable_key() == Some(key))
+                .position(|queued| presentation_replaceable_key(queued) == Some(key))
             {
                 self.presentation_events[index] = event;
                 return true;
@@ -696,7 +588,7 @@ impl ServerRuntime {
         if let Some(index) = self
             .presentation_events
             .iter()
-            .position(|queued| queued.replaceable_key().is_some())
+            .position(|queued| presentation_replaceable_key(queued).is_some())
         {
             self.presentation_events.remove(index);
             self.presentation_events.push_back(event);
@@ -797,20 +689,8 @@ impl ServerRuntime {
         for target in targets {
             self.send_targeted(
                 target,
-                (),
-                |_| RuntimePresentationEvent::BlockChange {
-                    target,
-                    dimension: dimension as u8,
-                    revision,
-                    x,
-                    y,
-                    z,
-                    block,
-                    state,
-                    raw_fluid,
-                },
-                |_| HostToServer::BlockChange {
-                    to: Some(target),
+                Packet::BlockChange {
+                    protocol_version: PROTOCOL_VERSION,
                     dimension: dimension as u8,
                     revision,
                     x,

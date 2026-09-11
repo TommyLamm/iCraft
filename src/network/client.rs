@@ -1332,10 +1332,11 @@ mod tests {
             other => panic!("expected ClientJoined, got {other:?}"),
         };
         host_tx
-            .try_send(HostToServer::NotifyPlayerJoin {
-                id: second_id,
-                username,
-            })
+            .try_send(HostToServer::project_broadcast(Packet::PlayerJoin {
+                protocol_version: PROTOCOL_VERSION,
+                    id: second_id,
+                    username: username,
+            }))
             .unwrap();
         assert!(matches!(
             wait_for_event(&event_rx_a),
@@ -1374,40 +1375,43 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
 
         host_tx
-            .try_send(HostToServer::BlockChange {
-                to: None,
-                dimension: 0,
-                revision: 100,
-                x: 7,
-                y: 80,
-                z: -9,
-                block: 3,
-                state: 0,
-                raw_fluid: 0,
-            })
+            .try_send(HostToServer::project_broadcast(Packet::BlockChange {
+                protocol_version: PROTOCOL_VERSION,
+                    dimension: 0,
+                    revision: 100,
+                    x: 7,
+                    y: 80,
+                    z: -9,
+                    block: 3,
+                    state: 0,
+                    raw_fluid: 0,
+            }))
             .unwrap();
         host_tx
-            .try_send(HostToServer::SendChunk {
-                dimension: 0,
-                cx: 0,
-                cz: -1,
-                revision: 99,
-                min_section_y: 0,
-                section_count: 16,
-                blocks: vec![1, 2, 3, 4],
-                block_states: vec![0, 0, 0, 0],
-                fluid_levels: vec![],
-                block_entities: vec![],
-                to: player_id,
-            })
+            .try_send(HostToServer::project_session(
+                player_id,
+                Packet::ChunkData {
+                    protocol_version: PROTOCOL_VERSION,
+                    dimension: 0,
+                    cx: 0,
+                    cz: -1,
+                    revision: 99,
+                    min_section_y: 0,
+                    section_count: 16,
+                    blocks: vec![1, 2, 3, 4],
+                    block_states: vec![0, 0, 0, 0],
+                    fluid_levels: vec![],
+                    block_entities: vec![],
+                },
+            ))
             .unwrap();
         host_tx
-            .try_send(HostToServer::TimeSync {
-                to: None,
-                ticks: 19_000,
-                weather: 2,
-                weather_remaining_ticks: 8_000.5,
-            })
+            .try_send(HostToServer::project_broadcast(Packet::TimeSync {
+                protocol_version: PROTOCOL_VERSION,
+                    ticks: 19_000,
+                    weather: 2,
+                    weather_remaining_ticks: 8_000.5,
+            }))
             .unwrap();
         let strike = LightningStrike {
             x: -7,
@@ -1416,7 +1420,10 @@ mod tests {
             visual_seed: 77,
         };
         host_tx
-            .try_send(HostToServer::BroadcastLightningStrike { strike })
+            .try_send(HostToServer::project_broadcast(Packet::LightningStrike {
+                protocol_version: PROTOCOL_VERSION,
+                    strike: strike,
+            }))
             .unwrap();
 
         let mut events = Vec::new();
@@ -1607,31 +1614,34 @@ mod tests {
         ));
 
         host_tx
-            .try_send(HostToServer::BlockChange {
-                to: None,
-                dimension: 0,
-                revision: 2,
-                x: 2,
-                y: 70,
-                z: 2,
-                block: crate::world::BlockType::Dirt.to_wire(),
-                state: 0,
-                raw_fluid: 0,
-            })
+            .try_send(HostToServer::project_broadcast(Packet::BlockChange {
+                protocol_version: PROTOCOL_VERSION,
+                    dimension: 0,
+                    revision: 2,
+                    x: 2,
+                    y: 70,
+                    z: 2,
+                    block: crate::world::BlockType::Dirt.to_wire(),
+                    state: 0,
+                    raw_fluid: 0,
+            }))
             .unwrap();
-        let snapshot = |to, cx, blocks, block_states| HostToServer::SendChunk {
-            dimension: 0,
-            cx,
-            cz: 0,
-            revision: 1,
-            min_section_y: 0,
-            section_count: 16,
-            blocks,
-            block_states,
-            fluid_levels: vec![],
-            block_entities: vec![],
-            to,
-        };
+        let snapshot = |to, cx, blocks, block_states| HostToServer::project_session(
+                to,
+                Packet::ChunkData {
+                    protocol_version: PROTOCOL_VERSION,
+                    dimension: 0,
+                    cx: cx,
+                    cz: 0,
+                    revision: 1,
+                    min_section_y: 0,
+                    section_count: 16,
+                    blocks: blocks,
+                    block_states: block_states,
+                    fluid_levels: vec![],
+                    block_entities: vec![],
+                },
+            );
         // The host/state priority selector submits the near chunk first. The
         // transport must preserve it while reporting, rather than dropping,
         // the farther chunk when this client's capacity-one mailbox is full.
@@ -1706,52 +1716,57 @@ mod tests {
         ));
 
         host_tx
-            .try_send(HostToServer::BlockChange {
-                to: None,
-                dimension: 0,
-                revision: 2,
-                x: 1,
-                y: 70,
-                z: 1,
-                block: crate::world::BlockType::Dirt.to_wire(),
-                state: 0,
-                raw_fluid: 0,
-            })
+            .try_send(HostToServer::project_broadcast(Packet::BlockChange {
+                protocol_version: PROTOCOL_VERSION,
+                    dimension: 0,
+                    revision: 2,
+                    x: 1,
+                    y: 70,
+                    z: 1,
+                    block: crate::world::BlockType::Dirt.to_wire(),
+                    state: 0,
+                    raw_fluid: 0,
+            }))
             .unwrap();
         host_tx
-            .try_send(HostToServer::BroadcastChat {
-                sender: "host".into(),
-                message: "first".into(),
-            })
+            .try_send(HostToServer::project_broadcast(Packet::ChatMessage {
+                protocol_version: PROTOCOL_VERSION,
+                    sender: "host".into(),
+                    message: "first".into(),
+            }))
             .unwrap();
         host_tx
-            .try_send(HostToServer::TimeSync {
-                to: None,
-                ticks: 42,
-                weather: 1,
-                weather_remaining_ticks: 99.0,
-            })
+            .try_send(HostToServer::project_broadcast(Packet::TimeSync {
+                protocol_version: PROTOCOL_VERSION,
+                    ticks: 42,
+                    weather: 1,
+                    weather_remaining_ticks: 99.0,
+            }))
             .unwrap();
         host_tx
-            .try_send(HostToServer::BroadcastChat {
-                sender: "host".into(),
-                message: "second".into(),
-            })
+            .try_send(HostToServer::project_broadcast(Packet::ChatMessage {
+                protocol_version: PROTOCOL_VERSION,
+                    sender: "host".into(),
+                    message: "second".into(),
+            }))
             .unwrap();
         host_tx
-            .try_send(HostToServer::SendChunk {
-                dimension: 0,
-                cx: 0,
-                cz: 0,
-                revision: 1,
-                min_section_y: 0,
-                section_count: 16,
-                blocks: vec![1],
-                block_states: vec![0],
-                fluid_levels: vec![],
-                block_entities: vec![],
-                to: player_id,
-            })
+            .try_send(HostToServer::project_session(
+                player_id,
+                Packet::ChunkData {
+                    protocol_version: PROTOCOL_VERSION,
+                    dimension: 0,
+                    cx: 0,
+                    cz: 0,
+                    revision: 1,
+                    min_section_y: 0,
+                    section_count: 16,
+                    blocks: vec![1],
+                    block_states: vec![0],
+                    fluid_levels: vec![],
+                    block_entities: vec![],
+                },
+            ))
             .unwrap();
 
         assert!(matches!(
@@ -1848,10 +1863,11 @@ mod tests {
         ));
 
         host_tx
-            .try_send(HostToServer::BroadcastChat {
-                sender: "steve".into(),
-                message: "hello".into(),
-            })
+            .try_send(HostToServer::project_broadcast(Packet::ChatMessage {
+                protocol_version: PROTOCOL_VERSION,
+                    sender: "steve".into(),
+                    message: "hello".into(),
+            }))
             .unwrap();
         assert!(matches!(
             wait_for_event(&event_rx),
@@ -2264,16 +2280,19 @@ mod tests {
 
         let position = (4, 64, 4);
         host_tx
-            .try_send(HostToServer::SendContainerOpenResult {
-                to: player_id,
-                dimension: 0,
-                success: true,
-                x: position.0,
-                y: position.1,
-                z: position.2,
-                slots: vec![],
-                revision: 2,
-            })
+            .try_send(HostToServer::project_session(
+                player_id,
+                Packet::ContainerOpenResult {
+                    protocol_version: PROTOCOL_VERSION,
+                    dimension: 0,
+                    success: true,
+                    x: position.0,
+                    y: position.1,
+                    z: position.2,
+                    slots: vec![],
+                    revision: 2,
+                },
+            ))
             .unwrap();
         assert!(matches!(
             wait_for_event(&event_rx),
@@ -2289,16 +2308,19 @@ mod tests {
         // Advance the slot revision so a close with no revision field proves
         // it is not accidentally sent through the container delta gate.
         host_tx
-            .try_send(HostToServer::ContainerSlotUpdate {
-                to: Some(player_id),
-                dimension: 0,
-                revision: 100,
-                x: position.0,
-                y: position.1,
-                z: position.2,
-                slot_index: 0,
-                slot: None,
-            })
+            .try_send(HostToServer::project_session(
+                player_id,
+                Packet::ContainerSlotUpdate {
+                    protocol_version: PROTOCOL_VERSION,
+                    dimension: 0,
+                    revision: 100,
+                    x: position.0,
+                    y: position.1,
+                    z: position.2,
+                    slot_index: 0,
+                    slot: None,
+                },
+            ))
             .unwrap();
         assert!(matches!(
             wait_for_event(&event_rx),
@@ -2306,13 +2328,16 @@ mod tests {
         ));
 
         host_tx
-            .try_send(HostToServer::SendContainerClose {
-                to: player_id,
-                dimension: 0,
-                x: position.0 + 1,
-                y: position.1,
-                z: position.2,
-            })
+            .try_send(HostToServer::project_session(
+                player_id,
+                Packet::ContainerClose {
+                    protocol_version: PROTOCOL_VERSION,
+                    dimension: 0,
+                    x: position.0 + 1,
+                    y: position.1,
+                    z: position.2,
+                },
+            ))
             .unwrap();
         assert!(matches!(
             event_rx.recv_timeout(Duration::from_millis(250)),
@@ -2320,13 +2345,16 @@ mod tests {
         ));
 
         host_tx
-            .try_send(HostToServer::SendContainerClose {
-                to: player_id,
-                dimension: 0,
-                x: position.0,
-                y: position.1,
-                z: position.2,
-            })
+            .try_send(HostToServer::project_session(
+                player_id,
+                Packet::ContainerClose {
+                    protocol_version: PROTOCOL_VERSION,
+                    dimension: 0,
+                    x: position.0,
+                    y: position.1,
+                    z: position.2,
+                },
+            ))
             .unwrap();
         assert!(matches!(
             wait_for_event(&event_rx),
@@ -2374,40 +2402,40 @@ mod tests {
             item: None,
         };
         host_tx
-            .try_send(HostToServer::EntitySpawn {
-                to: None,
-                dimension: 0,
-                sequence: 1,
-                state: state(0.0),
-            })
+            .try_send(HostToServer::project_broadcast(Packet::EntitySpawn {
+                protocol_version: PROTOCOL_VERSION,
+                    dimension: 0,
+                    sequence: 1,
+                    state: state(0.0),
+            }))
             .unwrap();
         host_tx
-            .try_send(HostToServer::EntityState {
-                to: None,
-                dimension: 0,
-                sequence: 2,
-                state: state(2.0),
-            })
+            .try_send(HostToServer::project_broadcast(Packet::EntityState {
+                protocol_version: PROTOCOL_VERSION,
+                    dimension: 0,
+                    sequence: 2,
+                    state: state(2.0),
+            }))
             .unwrap();
         host_tx
-            .try_send(HostToServer::EntityState {
-                to: None,
-                dimension: 0,
-                sequence: 3,
-                state: state(3.0),
-            })
+            .try_send(HostToServer::project_broadcast(Packet::EntityState {
+                protocol_version: PROTOCOL_VERSION,
+                    dimension: 0,
+                    sequence: 3,
+                    state: state(3.0),
+            }))
             .unwrap();
         host_tx
-            .try_send(HostToServer::PlayerEffect {
-                to: None,
-                sequence: 3,
-                player_id,
-                effects: vec![PlayerEffectWire {
+            .try_send(HostToServer::project_broadcast(Packet::PlayerEffect {
+                protocol_version: PROTOCOL_VERSION,
+                    sequence: 3,
+                    player_id: player_id,
+                    effects: vec![PlayerEffectWire {
                     kind: 0,
                     level: 2,
                     remaining_seconds: 30.0,
                 }],
-            })
+            }))
             .unwrap();
 
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
@@ -2440,12 +2468,12 @@ mod tests {
         assert_eq!(effects.unwrap()[0].level, 2);
 
         host_tx
-            .try_send(HostToServer::EntityDespawn {
-                to: None,
-                dimension: 0,
-                sequence: 4,
-                entity_id: 77,
-            })
+            .try_send(HostToServer::project_broadcast(Packet::EntityDespawn {
+                protocol_version: PROTOCOL_VERSION,
+                    dimension: 0,
+                    sequence: 4,
+                    entity_id: 77,
+            }))
             .unwrap();
         assert!(matches!(
             wait_for_event(&event_rx),

@@ -2,11 +2,7 @@ use std::collections::HashSet;
 use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 
-use super::protocol::{
-    Action, EntityStateWire, GameplayRequest, ItemWire, LightningStrike, PlayerEffectWire,
-    PlayerId, SessionGameplayWire,
-};
-use super::session::NetworkMetrics;
+use super::protocol::{Action, Packet, PlayerId};
 
 pub(crate) const MAX_CATCHUP_QUEUE_DEPTH: usize = 32;
 pub(crate) const DEFAULT_POSE_RATE_PER_SECOND: u32 = 20;
@@ -70,7 +66,7 @@ pub enum ServerToHost {
     },
     GameplayRequest {
         id: PlayerId,
-        request: GameplayRequest,
+        request: super::protocol::GameplayRequest,
     },
     ChatFromClient {
         id: PlayerId,
@@ -81,41 +77,49 @@ pub enum ServerToHost {
     },
 }
 
+/// Who should receive a projection already shaped as a wire `Packet`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionDest {
+    Session(PlayerId),
+    Broadcast,
+}
+
+/// Runtime→transport / embedded presentation event: one `Packet` plus routing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectionEvent {
+    pub dest: ProjectionDest,
+    pub packet: Packet,
+}
+
+impl ProjectionEvent {
+    pub fn session(to: PlayerId, packet: Packet) -> Self {
+        Self {
+            dest: ProjectionDest::Session(to),
+            packet,
+        }
+    }
+
+    pub fn broadcast(packet: Packet) -> Self {
+        Self {
+            dest: ProjectionDest::Broadcast,
+            packet,
+        }
+    }
+
+    pub fn session_id(&self) -> Option<PlayerId> {
+        match self.dest {
+            ProjectionDest::Session(id) => Some(id),
+            ProjectionDest::Broadcast => None,
+        }
+    }
+}
+
+/// Host→network-thread control and projection channel.
+/// Gameplay payloads travel as [`ProjectionEvent`] (a wire [`Packet`] plus dest);
+/// only disconnect / stop remain as distinct control variants.
 #[derive(Debug)]
 pub enum HostToServer {
-    BlockChange {
-        to: Option<PlayerId>,
-        dimension: u8,
-        revision: u64,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-        state: u8,
-        raw_fluid: u8,
-    },
-    BlockEntityDelta {
-        to: Option<PlayerId>,
-        dimension: u8,
-        revision: u64,
-        x: i32,
-        y: i32,
-        z: i32,
-        entity: Option<crate::block_entity::BlockEntity>,
-    },
-    SendChunk {
-        dimension: u8,
-        cx: i32,
-        cz: i32,
-        revision: u64,
-        min_section_y: i8,
-        section_count: u16,
-        blocks: Vec<u8>,
-        block_states: Vec<u8>,
-        fluid_levels: Vec<u8>,
-        block_entities: Vec<u8>,
-        to: PlayerId,
-    },
+    Project(ProjectionEvent),
     DisconnectCatchupClient {
         to: PlayerId,
         reason: String,
@@ -124,126 +128,17 @@ pub enum HostToServer {
         to: PlayerId,
         reason: String,
     },
-    EntitySpawn {
-        to: Option<PlayerId>,
-        dimension: u8,
-        sequence: u64,
-        state: EntityStateWire,
-    },
-    EntityState {
-        to: Option<PlayerId>,
-        dimension: u8,
-        sequence: u64,
-        state: EntityStateWire,
-    },
-    EntityDespawn {
-        to: Option<PlayerId>,
-        dimension: u8,
-        sequence: u64,
-        entity_id: u64,
-    },
-    PlayerEffect {
-        to: Option<PlayerId>,
-        sequence: u64,
-        player_id: PlayerId,
-        effects: Vec<PlayerEffectWire>,
-    },
-    SendPlayerSessionUpdate {
-        to: PlayerId,
-        sequence: u64,
-        player_id: PlayerId,
-        dimension: u8,
-        state: SessionGameplayWire,
-    },
-    WorldRules {
-        to: Option<PlayerId>,
-        rules: crate::game_rules::WorldRules,
-    },
-    TimeSync {
-        to: Option<PlayerId>,
-        ticks: u64,
-        weather: u8,
-        weather_remaining_ticks: f32,
-    },
-    BroadcastLightningStrike {
-        strike: LightningStrike,
-    },
-    PlayerPosition {
-        to: Option<PlayerId>,
-        id: PlayerId,
-        sequence: u32,
-        sender_time_millis: u64,
-        x: f32,
-        y: f32,
-        z: f32,
-        yaw: f32,
-        pitch: f32,
-    },
-    BroadcastPlayerAction {
-        id: PlayerId,
-        action: Action,
-    },
-    BroadcastChat {
-        sender: String,
-        message: String,
-    },
-    NotifyPlayerJoin {
-        id: PlayerId,
-        username: String,
-    },
-    SendContainerOpenResult {
-        to: PlayerId,
-        dimension: u8,
-        success: bool,
-        x: i32,
-        y: i32,
-        z: i32,
-        slots: Vec<Option<ItemWire>>,
-        revision: u64,
-    },
-    /// Targeted lifecycle invalidation. It maps to the existing v16
-    /// `Packet::ContainerClose` wire shape and therefore does not require a
-    /// protocol-version bump.
-    SendContainerClose {
-        to: PlayerId,
-        dimension: u8,
-        x: i32,
-        y: i32,
-        z: i32,
-    },
-    SendContainerClickResult {
-        to: PlayerId,
-        dimension: u8,
-        success: bool,
-        slot_index: u16,
-        slot: Option<ItemWire>,
-        dragged: Option<ItemWire>,
-    },
-    ContainerSlotUpdate {
-        to: Option<PlayerId>,
-        dimension: u8,
-        revision: u64,
-        x: i32,
-        y: i32,
-        z: i32,
-        slot_index: u16,
-        slot: Option<ItemWire>,
-    },
-    SendPlayerRespawnResult {
-        to: PlayerId,
-        position: [f32; 3],
-        dimension: u8,
-    },
-    SendGameplayResponse {
-        to: PlayerId,
-        response: super::protocol::GameplayResponse,
-    },
-    SendDimensionTransfer {
-        to: PlayerId,
-        dimension: u8,
-        position: [f32; 3],
-    },
     Stop,
+}
+
+impl HostToServer {
+    pub fn project_session(to: PlayerId, packet: Packet) -> Self {
+        Self::Project(ProjectionEvent::session(to, packet))
+    }
+
+    pub fn project_broadcast(packet: Packet) -> Self {
+        Self::Project(ProjectionEvent::broadcast(packet))
+    }
 }
 
 /// Host event transport is bounded in production (`SyncSender`) while tests
@@ -286,11 +181,14 @@ impl HostEventSender for std_mpsc::SyncSender<ServerToHost> {
 #[derive(Clone)]
 pub(crate) struct MeteredHostEventSender {
     sender: std_mpsc::SyncSender<ServerToHost>,
-    metrics: NetworkMetrics,
+    metrics: super::session::NetworkMetrics,
 }
 
 impl MeteredHostEventSender {
-    pub(crate) fn new(sender: std_mpsc::SyncSender<ServerToHost>, metrics: NetworkMetrics) -> Self {
+    pub(crate) fn new(
+        sender: std_mpsc::SyncSender<ServerToHost>,
+        metrics: super::session::NetworkMetrics,
+    ) -> Self {
         Self { sender, metrics }
     }
 }
@@ -323,7 +221,7 @@ mod tests {
     #[test]
     fn metered_host_event_queue_counts_success_full_and_receive_once() {
         let (tx, rx) = std_mpsc::sync_channel(1);
-        let metrics = NetworkMetrics::default();
+        let metrics = super::super::session::NetworkMetrics::default();
         let sender = MeteredHostEventSender::new(tx, metrics.clone());
         assert!(sender
             .send(ServerToHost::Disconnected {

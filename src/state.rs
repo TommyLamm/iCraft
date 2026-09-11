@@ -3703,12 +3703,21 @@ impl State {
     /// these handlers only update presentation caches after a fixed tick.
     fn project_runtime_presentation_event(
         &mut self,
-        event: crate::server_runtime::RuntimePresentationEvent,
+        event: crate::server_runtime::ProjectionEvent,
         session_id: crate::network::protocol::PlayerId,
     ) {
-        use crate::server_runtime::RuntimePresentationEvent as Event;
-        let inbound = match event {
-            Event::GameplayResponse { target, response } if target == session_id => {
+        use crate::network::protocol::Packet;
+        use crate::server_runtime::ProjectionDest;
+
+        let ProjectionDest::Session(target) = event.dest else {
+            return;
+        };
+        if target != session_id {
+            return;
+        }
+
+        let inbound = match event.packet {
+            Packet::GameplayResponse { response, .. } => {
                 // Game mode lives on SessionContract rather than inside the
                 // legacy SessionGameplayWire.  Refresh it on every accepted
                 // embedded response so an accepted /gamemode command is
@@ -3727,8 +3736,7 @@ impl State {
                 }
                 Some(NetworkInbound::GameplayResponse { response })
             }
-            Event::BlockChange {
-                target,
+            Packet::BlockChange {
                 dimension,
                 revision,
                 x,
@@ -3737,7 +3745,8 @@ impl State {
                 block,
                 state,
                 raw_fluid,
-            } if target == session_id => Some(NetworkInbound::AuthoritativeBlockChange {
+                ..
+            } => Some(NetworkInbound::AuthoritativeBlockChange {
                 dimension,
                 revision,
                 x,
@@ -3747,8 +3756,7 @@ impl State {
                 state,
                 raw_fluid,
             }),
-            Event::ChunkData {
-                target,
+            Packet::ChunkData {
                 dimension,
                 cx,
                 cz,
@@ -3759,7 +3767,8 @@ impl State {
                 block_states,
                 fluid_levels,
                 block_entities,
-            } if target == session_id => Some(NetworkInbound::ChunkData {
+                ..
+            } => Some(NetworkInbound::ChunkData {
                 dimension,
                 cx,
                 cz,
@@ -3771,15 +3780,15 @@ impl State {
                 fluid_levels,
                 block_entities,
             }),
-            Event::BlockEntityDelta {
-                target,
+            Packet::BlockEntityDelta {
                 dimension,
                 revision,
                 x,
                 y,
                 z,
                 entity,
-            } if target == session_id => Some(NetworkInbound::BlockEntityDelta {
+                ..
+            } => Some(NetworkInbound::BlockEntityDelta {
                 dimension,
                 revision,
                 x,
@@ -3787,84 +3796,79 @@ impl State {
                 z,
                 entity,
             }),
-            Event::EntitySpawn {
-                target,
+            Packet::EntitySpawn {
                 dimension,
                 sequence,
                 state,
-            } if target == session_id => Some(NetworkInbound::EntitySpawn {
-                dimension,
-                sequence,
-                state,
-            }),
-            Event::EntityState {
-                target,
-                dimension,
-                sequence,
-                state,
-            } if target == session_id => Some(NetworkInbound::EntityState {
+                ..
+            } => Some(NetworkInbound::EntitySpawn {
                 dimension,
                 sequence,
                 state,
             }),
-            Event::EntityDespawn {
-                target,
+            Packet::EntityState {
+                dimension,
+                sequence,
+                state,
+                ..
+            } => Some(NetworkInbound::EntityState {
+                dimension,
+                sequence,
+                state,
+            }),
+            Packet::EntityDespawn {
                 dimension,
                 sequence,
                 entity_id,
-            } if target == session_id => Some(NetworkInbound::EntityDespawn {
+                ..
+            } => Some(NetworkInbound::EntityDespawn {
                 dimension,
                 sequence,
                 entity_id,
             }),
-            Event::PlayerSessionUpdate {
-                target,
+            Packet::PlayerSessionUpdate {
                 sequence,
                 player_id,
                 dimension,
                 state,
-            } if target == session_id => Some(NetworkInbound::PlayerSessionUpdate {
+                ..
+            } => Some(NetworkInbound::PlayerSessionUpdate {
                 sequence,
                 player_id,
                 dimension,
                 state,
             }),
-            Event::PlayerEffect {
-                target,
+            Packet::PlayerEffect {
                 sequence,
                 player_id,
                 effects,
-            } if target == session_id => Some(NetworkInbound::PlayerEffect {
+                ..
+            } => Some(NetworkInbound::PlayerEffect {
                 sequence,
                 player_id,
                 effects,
             }),
-            Event::PlayerPosition {
-                target,
+            Packet::PlayerPosition {
                 id,
                 sequence,
                 sender_time_millis,
-                position,
+                x,
+                y,
+                z,
                 yaw,
                 pitch,
-            } if target == session_id => Some(NetworkInbound::PlayerPosition {
+                ..
+            } => Some(NetworkInbound::PlayerPosition {
                 id,
                 sequence,
                 sender_time_millis,
-                x: position[0],
-                y: position[1],
-                z: position[2],
+                x,
+                y,
+                z,
                 yaw,
                 pitch,
             }),
-            Event::ContainerOpenResult {
-                target,
-                dimension,
-                success,
-                position: (x, y, z),
-                slots,
-                revision,
-            } if target == session_id => Some(NetworkInbound::ContainerOpenResult {
+            Packet::ContainerOpenResult {
                 dimension,
                 success,
                 x,
@@ -3872,29 +3876,40 @@ impl State {
                 z,
                 slots,
                 revision,
+                ..
+            } => Some(NetworkInbound::ContainerOpenResult {
+                dimension,
+                success,
+                x,
+                y,
+                z,
+                slots,
+                revision,
             }),
-            Event::ContainerClickResult {
-                target,
+            Packet::ContainerClickResult {
                 dimension,
                 success,
                 slot_index,
                 slot,
                 dragged,
-            } if target == session_id => Some(NetworkInbound::ContainerClickResult {
+                ..
+            } => Some(NetworkInbound::ContainerClickResult {
                 dimension,
                 success,
                 slot_index,
                 slot,
                 dragged,
             }),
-            Event::ContainerSlotUpdate {
-                target,
+            Packet::ContainerSlotUpdate {
                 dimension,
                 revision,
-                position: (x, y, z),
+                x,
+                y,
+                z,
                 slot_index,
                 slot,
-            } if target == session_id => Some(NetworkInbound::ContainerSlotUpdate {
+                ..
+            } => Some(NetworkInbound::ContainerSlotUpdate {
                 dimension,
                 revision,
                 x,
@@ -3903,42 +3918,44 @@ impl State {
                 slot_index,
                 slot,
             }),
-            Event::ContainerClose {
-                target,
+            Packet::ContainerClose {
                 dimension,
-                position: (x, y, z),
-            } if target == session_id => Some(NetworkInbound::ContainerClose {
+                x,
+                y,
+                z,
+                ..
+            } => Some(NetworkInbound::ContainerClose {
                 id: target,
                 dimension,
                 x,
                 y,
                 z,
             }),
-            Event::PlayerRespawnResult {
-                target,
+            Packet::PlayerRespawnResult {
                 position,
                 dimension,
-            } if target == session_id => Some(NetworkInbound::PlayerRespawnResult {
+                ..
+            } => Some(NetworkInbound::PlayerRespawnResult {
                 position,
                 dimension,
             }),
-            Event::DimensionTransfer {
-                target,
+            Packet::DimensionTransfer {
                 dimension,
                 position,
-            } if target == session_id => Some(NetworkInbound::DimensionTransfer {
+                ..
+            } => Some(NetworkInbound::DimensionTransfer {
                 dimension,
                 position,
             }),
-            Event::WorldRules { target, rules } if target == session_id => {
+            Packet::WorldRulesSync { rules, .. } => {
                 Some(NetworkInbound::WorldRulesSync { rules })
             }
-            Event::TimeSync {
-                target,
+            Packet::TimeSync {
                 ticks,
                 weather,
                 weather_remaining_ticks,
-            } if target == session_id => Some(NetworkInbound::TimeSync {
+                ..
+            } => Some(NetworkInbound::TimeSync {
                 ticks,
                 weather,
                 weather_remaining_ticks,
@@ -8872,9 +8889,10 @@ mod debug_tests {
         assert!(output.presentation_events.iter().any(|event| {
             matches!(
                 event,
-                crate::server_runtime::RuntimePresentationEvent::GameplayResponse {
-                    target,
-                    response,
+                crate::server_runtime::ProjectionEvent {
+                    dest: crate::server_runtime::ProjectionDest::Session(target),
+                    packet: crate::network::protocol::Packet::GameplayResponse { response, .. },
+                    ..
                 } if *target == u64::MAX
                     && response.request_id == 1
                     && matches!(

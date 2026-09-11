@@ -21,6 +21,7 @@ use crate::inventory::{GameMode, Inventory};
 use crate::network::protocol::{
     ContainerAction, EntityStateWire, GameplayOperation, GameplayOutcome, GameplayRequest,
     GameplayResponse, ItemWire, PlayerEffectWire, RejectReason, SessionGameplayWire,
+    PROTOCOL_VERSION,
 };
 use crate::network::server::{
     HostToServer, MeteredHostEventSender, NetworkMetrics, NetworkServer, ServerConfig, ServerToHost,
@@ -208,138 +209,11 @@ impl RuntimeInput {
 /// World and per-session gameplay changes remain in `snapshot`, including its
 /// bounded `session_updates`; this lane only diverts responses that would
 /// otherwise be addressed to a nonexistent socket session.
-#[derive(Debug, Clone, PartialEq)]
-pub enum RuntimePresentationEvent {
-    GameplayResponse {
-        target: u64,
-        response: GameplayResponse,
-    },
-    BlockChange {
-        target: u64,
-        dimension: u8,
-        revision: u64,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-        state: u8,
-        raw_fluid: u8,
-    },
-    ChunkData {
-        target: u64,
-        dimension: u8,
-        cx: i32,
-        cz: i32,
-        revision: u64,
-        min_section_y: i8,
-        section_count: u16,
-        blocks: Vec<u8>,
-        block_states: Vec<u8>,
-        fluid_levels: Vec<u8>,
-        block_entities: Vec<u8>,
-    },
-    BlockEntityDelta {
-        target: u64,
-        dimension: u8,
-        revision: u64,
-        x: i32,
-        y: i32,
-        z: i32,
-        entity: Option<crate::block_entity::BlockEntity>,
-    },
-    EntitySpawn {
-        target: u64,
-        dimension: u8,
-        sequence: u64,
-        state: EntityStateWire,
-    },
-    EntityState {
-        target: u64,
-        dimension: u8,
-        sequence: u64,
-        state: EntityStateWire,
-    },
-    EntityDespawn {
-        target: u64,
-        dimension: u8,
-        sequence: u64,
-        entity_id: u64,
-    },
-    PlayerSessionUpdate {
-        target: u64,
-        sequence: u64,
-        player_id: u64,
-        dimension: u8,
-        state: SessionGameplayWire,
-    },
-    PlayerEffect {
-        target: u64,
-        sequence: u64,
-        player_id: u64,
-        effects: Vec<PlayerEffectWire>,
-    },
-    PlayerPosition {
-        target: u64,
-        id: u64,
-        sequence: u32,
-        sender_time_millis: u64,
-        position: [f32; 3],
-        yaw: f32,
-        pitch: f32,
-    },
-    ContainerOpenResult {
-        target: u64,
-        dimension: u8,
-        success: bool,
-        position: (i32, i32, i32),
-        slots: Vec<Option<ItemWire>>,
-        revision: u64,
-    },
-    ContainerClickResult {
-        target: u64,
-        dimension: u8,
-        success: bool,
-        slot_index: u16,
-        slot: Option<ItemWire>,
-        dragged: Option<ItemWire>,
-    },
-    ContainerSlotUpdate {
-        target: u64,
-        dimension: u8,
-        revision: u64,
-        position: (i32, i32, i32),
-        slot_index: u16,
-        slot: Option<ItemWire>,
-    },
-    /// Targeted invalidation for a container session that can no longer
-    /// remain open (block break, transfer, interest departure, or logout).
-    /// This uses the existing v16 close wire shape at the transport boundary.
-    ContainerClose {
-        target: u64,
-        dimension: u8,
-        position: (i32, i32, i32),
-    },
-    PlayerRespawnResult {
-        target: u64,
-        position: [f32; 3],
-        dimension: u8,
-    },
-    DimensionTransfer {
-        target: u64,
-        dimension: u8,
-        position: [f32; 3],
-    },
-    WorldRules {
-        target: u64,
-        rules: WorldRules,
-    },
-    TimeSync {
-        target: u64,
-        ticks: u64,
-        weather: u8,
-        weather_remaining_ticks: f32,
-    },
-}
+///
+/// Same shape as the TCP host channel: a wire [`Packet`] plus [`ProjectionDest`].
+pub use crate::network::server::{ProjectionDest, ProjectionEvent};
+
+use crate::network::protocol::Packet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReplaceablePresentationKey {
@@ -363,62 +237,40 @@ enum ReplaceablePresentationKey {
     },
 }
 
-impl RuntimePresentationEvent {
-    fn replaceable_key(&self) -> Option<ReplaceablePresentationKey> {
-        match self {
-            Self::ChunkData {
-                target,
-                dimension,
-                cx,
-                cz,
-                ..
-            } => Some(ReplaceablePresentationKey::Chunk {
-                target: *target,
-                dimension: *dimension,
-                cx: *cx,
-                cz: *cz,
-            }),
-            Self::EntityState {
-                target,
-                dimension,
-                state,
-                ..
-            } => Some(ReplaceablePresentationKey::EntityState {
-                target: *target,
-                dimension: *dimension,
-                entity_id: state.entity_id,
-            }),
-            Self::PlayerPosition { target, id, .. } => {
-                Some(ReplaceablePresentationKey::PlayerPosition {
-                    target: *target,
-                    id: *id,
-                })
-            }
-            Self::TimeSync { target, .. } => {
-                Some(ReplaceablePresentationKey::TimeSync { target: *target })
-            }
-            Self::GameplayResponse { .. }
-            | Self::BlockChange { .. }
-            | Self::BlockEntityDelta { .. }
-            | Self::EntitySpawn { .. }
-            | Self::EntityDespawn { .. }
-            | Self::PlayerSessionUpdate { .. }
-            | Self::PlayerEffect { .. }
-            | Self::ContainerOpenResult { .. }
-            | Self::ContainerClickResult { .. }
-            | Self::ContainerSlotUpdate { .. }
-            | Self::ContainerClose { .. }
-            | Self::PlayerRespawnResult { .. }
-            | Self::DimensionTransfer { .. }
-            | Self::WorldRules { .. } => None,
-        }
+fn presentation_replaceable_key(event: &ProjectionEvent) -> Option<ReplaceablePresentationKey> {
+    let target = event.session_id()?;
+    match &event.packet {
+        Packet::ChunkData {
+            dimension,
+            cx,
+            cz,
+            ..
+        } => Some(ReplaceablePresentationKey::Chunk {
+            target,
+            dimension: *dimension,
+            cx: *cx,
+            cz: *cz,
+        }),
+        Packet::EntityState {
+            dimension, state, ..
+        } => Some(ReplaceablePresentationKey::EntityState {
+            target,
+            dimension: *dimension,
+            entity_id: state.entity_id,
+        }),
+        Packet::PlayerPosition { id, .. } => Some(ReplaceablePresentationKey::PlayerPosition {
+            target,
+            id: *id,
+        }),
+        Packet::TimeSync { .. } => Some(ReplaceablePresentationKey::TimeSync { target }),
+        _ => None,
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeTickOutput {
     pub snapshot: AuthoritySnapshot,
-    pub presentation_events: Vec<RuntimePresentationEvent>,
+    pub presentation_events: Vec<ProjectionEvent>,
 }
 
 #[derive(Debug)]
@@ -925,7 +777,7 @@ pub struct ServerRuntime {
     pub(super) network_metrics: NetworkMetrics,
     pub(super) transport_mode: TransportMode,
     pub(super) local_session_id: Option<u64>,
-    pub(super) presentation_events: VecDeque<RuntimePresentationEvent>,
+    pub(super) presentation_events: VecDeque<ProjectionEvent>,
     pub(super) observed_transport_rejections: u64,
     pub(super) observed_transport_duplicates: u64,
     pub(super) stopped: bool,
@@ -1874,38 +1726,49 @@ mod tests {
         let (mut runtime, _input) = embedded_runtime("presentation_saturation");
         runtime.presentation_events.clear();
         assert!(
-            runtime.push_presentation_event(RuntimePresentationEvent::GameplayResponse {
-                target: 99,
-                response: GameplayResponse {
-                    request_id: 700,
-                    server_sequence: 1,
-                    outcome: GameplayOutcome::Accepted { revision: 1 },
+            runtime.push_presentation_event(ProjectionEvent::session(
+                99,
+                Packet::GameplayResponse {
+                    protocol_version: PROTOCOL_VERSION,
+                    response: GameplayResponse {
+                        request_id: 700,
+                        server_sequence: 1,
+                        outcome: GameplayOutcome::Accepted { revision: 1 },
+                    },
                 },
-            })
+            ))
         );
         let mut session_state = SessionGameplayWire::default();
         session_state.revision = 77;
         assert!(
-            runtime.push_presentation_event(RuntimePresentationEvent::PlayerSessionUpdate {
-                target: 99,
-                sequence: 1,
-                player_id: 99,
-                dimension: Dimension::Overworld as u8,
-                state: session_state,
-            },)
+            runtime.push_presentation_event(ProjectionEvent::session(
+                99,
+                Packet::PlayerSessionUpdate {
+                    protocol_version: PROTOCOL_VERSION,
+                    sequence: 1,
+                    player_id: 99,
+                    dimension: Dimension::Overworld as u8,
+                    state: session_state,
+                },
+            ))
         );
 
         for index in 0..(MAX_PRESENTATION_EVENTS_PER_TICK * 2) {
             assert!(
-                runtime.push_presentation_event(RuntimePresentationEvent::PlayerPosition {
-                    target: 99,
-                    id: 10_000 + index as u64,
-                    sequence: index as u32 + 1,
-                    sender_time_millis: index as u64 + 1,
-                    position: [index as f32, 80.0, 0.0],
-                    yaw: 0.0,
-                    pitch: 0.0,
-                },)
+                runtime.push_presentation_event(ProjectionEvent::session(
+                    99,
+                    Packet::PlayerPosition {
+                        protocol_version: PROTOCOL_VERSION,
+                        id: 10_000 + index as u64,
+                        sequence: index as u32 + 1,
+                        sender_time_millis: index as u64 + 1,
+                        x: index as f32,
+                        y: 80.0,
+                        z: 0.0,
+                        yaw: 0.0,
+                        pitch: 0.0,
+                    },
+                ))
             );
         }
         assert_eq!(
@@ -1914,12 +1777,12 @@ mod tests {
         );
         assert!(runtime.presentation_events.iter().any(|event| matches!(
             event,
-            RuntimePresentationEvent::GameplayResponse { response, .. }
+            ProjectionEvent { packet: Packet::GameplayResponse { response, .. }, .. }
                 if response.request_id == 700
         )));
         assert!(runtime.presentation_events.iter().any(|event| matches!(
             event,
-            RuntimePresentationEvent::PlayerSessionUpdate { state, .. }
+            ProjectionEvent { packet: Packet::PlayerSessionUpdate { state, .. }, .. }
                 if state.revision == 77
         )));
         assert!(runtime.network_metrics.snapshot().queue_full > 0);
@@ -1927,16 +1790,19 @@ mod tests {
         runtime.presentation_events.clear();
         for index in 0..(MAX_PRESENTATION_QUEUE_LEN + 8) {
             let accepted =
-                runtime.push_presentation_event(RuntimePresentationEvent::GameplayResponse {
-                    target: 99,
-                    response: GameplayResponse {
-                        request_id: index as u128,
-                        server_sequence: index as u64 + 1,
-                        outcome: GameplayOutcome::Accepted {
-                            revision: index as u64 + 1,
+                runtime.push_presentation_event(ProjectionEvent::session(
+                    99,
+                    Packet::GameplayResponse {
+                        protocol_version: PROTOCOL_VERSION,
+                        response: GameplayResponse {
+                            request_id: index as u128,
+                            server_sequence: index as u64 + 1,
+                            outcome: GameplayOutcome::Accepted {
+                                revision: index as u64 + 1,
+                            },
                         },
                     },
-                });
+                ));
             assert_eq!(accepted, index < MAX_PRESENTATION_QUEUE_LEN);
         }
         assert_eq!(
@@ -1945,7 +1811,7 @@ mod tests {
         );
         assert!(runtime.presentation_events.iter().any(|event| matches!(
             event,
-            RuntimePresentationEvent::GameplayResponse { response, .. }
+            ProjectionEvent { packet: Packet::GameplayResponse { response, .. }, .. }
                 if response.request_id == 0
         )));
 
@@ -1961,7 +1827,7 @@ mod tests {
         let baseline = runtime.tick_with_output().unwrap();
         assert!(baseline.presentation_events.iter().any(|event| matches!(
             event,
-            RuntimePresentationEvent::ChunkData { target: 99, .. }
+            ProjectionEvent { dest: ProjectionDest::Session(99), packet: Packet::ChunkData { .. }, .. }
         )));
         runtime.drain_routed_updates();
 
@@ -2007,11 +1873,9 @@ mod tests {
                 .iter()
                 .filter(|event| matches!(
                     event,
-                    RuntimePresentationEvent::BlockChange {
-                        target: 99,
-                        x: 8,
-                        y: 80,
-                        z: 8,
+                    ProjectionEvent {
+                        dest: ProjectionDest::Session(99),
+                        packet: Packet::BlockChange { x: 8, y: 80, z: 8, .. },
                         ..
                     }
                 ))
@@ -2353,11 +2217,10 @@ mod tests {
             .presentation_events
             .iter()
             .filter_map(|event| match event {
-                RuntimePresentationEvent::PlayerSessionUpdate { state, .. }
-                    if state.revision == 1 =>
-                {
-                    Some(*state)
-                }
+                ProjectionEvent {
+                    packet: Packet::PlayerSessionUpdate { state, .. },
+                    ..
+                } if state.revision == 1 => Some(*state),
                 _ => None,
             })
             .collect();
@@ -2378,8 +2241,10 @@ mod tests {
             .iter()
             .all(|event| !matches!(
                 event,
-                RuntimePresentationEvent::PlayerSessionUpdate { state, .. }
-                    if state.revision == 1
+                ProjectionEvent {
+                    packet: Packet::PlayerSessionUpdate { state, .. },
+                    ..
+                } if state.revision == 1
             )));
 
         let world_dir = runtime.world_dir.clone();
@@ -2568,7 +2433,7 @@ mod tests {
     }
 
     fn entity_lifecycle_counts(
-        events: &[RuntimePresentationEvent],
+        events: &[ProjectionEvent],
         entity_id: u64,
     ) -> (usize, usize, usize) {
         let mut spawns = 0;
@@ -2576,19 +2441,22 @@ mod tests {
         let mut despawns = 0;
         for event in events {
             match event {
-                RuntimePresentationEvent::EntitySpawn { state, .. }
-                    if state.entity_id == entity_id =>
-                {
+                ProjectionEvent {
+                    packet: Packet::EntitySpawn { state, .. },
+                    ..
+                } if state.entity_id == entity_id => {
                     spawns += 1;
                 }
-                RuntimePresentationEvent::EntityState { state, .. }
-                    if state.entity_id == entity_id =>
-                {
+                ProjectionEvent {
+                    packet: Packet::EntityState { state, .. },
+                    ..
+                } if state.entity_id == entity_id => {
                     states += 1;
                 }
-                RuntimePresentationEvent::EntityDespawn { entity_id: id, .. }
-                    if *id == entity_id =>
-                {
+                ProjectionEvent {
+                    packet: Packet::EntityDespawn { entity_id: id, .. },
+                    ..
+                } if *id == entity_id => {
                     despawns += 1;
                 }
                 _ => {}

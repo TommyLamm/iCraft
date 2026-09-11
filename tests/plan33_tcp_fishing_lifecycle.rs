@@ -13,11 +13,11 @@ use icraft::fishing::{
 };
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::client::ClientToGame;
-use icraft::network::protocol::{
+use icraft::network::protocol::{Packet, 
     GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse, RejectReason,
 };
 use icraft::server_runtime::{
-    EmbeddedRuntimeOptions, LocalSessionProfile, RuntimePresentationEvent, RuntimeTickOutput,
+    EmbeddedRuntimeOptions, LocalSessionProfile, ProjectionDest, ProjectionEvent, RuntimeTickOutput,
     ServerProperties, ServerRuntime, TransportMode,
 };
 use icraft::world::BlockType;
@@ -134,9 +134,10 @@ fn embedded_response(
         .presentation_events
         .iter()
         .find_map(|event| match event {
-            RuntimePresentationEvent::GameplayResponse {
-                target: event_target,
-                response,
+            ProjectionEvent {
+                dest: ProjectionDest::Session(event_target),
+                packet: Packet::GameplayResponse { response, .. },
+                ..
             } if *event_target == target && response.request_id == request_id => {
                 Some(response.clone())
             }
@@ -189,16 +190,19 @@ fn run_embedded() {
     assert!(cast_output.presentation_events.iter().any(|event| {
         matches!(
             event,
-            RuntimePresentationEvent::PlayerSessionUpdate { target, state, .. }
-                if *target == EMBEDDED_OWNER && state.fishing_hook.is_some()
+            ProjectionEvent {
+                dest: ProjectionDest::Session(target),
+                packet: Packet::PlayerSessionUpdate { state, .. },
+                ..
+            } if *target == EMBEDDED_OWNER && state.fishing_hook.is_some()
         )
     }));
     assert!(!cast_output.presentation_events.iter().any(|event| {
         matches!(
             event,
-            RuntimePresentationEvent::PlayerSessionUpdate {
-                target,
-                player_id,
+            ProjectionEvent {
+                dest: ProjectionDest::Session(target),
+                packet: Packet::PlayerSessionUpdate { player_id, .. },
                 ..
             } if *target == EMBEDDED_OBSERVER && *player_id == EMBEDDED_OWNER
         )

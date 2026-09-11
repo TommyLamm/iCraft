@@ -9,8 +9,8 @@ use super::*;
 use crate::authority::DimensionTransferIntent;
 use crate::dimension::Dimension;
 use crate::game_rules::persisted_player_game_mode;
-use crate::network::protocol::{GameplayRequest, GameplayResponse};
-use crate::network::server::{HostToServer, ServerToHost};
+use crate::network::protocol::{GameplayRequest, GameplayResponse, Packet, PROTOCOL_VERSION};
+use crate::network::server::{HostToServer, ProjectionEvent, ServerToHost};
 use crate::save::normalize_player_identity;
 use std::io;
 use std::time::Instant;
@@ -45,7 +45,11 @@ impl ServerRuntime {
                 pitch,
             } => self.handle_position(id, sequence, sender_time_millis, x, y, z, yaw, pitch),
             ServerToHost::ClientAction { id, action } => {
-                self.enqueue_host(HostToServer::BroadcastPlayerAction { id, action });
+                self.enqueue_host(HostToServer::project_broadcast(Packet::PlayerAction {
+                    protocol_version: PROTOCOL_VERSION,
+                    id,
+                    action,
+                }));
                 Ok(())
             }
             ServerToHost::ChatFromClient { id, message } => {
@@ -54,10 +58,11 @@ impl ServerRuntime {
                     .get(&id)
                     .map(|session| session.username.clone())
                 {
-                    self.enqueue_host(HostToServer::BroadcastChat {
+                    self.enqueue_host(HostToServer::project_broadcast(Packet::ChatMessage {
+                        protocol_version: PROTOCOL_VERSION,
                         sender,
                         message: message.chars().take(256).collect(),
-                    });
+                    }));
                 }
                 Ok(())
             }
@@ -266,27 +271,39 @@ impl ServerRuntime {
                 )
             });
         if self.local_session_id == Some(id) {
-            self.push_presentation_event(RuntimePresentationEvent::WorldRules {
-                target: id,
-                rules,
-            });
-            self.push_presentation_event(RuntimePresentationEvent::TimeSync {
-                target: id,
-                ticks: self.level.time,
-                weather: 0,
-                weather_remaining_ticks: 0.0,
-            });
+            self.push_presentation_event(ProjectionEvent::session(
+                id,
+                Packet::WorldRulesSync {
+                    protocol_version: PROTOCOL_VERSION,
+                    rules,
+                },
+            ));
+            self.push_presentation_event(ProjectionEvent::session(
+                id,
+                Packet::TimeSync {
+                    protocol_version: PROTOCOL_VERSION,
+                    ticks: self.level.time,
+                    weather: 0,
+                    weather_remaining_ticks: 0.0,
+                },
+            ));
         } else {
-            self.enqueue_host(HostToServer::WorldRules {
-                rules,
-                to: Some(id),
-            });
-            self.enqueue_host(HostToServer::TimeSync {
-                ticks: self.level.time,
-                weather: 0,
-                weather_remaining_ticks: 0.0,
-                to: Some(id),
-            });
+            self.enqueue_host(HostToServer::project_session(
+                id,
+                Packet::WorldRulesSync {
+                    protocol_version: PROTOCOL_VERSION,
+                    rules,
+                },
+            ));
+            self.enqueue_host(HostToServer::project_session(
+                id,
+                Packet::TimeSync {
+                    protocol_version: PROTOCOL_VERSION,
+                    ticks: self.level.time,
+                    weather: 0,
+                    weather_remaining_ticks: 0.0,
+                },
+            ));
         }
         if let Some((state, effects)) = self
             .authority
@@ -394,27 +411,35 @@ impl ServerRuntime {
         targets.sort_unstable();
         for target in targets {
             if self.local_session_id == Some(target) {
-                self.push_presentation_event(RuntimePresentationEvent::PlayerPosition {
+                self.push_presentation_event(ProjectionEvent::session(
                     target,
-                    id,
-                    sequence,
-                    sender_time_millis,
-                    position,
-                    yaw,
-                    pitch,
-                });
+                    Packet::PlayerPosition {
+                        protocol_version: PROTOCOL_VERSION,
+                        id,
+                        sequence,
+                        sender_time_millis,
+                        x,
+                        y,
+                        z,
+                        yaw,
+                        pitch,
+                    },
+                ));
             } else {
-                self.enqueue_host(HostToServer::PlayerPosition {
-                    to: Some(target),
-                    id,
-                    sequence,
-                    sender_time_millis,
-                    x,
-                    y,
-                    z,
-                    yaw,
-                    pitch,
-                });
+                self.enqueue_host(HostToServer::project_session(
+                    target,
+                    Packet::PlayerPosition {
+                        protocol_version: PROTOCOL_VERSION,
+                        id,
+                        sequence,
+                        sender_time_millis,
+                        x,
+                        y,
+                        z,
+                        yaw,
+                        pitch,
+                    },
+                ));
             }
         }
         Ok(())
@@ -619,17 +644,25 @@ impl ServerRuntime {
         self.sync_dimension(id, transfer.to);
         let _ = self.sync_pose_from_authority(id, true);
         if self.local_session_id == Some(id) {
-            self.push_presentation_event(RuntimePresentationEvent::DimensionTransfer {
-                target: id,
-                dimension: transfer.to as u8,
-                position: transfer.position,
-            });
+            self.push_presentation_event(ProjectionEvent::session(
+                id,
+                Packet::DimensionTransfer {
+                    protocol_version: PROTOCOL_VERSION,
+                    player_id: id,
+                    dimension: transfer.to as u8,
+                    position: transfer.position,
+                },
+            ));
         } else {
-            self.enqueue_host(HostToServer::SendDimensionTransfer {
-                to: id,
-                dimension: transfer.to as u8,
-                position: transfer.position,
-            });
+            self.enqueue_host(HostToServer::project_session(
+                id,
+                Packet::DimensionTransfer {
+                    protocol_version: PROTOCOL_VERSION,
+                    player_id: id,
+                    dimension: transfer.to as u8,
+                    position: transfer.position,
+                },
+            ));
         }
     }
 

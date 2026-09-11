@@ -148,9 +148,8 @@ impl EmbeddedRuntimeBridge {
             }
         }
         for event in &output.presentation_events {
-            let crate::server_runtime::RuntimePresentationEvent::GameplayResponse {
-                response, ..
-            } = event
+            let crate::network::protocol::Packet::GameplayResponse { response, .. } =
+                &event.packet
             else {
                 continue;
             };

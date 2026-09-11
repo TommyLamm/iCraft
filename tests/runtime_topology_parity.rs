@@ -8,13 +8,13 @@ use icraft::block_entity::{BlockEntity, FurnaceBlockEntity};
 use icraft::dimension::Dimension;
 use icraft::entity::EntityType;
 use icraft::inventory::{GameMode, Inventory};
-use icraft::network::protocol::{
+use icraft::network::protocol::{Packet, 
     BlockActionKind, GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse,
     ItemWire, RejectReason, SlotRefWire,
 };
 use icraft::server_runtime::{
     EmbeddedRuntimeOptions, LocalSessionProfile, LocalSessionStorage, RuntimeInput,
-    RuntimePresentationEvent, RuntimeTickOutput, ServerProperties, ServerRuntime, TransportMode,
+    ProjectionEvent, ProjectionDest, RuntimeTickOutput, ServerProperties, ServerRuntime, TransportMode,
 };
 use icraft::{
     player::PlayerState, save::LevelData, save::PlayerData, save::SaveManager, world::BlockType,
@@ -57,14 +57,15 @@ fn leftover_block_use(session_id: u64, client_revision: u64, request_id: u128) -
 }
 
 fn response_for(
-    events: &[RuntimePresentationEvent],
+    events: &[ProjectionEvent],
     target: u64,
     request_id: u128,
 ) -> Option<&GameplayResponse> {
     events.iter().find_map(|event| match event {
-        RuntimePresentationEvent::GameplayResponse {
-            target: event_target,
-            response,
+        ProjectionEvent {
+            dest: ProjectionDest::Session(event_target),
+            packet: Packet::GameplayResponse { response, .. },
+            ..
         } if *event_target == target && response.request_id == request_id => Some(response),
         _ => None,
     })
@@ -373,10 +374,9 @@ fn owner_session_update(
         .presentation_events
         .iter()
         .find_map(|event| match event {
-            RuntimePresentationEvent::PlayerSessionUpdate {
-                target,
-                player_id,
-                state,
+            ProjectionEvent {
+                dest: ProjectionDest::Session(target),
+                packet: Packet::PlayerSessionUpdate { player_id, state, .. },
                 ..
             } if *target == session_id && *player_id == session_id => Some(*state),
             _ => None,
@@ -439,7 +439,7 @@ fn plan24_plan22_gameplay_vectors_match_all_runtime_topologies() {
         assert!(furnace_output
             .presentation_events
             .iter()
-            .any(|event| matches!(event, RuntimePresentationEvent::BlockEntityDelta { .. })));
+            .any(|event| matches!(event, ProjectionEvent { packet: Packet::BlockEntityDelta { .. }, .. })));
 
         let plank = harness.source(1, 1);
         let mut craft_sources = [None; 9];
@@ -701,8 +701,11 @@ fn plan24_plan22_gameplay_vectors_match_all_runtime_topologies() {
         assert!(dimension_output.presentation_events.iter().all(|event| {
             !matches!(
                 event,
-                RuntimePresentationEvent::PlayerSessionUpdate { target, dimension, .. }
-                    if *target == harness.session_id && *dimension != Dimension::Nether as u8
+                ProjectionEvent {
+                    dest: ProjectionDest::Session(target),
+                    packet: Packet::PlayerSessionUpdate { dimension, .. },
+                    ..
+                } if *target == harness.session_id && *dimension != Dimension::Nether as u8
             )
         }));
 
@@ -730,8 +733,11 @@ fn plan24_plan22_gameplay_vectors_match_all_runtime_topologies() {
         assert!(reconnect_output.presentation_events.iter().all(|event| {
             !matches!(
                 event,
-                RuntimePresentationEvent::PlayerSessionUpdate { target, player_id, .. }
-                    if *target == harness.session_id && *player_id == TOPOLOGY_VICTIM_ID
+                ProjectionEvent {
+                    dest: ProjectionDest::Session(target),
+                    packet: Packet::PlayerSessionUpdate { player_id, .. },
+                    ..
+                } if *target == harness.session_id && *player_id == TOPOLOGY_VICTIM_ID
             )
         }));
         harness.shutdown();
@@ -753,10 +759,12 @@ fn plan28_dispenser_item_projection_matches_all_runtime_topologies() {
             let output = harness.runtime.tick_with_output().unwrap();
             projection = output.presentation_events.into_iter().find_map(|event| {
                 let state = match event {
-                    RuntimePresentationEvent::EntitySpawn { target, state, .. }
-                    | RuntimePresentationEvent::EntityState { target, state, .. }
-                        if target == harness.session_id
-                            && state.entity_type == EntityType::DroppedItem.to_wire() =>
+                    ProjectionEvent {
+                        dest: ProjectionDest::Session(target),
+                        packet: Packet::EntitySpawn { state, .. } | Packet::EntityState { state, .. },
+                        ..
+                    } if target == harness.session_id
+                        && state.entity_type == EntityType::DroppedItem.to_wire() =>
                     {
                         state
                     }

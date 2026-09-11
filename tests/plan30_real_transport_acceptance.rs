@@ -8,12 +8,12 @@ use icraft::authority::transactions::BREW_TICKS;
 use icraft::block_entity::{BlockEntity, FurnaceBlockEntity};
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::client::{ClientToGame, GameToClient};
-use icraft::network::protocol::{
+use icraft::network::protocol::{Packet, 
     GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse, RejectReason,
 };
 use icraft::network::server::ServerToHost;
 use icraft::server_runtime::{
-    EmbeddedRuntimeOptions, LocalSessionProfile, RuntimeInput, RuntimePresentationEvent,
+    EmbeddedRuntimeOptions, LocalSessionProfile, RuntimeInput, ProjectionDest, ProjectionEvent,
     RuntimeTickOutput, ServerProperties, ServerRuntime, TransportMode,
 };
 use icraft::world::BlockType;
@@ -166,9 +166,10 @@ fn embedded_response(
         .presentation_events
         .iter()
         .find_map(|event| match event {
-            RuntimePresentationEvent::GameplayResponse {
-                target: event_target,
-                response,
+            ProjectionEvent {
+                dest: ProjectionDest::Session(event_target),
+                packet: Packet::GameplayResponse { response, .. },
+                ..
             } if *event_target == target && response.request_id == request_id => {
                 Some(response.clone())
             }
@@ -181,9 +182,9 @@ fn embedded_owner_projection(output: &RuntimeTickOutput, target: u64) -> bool {
     output.presentation_events.iter().any(|event| {
         matches!(
             event,
-            RuntimePresentationEvent::PlayerSessionUpdate {
-                target: event_target,
-                player_id,
+            ProjectionEvent {
+                dest: ProjectionDest::Session(event_target),
+                packet: Packet::PlayerSessionUpdate { player_id, .. },
                 ..
             } if *event_target == target && *player_id == target
         )

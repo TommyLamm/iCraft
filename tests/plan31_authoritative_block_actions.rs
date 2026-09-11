@@ -7,11 +7,11 @@ use common::tcp_harness::{
 use icraft::authority::contract::SessionGameplayState;
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::client::ClientToGame;
-use icraft::network::protocol::{
+use icraft::network::protocol::{Packet, 
     BlockActionKind, GameplayOperation, GameplayOutcome, GameplayRequest, SessionSlotWire,
 };
 use icraft::server_runtime::{
-    EmbeddedRuntimeOptions, LocalSessionProfile, RuntimePresentationEvent, RuntimeTickOutput,
+    EmbeddedRuntimeOptions, LocalSessionProfile, ProjectionDest, ProjectionEvent, RuntimeTickOutput,
     ServerProperties, ServerRuntime, TransportMode,
 };
 use icraft::world::BlockType;
@@ -196,9 +196,10 @@ fn embedded_response(
         .presentation_events
         .iter()
         .find_map(|event| match event {
-            RuntimePresentationEvent::GameplayResponse {
-                target: event_target,
-                response,
+            ProjectionEvent {
+                dest: ProjectionDest::Session(event_target),
+                packet: Packet::GameplayResponse { response, .. },
+                ..
             } if *event_target == target && response.request_id == request_id => {
                 Some(response.clone())
             }
@@ -282,12 +283,9 @@ fn run_embedded_vector() {
     assert!(events.iter().any(|event| {
         matches!(
             event,
-            RuntimePresentationEvent::BlockChange {
-                target: event_target,
-                x,
-                y,
-                z,
-                block,
+            ProjectionEvent {
+                dest: ProjectionDest::Session(event_target),
+                packet: Packet::BlockChange { x, y, z, block, .. },
                 ..
             } if *event_target == OWNER_ID
                 && (*x, *y, *z) == TARGET

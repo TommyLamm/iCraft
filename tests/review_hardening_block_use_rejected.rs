@@ -9,11 +9,11 @@ use icraft::authority::contract::{
 };
 use icraft::entity::EntityType;
 use icraft::inventory::{Item, ItemStack};
-use icraft::network::protocol::{
+use icraft::network::protocol::{Packet, 
     BlockActionKind, GameplayOperation, GameplayOutcome, ItemWire, RejectReason, SessionSlotWire,
 };
 use icraft::server_runtime::{
-    EmbeddedRuntimeOptions, LocalSessionProfile, RuntimePresentationEvent, ServerProperties,
+    EmbeddedRuntimeOptions, LocalSessionProfile, ProjectionDest, ProjectionEvent, ServerProperties,
     ServerRuntime, TransportMode,
 };
 use icraft::world::BlockType;
@@ -165,11 +165,11 @@ fn embedded_block_use_diamond_ore_is_unsupported_and_preserves_world() {
         .presentation_events
         .iter()
         .find_map(|event| match event {
-            RuntimePresentationEvent::GameplayResponse { target, response }
-                if *target == OWNER_ID && response.request_id == 1 =>
-            {
-                Some(response)
-            }
+            ProjectionEvent {
+                dest: ProjectionDest::Session(target),
+                packet: Packet::GameplayResponse { response, .. },
+                ..
+            } if *target == OWNER_ID && response.request_id == 1 => Some(response),
             _ => None,
         })
         .expect("embedded BlockAction response");

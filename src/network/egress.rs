@@ -1,8 +1,10 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::channels::{HostEventSender, HostToServer, ServerToHost};
-use super::protocol::{GameplayResponse, Packet, PlayerId, PROTOCOL_VERSION};
+use super::channels::{
+    HostEventSender, HostToServer, ProjectionDest, ProjectionEvent, ServerToHost,
+};
+use super::protocol::{Packet, PlayerId, PROTOCOL_VERSION};
 use super::session::{
     best_effort_send_encoded, reliable_send, reliable_send_encoded, NetworkMetrics, Sessions,
 };
@@ -10,8 +12,8 @@ use super::session::{
 pub(crate) async fn normalize_host_response(
     sessions: &Sessions,
     id: PlayerId,
-    mut response: GameplayResponse,
-) -> GameplayResponse {
+    mut response: super::protocol::GameplayResponse,
+) -> super::protocol::GameplayResponse {
     let mut sessions_guard = sessions.lock().await;
     let Some(session) = sessions_guard.get_mut(&id) else {
         if response.server_sequence == 0 {
@@ -35,163 +37,126 @@ pub(crate) async fn normalize_host_response(
     response
 }
 
+/// Mailbox / delivery class derived from the wire `Packet` variant — not a
+/// second payload schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PacketDelivery {
+    Catchup,
+    Pose,
+    State,
+    Reliable,
+}
+
+fn classify_packet(packet: &Packet) -> PacketDelivery {
+    match packet {
+        Packet::ChunkData { .. } => PacketDelivery::Catchup,
+        Packet::PlayerPosition { .. } => PacketDelivery::Pose,
+        Packet::EntityState { .. }
+        | Packet::PlayerEffect { .. }
+        | Packet::PlayerSessionUpdate { .. } => PacketDelivery::State,
+        _ => PacketDelivery::Reliable,
+    }
+}
+
 pub(crate) async fn handle_host_command<S: HostEventSender>(
     sessions: &Sessions,
     server_to_host: &S,
     metrics: &NetworkMetrics,
     command: HostToServer,
 ) {
-    if let HostToServer::SendPlayerSessionUpdate { to, player_id, .. } = &command {
-        if to != player_id {
+    match command {
+        HostToServer::Stop => {}
+        HostToServer::DisconnectCatchupClient { to, reason } => {
+            eprintln!("[NetworkServer] Applying slow catch-up policy to Player ID {to}: {reason}");
+            evict_slow_clients(sessions, server_to_host, vec![to]).await;
+        }
+        HostToServer::DisconnectClient { to, reason } => {
+            let failed = send_to(
+                sessions,
+                to,
+                Packet::Disconnect {
+                    protocol_version: PROTOCOL_VERSION,
+                    reason,
+                },
+            )
+            .await;
+            evict_slow_clients(sessions, server_to_host, failed).await;
+        }
+        HostToServer::Project(event) => {
+            deliver_projection(sessions, server_to_host, metrics, event).await;
+        }
+    }
+}
+
+async fn deliver_projection<S: HostEventSender>(
+    sessions: &Sessions,
+    server_to_host: &S,
+    metrics: &NetworkMetrics,
+    event: ProjectionEvent,
+) {
+    let ProjectionEvent {
+        dest,
+        mut packet,
+    } = event;
+
+    if let (
+        ProjectionDest::Session(to),
+        Packet::PlayerSessionUpdate { player_id, .. },
+    ) = (dest, &packet)
+    {
+        if to != *player_id {
             metrics.record_rejected_request();
             return;
         }
     }
-    if let HostToServer::SendChunk {
+
+    if let (ProjectionDest::Session(to), Packet::GameplayResponse { response, .. }) =
+        (dest, &mut packet)
+    {
+        *response = normalize_host_response(sessions, to, response.clone()).await;
+    }
+
+    if let Packet::DimensionTransfer {
+        player_id,
         dimension,
-        cx,
-        cz,
-        revision,
-        min_section_y,
-        section_count,
-        blocks,
-        block_states,
-        fluid_levels,
-        block_entities,
-        to,
-    } = command
+        ..
+    } = &packet
     {
-        let packet = Packet::ChunkData {
-            protocol_version: PROTOCOL_VERSION,
-            dimension,
-            cx,
-            cz,
-            revision,
-            min_section_y,
-            section_count,
-            blocks,
-            block_states,
-            fluid_levels,
-            block_entities,
-        };
-        let mailbox = sessions
-            .lock()
-            .await
-            .get(&to)
-            .map(|session| Arc::clone(&session.catchup_mailbox));
-        if let Some(mailbox) = mailbox {
-            let _ = mailbox.replace(packet).await;
+        if let Some(session) = sessions.lock().await.get_mut(player_id) {
+            session.gameplay.current_dimension = *dimension;
+            session.gameplay.last_client_revision = 0;
         }
-        return;
     }
 
-    if let HostToServer::DisconnectCatchupClient { to, reason } = command {
-        eprintln!("[NetworkServer] Applying slow catch-up policy to Player ID {to}: {reason}");
-        evict_slow_clients(sessions, server_to_host, vec![to]).await;
-        return;
-    }
-
-    if let HostToServer::DisconnectClient { to, reason } = &command {
-        let failed = send_to(
-            sessions,
-            *to,
-            Packet::Disconnect {
-                protocol_version: PROTOCOL_VERSION,
-                reason: reason.clone(),
-            },
-        )
-        .await;
-        evict_slow_clients(sessions, server_to_host, failed).await;
-        return;
-    }
-
-    if let HostToServer::PlayerPosition {
-        to,
-        id,
-        sequence,
-        sender_time_millis,
-        x,
-        y,
-        z,
-        yaw,
-        pitch,
-    } = &command
-    {
-        let packet = Packet::PlayerPosition {
-            protocol_version: PROTOCOL_VERSION,
-            id: *id,
-            sequence: *sequence,
-            sender_time_millis: *sender_time_millis,
-            x: *x,
-            y: *y,
-            z: *z,
-            yaw: *yaw,
-            pitch: *pitch,
-        };
-        if let Some(to) = to {
+    match (dest, classify_packet(&packet)) {
+        (ProjectionDest::Session(to), PacketDelivery::Catchup) => {
             let mailbox = sessions
                 .lock()
                 .await
-                .get(to)
+                .get(&to)
+                .map(|session| Arc::clone(&session.catchup_mailbox));
+            if let Some(mailbox) = mailbox {
+                let _ = mailbox.replace(packet).await;
+            }
+        }
+        (ProjectionDest::Session(to), PacketDelivery::Pose) => {
+            let player_id = match &packet {
+                Packet::PlayerPosition { id, .. } => *id,
+                _ => return,
+            };
+            let mailbox = sessions
+                .lock()
+                .await
+                .get(&to)
                 .map(|session| Arc::clone(&session.pose_mailbox));
             if let Some(mailbox) = mailbox {
-                mailbox.replace(*id, packet).await;
+                mailbox.replace(player_id, packet).await;
             }
-        } else {
+        }
+        (ProjectionDest::Broadcast, PacketDelivery::Pose) => {
             broadcast_pose_inner(sessions, packet).await;
         }
-        return;
-    }
-
-    let state_entry = match &command {
-        HostToServer::EntityState {
-            to,
-            dimension,
-            sequence,
-            state,
-        } => Some((
-            *to,
-            Packet::EntityState {
-                protocol_version: PROTOCOL_VERSION,
-                dimension: *dimension,
-                sequence: *sequence,
-                state: *state,
-            },
-        )),
-        HostToServer::PlayerEffect {
-            to,
-            sequence,
-            player_id,
-            effects,
-        } => Some((
-            *to,
-            Packet::PlayerEffect {
-                protocol_version: PROTOCOL_VERSION,
-                sequence: *sequence,
-                player_id: *player_id,
-                effects: effects.clone(),
-            },
-        )),
-        HostToServer::SendPlayerSessionUpdate {
-            to,
-            sequence,
-            player_id,
-            dimension,
-            state,
-        } => Some((
-            Some(*to),
-            Packet::PlayerSessionUpdate {
-                protocol_version: PROTOCOL_VERSION,
-                sequence: *sequence,
-                player_id: *player_id,
-                dimension: *dimension,
-                state: *state,
-            },
-        )),
-        _ => None,
-    };
-    if let Some((to, packet)) = state_entry {
-        if let Some(to) = to {
+        (ProjectionDest::Session(to), PacketDelivery::State) => {
             let mailbox = sessions
                 .lock()
                 .await
@@ -200,288 +165,22 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
             if let Some(mailbox) = mailbox {
                 mailbox.replace(packet).await;
             }
-        } else {
+        }
+        (ProjectionDest::Broadcast, PacketDelivery::State) => {
             broadcast_state(sessions, packet).await;
         }
-        return;
+        (ProjectionDest::Session(to), PacketDelivery::Reliable) => {
+            let failed = send_to(sessions, to, packet).await;
+            evict_slow_clients(sessions, server_to_host, failed).await;
+        }
+        (ProjectionDest::Broadcast, PacketDelivery::Reliable) => {
+            let failed = broadcast_reliably(sessions, packet).await;
+            evict_slow_clients(sessions, server_to_host, failed).await;
+        }
+        (ProjectionDest::Broadcast, PacketDelivery::Catchup) => {
+            // ChunkData is always session-targeted; ignore malformed broadcasts.
+        }
     }
-
-    let (packet, recipient, reliable_broadcast) = match command {
-        HostToServer::BlockChange {
-            to,
-            dimension,
-            revision,
-            x,
-            y,
-            z,
-            block,
-            state,
-            raw_fluid,
-        } => (
-            Packet::BlockChange {
-                protocol_version: PROTOCOL_VERSION,
-                dimension,
-                revision,
-                x,
-                y,
-                z,
-                block,
-                state,
-                raw_fluid,
-            },
-            to,
-            true,
-        ),
-        HostToServer::BlockEntityDelta {
-            to,
-            dimension,
-            revision,
-            x,
-            y,
-            z,
-            entity,
-        } => (
-            Packet::BlockEntityDelta {
-                protocol_version: PROTOCOL_VERSION,
-                dimension,
-                revision,
-                x,
-                y,
-                z,
-                entity,
-            },
-            to,
-            true,
-        ),
-        HostToServer::EntitySpawn {
-            to,
-            dimension,
-            sequence,
-            state,
-        } => (
-            Packet::EntitySpawn {
-                protocol_version: PROTOCOL_VERSION,
-                dimension,
-                sequence,
-                state,
-            },
-            to,
-            true,
-        ),
-        HostToServer::EntityDespawn {
-            to,
-            dimension,
-            sequence,
-            entity_id,
-        } => (
-            Packet::EntityDespawn {
-                protocol_version: PROTOCOL_VERSION,
-                dimension,
-                sequence,
-                entity_id,
-            },
-            to,
-            true,
-        ),
-        HostToServer::TimeSync {
-            to,
-            ticks,
-            weather,
-            weather_remaining_ticks,
-        } => (
-            Packet::TimeSync {
-                protocol_version: PROTOCOL_VERSION,
-                ticks,
-                weather,
-                weather_remaining_ticks,
-            },
-            to,
-            true,
-        ),
-        HostToServer::WorldRules { to, rules } => (
-            Packet::WorldRulesSync {
-                protocol_version: PROTOCOL_VERSION,
-                rules,
-            },
-            to,
-            true,
-        ),
-        HostToServer::BroadcastLightningStrike { strike } => (
-            Packet::LightningStrike {
-                protocol_version: PROTOCOL_VERSION,
-                strike,
-            },
-            None,
-            true,
-        ),
-        HostToServer::BroadcastPlayerAction { id, action } => (
-            Packet::PlayerAction {
-                protocol_version: PROTOCOL_VERSION,
-                id,
-                action,
-            },
-            None,
-            false,
-        ),
-        HostToServer::BroadcastChat { sender, message } => (
-            Packet::ChatMessage {
-                protocol_version: PROTOCOL_VERSION,
-                sender,
-                message,
-            },
-            None,
-            true,
-        ),
-        HostToServer::NotifyPlayerJoin { id, username } => (
-            Packet::PlayerJoin {
-                protocol_version: PROTOCOL_VERSION,
-                id,
-                username,
-            },
-            None,
-            true,
-        ),
-        HostToServer::SendContainerOpenResult {
-            to,
-            dimension,
-            success,
-            x,
-            y,
-            z,
-            slots,
-            revision,
-        } => (
-            Packet::ContainerOpenResult {
-                protocol_version: PROTOCOL_VERSION,
-                dimension,
-                success,
-                x,
-                y,
-                z,
-                slots,
-                revision,
-            },
-            Some(to),
-            true,
-        ),
-        HostToServer::SendContainerClose {
-            to,
-            dimension,
-            x,
-            y,
-            z,
-        } => (
-            Packet::ContainerClose {
-                protocol_version: PROTOCOL_VERSION,
-                dimension,
-                x,
-                y,
-                z,
-            },
-            Some(to),
-            true,
-        ),
-        HostToServer::SendContainerClickResult {
-            to,
-            dimension,
-            success,
-            slot_index,
-            slot,
-            dragged,
-        } => (
-            Packet::ContainerClickResult {
-                protocol_version: PROTOCOL_VERSION,
-                dimension,
-                success,
-                slot_index,
-                slot,
-                dragged,
-            },
-            Some(to),
-            true,
-        ),
-        HostToServer::ContainerSlotUpdate {
-            to,
-            dimension,
-            revision,
-            x,
-            y,
-            z,
-            slot_index,
-            slot,
-        } => (
-            Packet::ContainerSlotUpdate {
-                protocol_version: PROTOCOL_VERSION,
-                dimension,
-                revision,
-                x,
-                y,
-                z,
-                slot_index,
-                slot,
-            },
-            to,
-            true,
-        ),
-        HostToServer::SendPlayerRespawnResult {
-            to,
-            position,
-            dimension,
-        } => (
-            Packet::PlayerRespawnResult {
-                protocol_version: PROTOCOL_VERSION,
-                position,
-                dimension,
-            },
-            Some(to),
-            true,
-        ),
-        HostToServer::SendGameplayResponse { to, response } => {
-            let response = normalize_host_response(sessions, to, response).await;
-            let packet = Packet::GameplayResponse {
-                protocol_version: PROTOCOL_VERSION,
-                response,
-            };
-            (packet, Some(to), true)
-        }
-        HostToServer::SendDimensionTransfer {
-            to,
-            dimension,
-            position,
-        } => {
-            if let Some(session) = sessions.lock().await.get_mut(&to) {
-                session.gameplay.current_dimension = dimension;
-                session.gameplay.last_client_revision = 0;
-            }
-            let packet = Packet::DimensionTransfer {
-                protocol_version: PROTOCOL_VERSION,
-                player_id: to,
-                dimension,
-                position,
-            };
-            (packet, Some(to), true)
-        }
-        HostToServer::PlayerPosition { .. }
-        | HostToServer::EntityState { .. }
-        | HostToServer::PlayerEffect { .. }
-        | HostToServer::SendPlayerSessionUpdate { .. }
-        | HostToServer::SendChunk { .. }
-        | HostToServer::DisconnectCatchupClient { .. }
-        | HostToServer::DisconnectClient { .. } => {
-            unreachable!("handled before general packet mapping")
-        }
-        HostToServer::Stop => return,
-    };
-
-    let failed = if let Some(id) = recipient {
-        send_to(sessions, id, packet).await
-    } else if reliable_broadcast {
-        broadcast_reliably(sessions, packet).await
-    } else {
-        broadcast_to(sessions, packet).await;
-        Vec::new()
-    };
-    evict_slow_clients(sessions, server_to_host, failed).await;
 }
 
 pub(crate) async fn send_to(sessions: &Sessions, id: PlayerId, packet: Packet) -> Vec<PlayerId> {

@@ -324,6 +324,16 @@ protocol versions. Older versions fail handshake. Malformed pre-auth frames
 close that connection only. Unknown or wrong-direction post-auth packets
 close that connection; there is no decode-then-drop leftover path.
 
+Server→client projection is one schema end-to-end: `ServerRuntime` builds a
+wire `Packet` once inside `ProjectionEvent { dest, packet }`
+(`ProjectionDest::Session` / `Broadcast`). Embedded presentation drains the
+same `ProjectionEvent` queue; TCP listen/dedicated wraps it as
+`HostToServer::Project`. `HostToServer` keeps only control variants
+(`DisconnectClient` / `DisconnectCatchupClient` / `Stop`). Egress classifies
+mailbox delivery (catch-up / pose / state / reliable) from the `Packet`
+variant — it is not a second payload enum. Join-client
+`ClientToGame` / `NetworkInbound` mirroring is unchanged (Plan 08).
+
 Player identity is `normalize_player_identity`: lowercase ASCII
 `[a-z0-9_-]`, 1–16 bytes, no Windows reserved stems. `online-mode=true`
 fails startup (credentials not implemented). Handshake never self-grants

@@ -11,7 +11,7 @@ use icraft::entity::EntityType;
 use icraft::inventory::{GameMode, Item, ItemStack};
 use icraft::network::client::ClientToGame;
 use icraft::network::protocol::{
-    BlockActionKind, GameplayOperation, GameplayOutcome, GameplayRequest, RejectReason,
+    BlockActionKind, GameplayOperation, GameplayOutcome, GameplayRequest, Packet, RejectReason,
     SessionSlotWire,
 };
 use icraft::server_runtime::{
@@ -133,8 +133,9 @@ fn singleplayer_typed_nether_activation_and_transfer() {
         .presentation_events
         .iter()
         .find_map(|event| match event {
-            icraft::server_runtime::RuntimePresentationEvent::GameplayResponse {
-                response, ..
+            icraft::server_runtime::ProjectionEvent {
+                packet: Packet::GameplayResponse { response, .. },
+                ..
             } if response.request_id == 1 => Some(response.clone()),
             _ => None,
         })
@@ -144,8 +145,10 @@ fn singleplayer_typed_nether_activation_and_transfer() {
     output = runtime.tick_with_output().unwrap();
     assert!(output.presentation_events.iter().any(|event| matches!(
         event,
-        icraft::server_runtime::RuntimePresentationEvent::GameplayResponse { response, .. }
-            if *response == first
+        icraft::server_runtime::ProjectionEvent {
+            packet: Packet::GameplayResponse { response, .. },
+            ..
+        } if *response == first
     )));
     assert_eq!(
         runtime
@@ -182,8 +185,11 @@ fn singleplayer_typed_nether_activation_and_transfer() {
         let output = runtime.tick_with_output().unwrap();
         transferred |= output.presentation_events.iter().any(|event| matches!(
             event,
-            icraft::server_runtime::RuntimePresentationEvent::DimensionTransfer { target, dimension, .. }
-                if *target == LOCAL_ID && *dimension == Dimension::Nether as u8
+            icraft::server_runtime::ProjectionEvent {
+                dest: icraft::server_runtime::ProjectionDest::Session(target),
+                packet: Packet::DimensionTransfer { dimension, .. },
+                ..
+            } if *target == LOCAL_ID && *dimension == Dimension::Nether as u8
         ));
     }
     assert!(transferred);

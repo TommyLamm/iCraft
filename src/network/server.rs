@@ -10,7 +10,8 @@ use tokio::time;
 
 // Public re-exports for external callers (e.g. `use icraft::network::server::*` and `use crate::network::server::*`)
 pub use super::channels::{
-    HostEventSendError, HostEventSender, HostToServer, ServerConfig, ServerToHost,
+    HostEventSendError, HostEventSender, HostToServer, ProjectionDest, ProjectionEvent,
+    ServerConfig, ServerToHost,
 };
 pub use super::session::{NetworkMetrics, NetworkMetricsSnapshot};
 
@@ -447,10 +448,13 @@ mod tests {
         };
         server
             .host_tx
-            .send(HostToServer::SendGameplayResponse {
-                to: id,
-                response: accepted.clone(),
-            })
+            .send(HostToServer::project_session(
+                id,
+                Packet::GameplayResponse {
+                    protocol_version: PROTOCOL_VERSION,
+                    response: accepted.clone(),
+                },
+            ))
             .await
             .unwrap();
         let first = recv_matching(&mut client, |packet| {
@@ -890,17 +894,17 @@ mod tests {
 
         server
             .host_tx
-            .send(HostToServer::PlayerPosition {
-                to: None,
-                id: id_a,
-                sequence: 12,
-                sender_time_millis: 600,
-                x: 10.0,
-                y: 65.0,
-                z: -4.0,
-                yaw: 1.5,
-                pitch: -0.25,
-            })
+            .send(HostToServer::project_broadcast(Packet::PlayerPosition {
+                protocol_version: PROTOCOL_VERSION,
+                    id: id_a,
+                    sequence: 12,
+                    sender_time_millis: 600,
+                    x: 10.0,
+                    y: 65.0,
+                    z: -4.0,
+                    yaw: 1.5,
+                    pitch: -0.25,
+            }))
             .await
             .unwrap();
         let packet = recv_matching(&mut client_b, |packet| {
@@ -1074,10 +1078,11 @@ mod tests {
 
         time::timeout(
             Duration::from_secs(1),
-            server.handle_host_command(HostToServer::NotifyPlayerJoin {
-                id: 3,
-                username: "joining".into(),
-            }),
+            server.handle_host_command(HostToServer::project_broadcast(Packet::PlayerJoin {
+                protocol_version: PROTOCOL_VERSION,
+                    id: 3,
+                    username: "joining".into(),
+            })),
         )
         .await
         .expect("reliable join should be delivered when bounded capacity becomes available");
@@ -1148,10 +1153,11 @@ mod tests {
 
         time::timeout(
             Duration::from_secs(1),
-            server.handle_host_command(HostToServer::NotifyPlayerJoin {
-                id: 2,
-                username: "joining".into(),
-            }),
+            server.handle_host_command(HostToServer::project_broadcast(Packet::PlayerJoin {
+                protocol_version: PROTOCOL_VERSION,
+                    id: 2,
+                    username: "joining".into(),
+            })),
         )
         .await
         .expect("a permanently full reliable queue should be evicted deterministically");
@@ -1294,12 +1300,15 @@ mod tests {
 
         server
             .host_tx
-            .send(HostToServer::TimeSync {
-                ticks: 21_000,
-                weather: 2,
-                weather_remaining_ticks: 3_500.25,
-                to: Some(joining_id),
-            })
+            .send(HostToServer::project_session(
+                joining_id,
+                Packet::TimeSync {
+                    protocol_version: PROTOCOL_VERSION,
+                    ticks: 21_000,
+                    weather: 2,
+                    weather_remaining_ticks: 3_500.25,
+                },
+            ))
             .await
             .unwrap();
 
@@ -1346,17 +1355,20 @@ mod tests {
 
         server
             .host_tx
-            .send(HostToServer::TimeSync {
-                to: None,
-                ticks: 22_000,
-                weather: 2,
-                weather_remaining_ticks: 4_500.0,
-            })
+            .send(HostToServer::project_broadcast(Packet::TimeSync {
+                protocol_version: PROTOCOL_VERSION,
+                    ticks: 22_000,
+                    weather: 2,
+                    weather_remaining_ticks: 4_500.0,
+            }))
             .await
             .unwrap();
         server
             .host_tx
-            .send(HostToServer::BroadcastLightningStrike { strike })
+            .send(HostToServer::project_broadcast(Packet::LightningStrike {
+                protocol_version: PROTOCOL_VERSION,
+                    strike: strike,
+            }))
             .await
             .unwrap();
 
@@ -1441,10 +1453,11 @@ mod tests {
         let (mut client_b, _) = server.connect("alex").await;
         server
             .host_tx
-            .send(HostToServer::BroadcastPlayerAction {
-                id: id_a,
-                action: Action::Break,
-            })
+            .send(HostToServer::project_broadcast(Packet::PlayerAction {
+                protocol_version: PROTOCOL_VERSION,
+                    id: id_a,
+                    action: Action::Break,
+            }))
             .await
             .unwrap();
         let packet =
@@ -1481,10 +1494,11 @@ mod tests {
 
         server
             .host_tx
-            .send(HostToServer::BroadcastChat {
-                sender: "steve".into(),
-                message: "hello".into(),
-            })
+            .send(HostToServer::project_broadcast(Packet::ChatMessage {
+                protocol_version: PROTOCOL_VERSION,
+                    sender: "steve".into(),
+                    message: "hello".into(),
+            }))
             .await
             .unwrap();
 
@@ -1616,13 +1630,16 @@ mod tests {
         };
         server
             .host_tx
-            .send(HostToServer::SendPlayerSessionUpdate {
-                to: id_a,
-                sequence: 7,
-                player_id: id_a,
-                dimension: 0,
-                state,
-            })
+            .send(HostToServer::project_session(
+                id_a,
+                Packet::PlayerSessionUpdate {
+                    protocol_version: PROTOCOL_VERSION,
+                    sequence: 7,
+                    player_id: id_a,
+                    dimension: 0,
+                    state: state,
+                },
+            ))
             .await
             .unwrap();
 
@@ -1650,16 +1667,19 @@ mod tests {
 
         server
             .host_tx
-            .send(HostToServer::SendPlayerSessionUpdate {
-                to: id_a,
-                sequence: 8,
-                player_id: id_b,
-                dimension: 0,
-                state: SessionGameplayWire {
+            .send(HostToServer::project_session(
+                id_a,
+                Packet::PlayerSessionUpdate {
+                    protocol_version: PROTOCOL_VERSION,
+                    sequence: 8,
+                    player_id: id_b,
+                    dimension: 0,
+                    state: SessionGameplayWire {
                     revision: 2,
                     ..state
                 },
-            })
+                },
+            ))
             .await
             .unwrap();
         assert!(tokio::time::timeout(
@@ -1809,14 +1829,17 @@ mod tests {
 
         server
             .host_tx
-            .send(HostToServer::SendGameplayResponse {
-                to: peer_id,
-                response: GameplayResponse {
+            .send(HostToServer::project_session(
+                peer_id,
+                Packet::GameplayResponse {
+                    protocol_version: PROTOCOL_VERSION,
+                    response: GameplayResponse {
                     request_id: 42,
                     server_sequence: 1,
                     outcome: crate::network::protocol::GameplayOutcome::Accepted { revision: 1 },
                 },
-            })
+                },
+            ))
             .await
             .unwrap();
         let response = recv_matching(&mut peer, |packet| {
@@ -1999,10 +2022,11 @@ mod tests {
         for index in 0..(CLIENT_QUEUE_CAPACITY + 8) {
             server
                 .host_tx
-                .send(HostToServer::BroadcastChat {
+                .send(HostToServer::project_broadcast(Packet::ChatMessage {
+                protocol_version: PROTOCOL_VERSION,
                     sender: "pad".into(),
                     message: format!("pad-{index}"),
-                })
+            }))
                 .await
                 .unwrap();
             let _ = time::timeout(
@@ -2016,16 +2040,16 @@ mod tests {
 
         server
             .host_tx
-            .send(HostToServer::ContainerSlotUpdate {
-                to: None,
-                dimension: 0,
-                revision: 11,
-                x: 8,
-                y: 80,
-                z: 8,
-                slot_index: 3,
-                slot: None,
-            })
+            .send(HostToServer::project_broadcast(Packet::ContainerSlotUpdate {
+                protocol_version: PROTOCOL_VERSION,
+                    dimension: 0,
+                    revision: 11,
+                    x: 8,
+                    y: 80,
+                    z: 8,
+                    slot_index: 3,
+                    slot: None,
+            }))
             .await
             .unwrap();
 
