@@ -4,7 +4,6 @@ use common::tcp_harness::{
     current_revision, drive_until, gameplay_request as request, seeded_properties, session_slot,
     source, wait_for_response, HeldLoopback, TcpClient,
 };
-use icraft::authority::contract::AuthorityTopology;
 use icraft::authority::transactions::BREW_TICKS;
 use icraft::block_entity::{BlockEntity, FurnaceBlockEntity};
 use icraft::inventory::{Item, ItemStack};
@@ -215,7 +214,6 @@ fn run_singleplayer_embedded_contract() {
     let (mut runtime, input) = ServerRuntime::new_embedded(
         properties,
         EmbeddedRuntimeOptions {
-            topology: AuthorityTopology::Singleplayer,
             transport: TransportMode::Disabled,
             local_session: Some(LocalSessionProfile::new(HOST_SESSION_ID, "embedded-owner")),
         },
@@ -513,7 +511,6 @@ fn run_topology(label: &str, listen: bool) {
         let (runtime, input) = ServerRuntime::new_embedded(
             properties.clone(),
             EmbeddedRuntimeOptions {
-                topology: AuthorityTopology::ListenServer,
                 transport: TransportMode::Listen,
                 local_session: Some(LocalSessionProfile::new(HOST_SESSION_ID, "local-host")),
             },

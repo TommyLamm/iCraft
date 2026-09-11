@@ -11,7 +11,6 @@ pub(super) struct EmbeddedRuntimeBridge {
     pub(super) runtime: crate::server_runtime::ServerRuntime,
     pub(super) input: crate::server_runtime::RuntimeInput,
     pub(super) session_id: crate::network::protocol::PlayerId,
-    pub(super) topology: AuthorityTopology,
     pub(super) next_request_id: u128,
     pub(super) next_client_sequence: u64,
     pub(super) next_pose_sender_time_millis: u64,
@@ -30,18 +29,14 @@ impl EmbeddedRuntimeBridge {
         pvp: bool,
     ) -> Result<Self, crate::server_runtime::ServerConfigError> {
         let session_id = u64::MAX;
-        let (topology, options) = match role {
-            MultiplayerRole::Singleplayer => (
-                AuthorityTopology::Singleplayer,
+        let options = match role {
+            MultiplayerRole::Singleplayer => {
                 crate::server_runtime::EmbeddedRuntimeOptions::singleplayer(
                     crate::server_runtime::LocalSessionProfile::new(session_id, "local"),
-                ),
-            ),
-            MultiplayerRole::Host { .. } => (
-                AuthorityTopology::ListenServer,
-                crate::server_runtime::EmbeddedRuntimeOptions::listen(
-                    crate::server_runtime::LocalSessionProfile::new(session_id, "host"),
-                ),
+                )
+            }
+            MultiplayerRole::Host { .. } => crate::server_runtime::EmbeddedRuntimeOptions::listen(
+                crate::server_runtime::LocalSessionProfile::new(session_id, "host"),
             ),
             MultiplayerRole::Client { .. } => {
                 return Err(crate::server_runtime::ServerConfigError::Invalid {
@@ -73,7 +68,6 @@ impl EmbeddedRuntimeBridge {
             runtime,
             input,
             session_id,
-            topology,
             next_request_id: 1,
             next_client_sequence: 1,
             next_pose_sender_time_millis: 1,
@@ -91,10 +85,6 @@ impl EmbeddedRuntimeBridge {
             .authority
             .session(self.session_id)
             .map(|session| session.game_mode)
-    }
-
-    pub(super) fn topology(&self) -> AuthorityTopology {
-        self.topology
     }
 
     pub(super) fn revision_for_dimension(&self, dimension: crate::dimension::Dimension) -> u64 {

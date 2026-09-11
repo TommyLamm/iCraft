@@ -1,8 +1,9 @@
-//! Contracts shared by every authority topology.
+//! Contracts shared by every authority runtime.
 //!
 //! The contract deliberately contains no transport or presentation types.  A
 //! single-player in-process runtime, a listen server and the dedicated binary
-//! all use these same revision/session rules and request vectors.
+//! all use these same revision/session rules and request vectors. Listen vs
+//! embedded is `TransportMode`; join vs in-process is `PresentationTopology`.
 
 use crate::inventory::{GameMode, ItemStack};
 use crate::network::protocol::{
@@ -16,15 +17,6 @@ use std::collections::VecDeque;
 pub const AUTHORITY_CONTRACT_VERSION: u16 = 2;
 pub const FIXED_TICK_HZ: u32 = 20;
 pub const RESPONSE_CACHE_CAPACITY: usize = 128;
-
-/// The composition root is allowed to choose a transport, never a second
-/// authority implementation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthorityTopology {
-    Singleplayer,
-    ListenServer,
-    Dedicated,
-}
 
 /// Monotonic server revision shared by mutations and ACKs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

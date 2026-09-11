@@ -3,7 +3,6 @@
 mod common;
 
 use common::tcp_harness::{temp_world, HeldLoopback};
-use icraft::authority::contract::AuthorityTopology;
 use icraft::dimension::Dimension;
 use icraft::save::{
     compress_bytes, ChunkSaveData, RegionData, SaveError, SaveManager, CHUNK_SAVE_DATA_VERSION,
@@ -46,7 +45,6 @@ fn dedicated_runtime(world_dir: PathBuf) -> ServerRuntime {
     ServerRuntime::new_embedded(
         properties,
         EmbeddedRuntimeOptions {
-            topology: AuthorityTopology::Dedicated,
             transport: TransportMode::Disabled,
             local_session: None,
         },

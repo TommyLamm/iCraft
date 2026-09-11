@@ -1312,10 +1312,9 @@ impl AuthorityCore {
     }
 
     fn rejected(&mut self, request_id: u128, reason: RejectReason) -> GameplayResponse {
-        let revision = self.world_mut_active().revisions.allocate();
         GameplayResponse {
             request_id,
-            server_sequence: revision,
+            server_sequence: self.world().revisions.current(),
             outcome: GameplayOutcome::Rejected { reason },
         }
     }

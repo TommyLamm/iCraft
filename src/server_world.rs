@@ -13,15 +13,11 @@ use crate::authority::interest::chunks_around;
 use crate::authority::transactions::{self, WorkstationContext};
 use crate::block_entity::{default_stub_for_block, BlockEntity, ContainerAccess};
 use crate::chunk_manager::ChunkManager;
-#[cfg(test)]
-use crate::commands::{self, Command, TimeCommand};
 use crate::dimension::{generate_chunk_with_options, Dimension, WorldGenerationOptions};
 use crate::entity::{EntityManager, EntityType};
 use crate::fluid::FluidMutation;
 use crate::game_rules::{Difficulty, WorldRules, WorldType};
 use crate::inventory::ItemStack;
-#[cfg(test)]
-use crate::network::protocol::ContainerAction;
 use crate::network::protocol::{
     GameplayOperation, GameplayRequest, ItemWire, PlayerId, RejectReason,
 };
@@ -1483,57 +1479,6 @@ impl ServerWorld {
         Ok(())
     }
 
-    /// Thin world dispatcher retained for `server_world` unit tests. Live
-    /// requests go through `AuthorityCore`'s single operation match.
-    #[cfg(test)]
-    pub fn dispatch(
-        &mut self,
-        request: &GameplayRequest,
-        player_id: PlayerId,
-        _operator: bool,
-    ) -> Result<Option<WorldMutation>, RejectReason> {
-        match &request.operation {
-            GameplayOperation::Container {
-                action,
-                x,
-                y,
-                z,
-                slot,
-            } => {
-                let action =
-                    ContainerAction::from_wire(*action).ok_or(RejectReason::InvalidState)?;
-                match action {
-                    ContainerAction::Open => self.open_container(*x, *y, *z, *slot, player_id),
-                    ContainerAction::Close => self.close_container(*x, *y, *z, *slot, player_id),
-                }
-            }
-            GameplayOperation::ContainerClick { x, y, z, slot, .. } => {
-                self.ensure_container_slot(*x, *y, *z, *slot)?;
-                Err(RejectReason::Unsupported)
-            }
-            GameplayOperation::Sleep { x, y, z } => self.sleep_player(*x, *y, *z, player_id),
-            GameplayOperation::Command { command } => {
-                let parsed = commands::parse(command).map_err(|_| RejectReason::InvalidState)?;
-                match parsed {
-                    Command::GameRule { rule, value } => {
-                        self.set_gamerule(&rule, value.as_deref())?;
-                        Ok(None)
-                    }
-                    Command::Time(TimeCommand::Set(time)) => {
-                        self.set_time(time);
-                        Ok(None)
-                    }
-                    Command::Time(TimeCommand::Add(time)) => {
-                        self.add_time(time);
-                        Ok(None)
-                    }
-                    _ => Err(RejectReason::Unsupported),
-                }
-            }
-            _ => Err(RejectReason::Unsupported),
-        }
-    }
-
     fn touch_revision(&mut self, x: i32, y: i32, z: i32) -> WorldMutation {
         let revision = self.revisions.allocate();
         self.set_block_revision((x, y, z), revision);
@@ -2250,7 +2195,6 @@ fn milli_to_vec3(position: [i32; 3]) -> Vec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::contract::AuthorityTopology;
     use crate::authority::{AuthorityConfig, AuthorityCore};
     use crate::entity::EntityType;
     use crate::network::protocol::{GameplayOutcome, GameplayRequest};
@@ -2679,23 +2623,8 @@ mod tests {
             .set_block(position.0, position.1, position.2, BlockType::Chest, 0)
             .unwrap();
 
-        let request = |player_id: PlayerId, action: ContainerAction| GameplayRequest {
-            request_id: player_id as u128,
-            client_sequence: player_id as u64,
-            session_id: player_id,
-            dimension: 0,
-            client_revision: 0,
-            operation: GameplayOperation::Container {
-                action: action.to_wire(),
-                x: position.0,
-                y: position.1,
-                z: position.2,
-                slot: 0,
-            },
-        };
-
         world
-            .dispatch(&request(7, ContainerAction::Open), 7, false)
+            .open_container(position.0, position.1, position.2, 0, 7)
             .unwrap();
         assert!(crate::world::BlockState::decode(world.get_block_state(8, 80, 8)).is_open);
         assert_eq!(
@@ -2707,14 +2636,14 @@ mod tests {
         );
 
         world
-            .dispatch(&request(8, ContainerAction::Open), 8, false)
+            .open_container(position.0, position.1, position.2, 0, 8)
             .unwrap();
         world
-            .dispatch(&request(7, ContainerAction::Close), 7, false)
+            .close_container(position.0, position.1, position.2, 0, 7)
             .unwrap();
         assert!(crate::world::BlockState::decode(world.get_block_state(8, 80, 8)).is_open);
         world
-            .dispatch(&request(8, ContainerAction::Close), 8, false)
+            .close_container(position.0, position.1, position.2, 0, 8)
             .unwrap();
         assert!(!crate::world::BlockState::decode(world.get_block_state(8, 80, 8)).is_open);
     }
@@ -2733,26 +2662,12 @@ mod tests {
         world
             .set_block(position.0, position.1, position.2, BlockType::Chest, 0)
             .unwrap();
-        let request = |player_id: PlayerId, action: ContainerAction| GameplayRequest {
-            request_id: player_id as u128,
-            client_sequence: player_id as u64,
-            session_id: player_id,
-            dimension: 0,
-            client_revision: 0,
-            operation: GameplayOperation::Container {
-                action: action.to_wire(),
-                x: position.0,
-                y: position.1,
-                z: position.2,
-                slot: 0,
-            },
-        };
 
         world
-            .dispatch(&request(7, ContainerAction::Open), 7, false)
+            .open_container(position.0, position.1, position.2, 0, 7)
             .unwrap();
         world
-            .dispatch(&request(8, ContainerAction::Open), 8, false)
+            .open_container(position.0, position.1, position.2, 0, 8)
             .unwrap();
         assert!(world.close_container_viewer_forced(7, position));
         assert!(crate::world::BlockState::decode(world.get_block_state(8, 80, 8)).is_open);
@@ -2832,21 +2747,10 @@ mod tests {
             .set_block(right.0, right.1, right.2, BlockType::Chest, right_state)
             .unwrap();
 
-        let request = GameplayRequest {
-            request_id: 1,
-            client_sequence: 1,
-            session_id: 7,
-            dimension: 0,
-            client_revision: 0,
-            operation: GameplayOperation::Container {
-                action: ContainerAction::Open.to_wire(),
-                x: left.0,
-                y: left.1,
-                z: left.2,
-                slot: 0,
-            },
-        };
-        let primary = world.dispatch(&request, 7, false).unwrap().unwrap();
+        let primary = world
+            .open_container(left.0, left.1, left.2, 0, 7)
+            .unwrap()
+            .unwrap();
         let partner = world.take_pending_mutations();
         assert_eq!(primary.position, left);
         assert_eq!(partner.len(), 1);
@@ -3092,7 +2996,7 @@ mod tests {
 
     #[test]
     fn malformed_combat_action_is_explicitly_rejected() {
-        let mut core = AuthorityCore::new(AuthorityConfig::default(), AuthorityTopology::Dedicated);
+        let mut core = AuthorityCore::new(AuthorityConfig::default());
         core.register_session(crate::authority::contract::SessionContract::new(
             7,
             "alex",

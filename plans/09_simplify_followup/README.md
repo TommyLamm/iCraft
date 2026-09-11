@@ -51,7 +51,7 @@
 | # | 單獨執行文件 | 優先級 | 預估淨收益 | 前置依賴 | 狀態 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | 01 | [協定 v20：刪 leftover inbound 與死 ACK／catch-up](01_protocol_v20_leftover_packets.md) | P0 | ~-400 行協定／通道／handler | 無 | 已完成 |
-| 02 | [刪 `AuthorityTopology` 與死 helper](02_authority_dead_topology_and_helpers.md) | P0 | 少一個從未讀的 enum + 測試 drift | 無 | 未開始 |
+| 02 | [刪 `AuthorityTopology` 與死 helper](02_authority_dead_topology_and_helpers.md) | P0 | 少一個從未讀的 enum + 測試 drift | 無 | 已完成 |
 | 03 | [刪桌面不可達啟動與 Pickup 死分支](03_presentation_dead_launch_and_pickup.md) | P0 | ~-180 行 `state.rs` 死路徑 | 無 | 未開始 |
 | 04 | [刪幽靈 `dynamic_resolution`／`render_scale`](04_ghost_dynamic_resolution_settings.md) | P0 | ~-300 行模組 + settings 鍵 | 無 | 未開始 |
 | 05 | [刪 presentation `RedstoneSystem` 空殼](05_presentation_redstone_shell.md) | P0 | ~-100 行 restore 空管線 | 03 | 未開始 |

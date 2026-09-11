@@ -9,7 +9,7 @@ mod common;
 
 use common::tcp_harness::{session_slot, source};
 use glam::Vec3;
-use icraft::authority::contract::{AuthorityTopology, SessionContract};
+use icraft::authority::contract::SessionContract;
 use icraft::authority::fishing::water_probe_position;
 use icraft::authority::transactions::BREW_TICKS;
 use icraft::authority::{AuthorityConfig, AuthorityCore};
@@ -25,7 +25,7 @@ use icraft::world::BlockType;
 const SESSION_ID: u64 = 7;
 
 fn new_core() -> AuthorityCore {
-    let mut core = AuthorityCore::new(AuthorityConfig::default(), AuthorityTopology::Dedicated);
+    let mut core = AuthorityCore::new(AuthorityConfig::default());
     core.register_session(SessionContract::new(
         SESSION_ID,
         "headless",

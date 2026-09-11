@@ -4,7 +4,6 @@
 mod common;
 
 use common::tcp_harness::{temp_world, HeldLoopback};
-use icraft::authority::contract::AuthorityTopology;
 use icraft::dimension::Dimension;
 use icraft::network::protocol::{
     BlockActionKind, GameplayOperation, GameplayOutcome, GameplayRequest,
@@ -253,7 +252,6 @@ fn dedicated_without_sessions_caps_spawn_ring() {
     let (mut runtime, _input) = ServerRuntime::new_embedded(
         props.clone(),
         EmbeddedRuntimeOptions {
-            topology: AuthorityTopology::Dedicated,
             transport: TransportMode::Disabled,
             local_session: None,
         },

@@ -15,8 +15,7 @@ use crate::game_rules::{Difficulty, WorldRules, WorldType};
 use crate::network::protocol::{GameplayRequest, GameplayResponse, PlayerId, RejectReason};
 use crate::server_world::ServerWorld;
 use contract::{
-    AuthoritySnapshot, AuthorityTopology, SessionContract, SessionGameplayState,
-    SessionGameplayUpdate, WorldMutation,
+    AuthoritySnapshot, SessionContract, SessionGameplayState, SessionGameplayUpdate, WorldMutation,
 };
 pub(crate) use dispatch::stack_from_slot;
 use std::cmp::Ordering;
@@ -76,7 +75,6 @@ impl Default for AuthorityConfig {
 /// Owns sessions, request sequencing and the headless world.  Transport code
 /// only registers sessions, submits envelopes and consumes snapshots.
 pub struct AuthorityCore {
-    pub topology: AuthorityTopology,
     /// Key of the currently selected world in `worlds`.  Never a moved value:
     /// every loaded dimension stays in the map for its lifetime.
     pub(crate) active_dimension: Dimension,
@@ -113,11 +111,10 @@ pub struct DimensionTransferIntent {
 }
 
 impl AuthorityCore {
-    pub fn new(config: AuthorityConfig, topology: AuthorityTopology) -> Self {
+    pub fn new(config: AuthorityConfig) -> Self {
         let mut worlds = BTreeMap::new();
         worlds.insert(config.dimension, Self::new_world(config, config.dimension));
         Self {
-            topology,
             active_dimension: config.dimension,
             config,
             worlds,
@@ -473,8 +470,8 @@ mod tests {
     use crate::world::BlockType;
     use contract::SessionContract;
 
-    fn core(topology: AuthorityTopology) -> AuthorityCore {
-        let mut core = AuthorityCore::new(AuthorityConfig::default(), topology);
+    fn core() -> AuthorityCore {
+        let mut core = AuthorityCore::new(AuthorityConfig::default());
         core.register_session(SessionContract::new(
             7,
             "alex",
@@ -524,7 +521,7 @@ mod tests {
 
     #[test]
     fn duplicate_and_stale_revision_are_authoritative() {
-        let mut core = core(AuthorityTopology::Dedicated);
+        let mut core = core();
         let mut request = GameplayRequest {
             request_id: 1,
             client_sequence: 1,
@@ -539,17 +536,21 @@ mod tests {
         request.request_id = 2;
         request.client_sequence = 2;
         request.client_revision = core.current_revision() + 1;
+        let revision_before_reject = core.current_revision();
+        let rejected = core.submit_request(request);
         assert!(matches!(
-            core.submit_request(request).outcome,
+            rejected.outcome,
             GameplayOutcome::Rejected {
                 reason: RejectReason::InvalidRevision
             }
         ));
+        assert_eq!(core.current_revision(), revision_before_reject);
+        assert_eq!(rejected.server_sequence, revision_before_reject);
     }
 
     #[test]
     fn authenticated_rejections_are_cached_without_consuming_sequence() {
-        let mut core = core(AuthorityTopology::Dedicated);
+        let mut core = core();
         let request = GameplayRequest {
             request_id: 9,
             client_sequence: 1,
@@ -569,7 +570,7 @@ mod tests {
 
     #[test]
     fn rejected_block_action_does_not_drain_a_mutation() {
-        let mut core = core(AuthorityTopology::Singleplayer);
+        let mut core = core();
         let before = core.world().get_block(8, 80, 8);
         let request = GameplayRequest {
             request_id: 21,
@@ -602,7 +603,7 @@ mod tests {
 
     #[test]
     fn typed_mining_fixed_tick_breaks_once_and_cancel_is_idempotent() {
-        let mut core = core(AuthorityTopology::Dedicated);
+        let mut core = core();
         let target = (8, 81, 9);
         core.world_mut_active()
             .set_block(target.0, target.1, target.2, BlockType::Stone, 0)
@@ -704,7 +705,7 @@ mod tests {
 
     #[test]
     fn typed_mining_rejects_unloaded_target_without_progress_or_mutation() {
-        let mut core = core(AuthorityTopology::Dedicated);
+        let mut core = core();
         core.session_mut(7).unwrap().position = [15.0, 80.0, 8.0];
         let held_stack = crate::inventory::ItemStack::new(Item::StonePickaxe, 1);
         let held = crate::network::protocol::SessionSlotWire::new(
@@ -758,7 +759,7 @@ mod tests {
             0,
         );
 
-        let mut creative = core(AuthorityTopology::Singleplayer);
+        let mut creative = core();
         creative.session_mut(7).unwrap().game_mode = crate::inventory::GameMode::Creative;
         creative
             .world_mut_active()
@@ -798,7 +799,7 @@ mod tests {
             .iter()
             .all(|entity| entity.entity_type != EntityType::ExperienceOrb));
 
-        let mut adventure = core(AuthorityTopology::Dedicated);
+        let mut adventure = core();
         adventure.session_mut(7).unwrap().game_mode = crate::inventory::GameMode::Adventure;
         adventure
             .world_mut_active()
@@ -838,7 +839,7 @@ mod tests {
             BlockType::Air
         );
 
-        let mut denied = core(AuthorityTopology::Dedicated);
+        let mut denied = core();
         denied.session_mut(7).unwrap().game_mode = crate::inventory::GameMode::Adventure;
         denied
             .world_mut_active()
@@ -870,7 +871,7 @@ mod tests {
             BlockType::Stone
         );
 
-        let mut empty_hand = core(AuthorityTopology::Dedicated);
+        let mut empty_hand = core();
         empty_hand
             .world_mut_active()
             .set_block(target.0, target.1, target.2, BlockType::Dirt, 0)
@@ -903,7 +904,7 @@ mod tests {
             0,
             0,
         );
-        let mut core = core(AuthorityTopology::Dedicated);
+        let mut core = core();
         core.world_mut_active()
             .set_block(support.0, support.1, support.2, BlockType::Stone, 0)
             .unwrap();
@@ -1052,7 +1053,7 @@ mod tests {
             assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
         };
 
-        let mut cancelled = core(AuthorityTopology::Dedicated);
+        let mut cancelled = core();
         start(&mut cancelled, 120);
         let response = cancelled.submit_request(block_request(
             121,
@@ -1072,7 +1073,7 @@ mod tests {
             BlockType::Stone
         );
 
-        let mut held_changed = core(AuthorityTopology::Dedicated);
+        let mut held_changed = core();
         start(&mut held_changed, 122);
         let mut changed = held_changed.session(7).unwrap().gameplay;
         let other = crate::inventory::ItemStack::new(Item::WoodenPickaxe, 1);
@@ -1091,7 +1092,7 @@ mod tests {
             BlockType::Stone
         );
 
-        let mut slot_switched = core(AuthorityTopology::Dedicated);
+        let mut slot_switched = core();
         start(&mut slot_switched, 125);
         let mut switched = slot_switched.session(7).unwrap().gameplay;
         switched.selected_hotbar_slot = 1;
@@ -1107,7 +1108,7 @@ mod tests {
             BlockType::Stone
         );
 
-        let mut moved = core(AuthorityTopology::Dedicated);
+        let mut moved = core();
         start(&mut moved, 123);
         moved.session_mut(7).unwrap().position = [30.0, 80.0, 30.0];
         let _ = moved.tick();
@@ -1117,7 +1118,7 @@ mod tests {
             BlockType::Stone
         );
 
-        let mut replaced = core(AuthorityTopology::Dedicated);
+        let mut replaced = core();
         start(&mut replaced, 124);
         replaced
             .world_mut_active()
@@ -1142,7 +1143,7 @@ mod tests {
             chest.can_break,
             chest.can_place_on,
         );
-        let mut core = core(AuthorityTopology::Dedicated);
+        let mut core = core();
         core.session_mut(7).unwrap().game_mode = crate::inventory::GameMode::Adventure;
         core.world_mut_active()
             .set_block(support.0, support.1, support.2, BlockType::Stone, 0)
@@ -1215,7 +1216,7 @@ mod tests {
             0,
             0,
         );
-        let mut core = core(AuthorityTopology::Dedicated);
+        let mut core = core();
         core.world_mut_active()
             .set_block(target.0, target.1, target.2, BlockType::Stone, 0)
             .unwrap();
@@ -1261,7 +1262,7 @@ mod tests {
             0x55,
             0xaa,
         );
-        let mut core = core(AuthorityTopology::Dedicated);
+        let mut core = core();
         core.world_mut_active()
             .set_block(target.0, target.1, target.2, BlockType::DiamondOre, 0)
             .unwrap();
@@ -1313,7 +1314,7 @@ mod tests {
 
     #[test]
     fn authoritative_dispenser_edge_executes_once_with_global_entity_id() {
-        let mut core = core(AuthorityTopology::Dedicated);
+        let mut core = core();
         let lever = (7, 80, 8);
         let source = (8, 80, 8);
         core.world_mut_active()
@@ -1415,23 +1416,8 @@ mod tests {
     }
 
     #[test]
-    fn same_vectors_have_same_revisions_for_each_topology() {
-        let mut snapshots = Vec::new();
-        for topology in [
-            AuthorityTopology::Singleplayer,
-            AuthorityTopology::ListenServer,
-            AuthorityTopology::Dedicated,
-        ] {
-            let mut core = core(topology);
-            snapshots.push(core.common_vector_snapshot());
-        }
-        assert_eq!(snapshots[0], snapshots[1]);
-        assert_eq!(snapshots[1], snapshots[2]);
-    }
-
-    #[test]
     fn item_use_mutates_session_inventory_and_revision() {
-        let mut core = core(AuthorityTopology::Singleplayer);
+        let mut core = core();
         let mut gameplay = SessionGameplayState::default();
         gameplay.hunger_milli = 10_000;
         let mut wire = crate::network::protocol::ItemWire::empty();
@@ -1459,7 +1445,7 @@ mod tests {
 
     #[test]
     fn unsupported_tool_item_use_does_not_consume_inventory() {
-        let mut core = core(AuthorityTopology::Singleplayer);
+        let mut core = core();
         let mut gameplay = SessionGameplayState::default();
         let mut wire = crate::network::protocol::ItemWire::empty();
         wire.item = Item::DiamondSword as u32;
@@ -1494,7 +1480,7 @@ mod tests {
 
     #[test]
     fn client_cannot_submit_self_damage() {
-        let mut core = core(AuthorityTopology::Singleplayer);
+        let mut core = core();
         let before = core.session(7).unwrap().gameplay;
         let response = core.submit_request(GameplayRequest {
             request_id: 35,
@@ -1518,7 +1504,7 @@ mod tests {
 
     #[test]
     fn respawn_command_restores_authority_health_after_death() {
-        let mut core = core(AuthorityTopology::Singleplayer);
+        let mut core = core();
         let mut dead = core.session(7).unwrap().gameplay;
         dead.health_milli = 0;
         dead.is_dead = true;
@@ -1543,7 +1529,7 @@ mod tests {
 
     #[test]
     fn respawn_session_rejects_living_player() {
-        let mut core = core(AuthorityTopology::Singleplayer);
+        let mut core = core();
         let before = core.session(7).unwrap().clone();
         assert!(!before.gameplay.is_dead);
         assert!(!core.respawn_session(7));
@@ -1555,8 +1541,7 @@ mod tests {
 
     #[test]
     fn dimension_transfer_updates_session_and_world_contract() {
-        let mut core =
-            AuthorityCore::new(AuthorityConfig::default(), AuthorityTopology::Singleplayer);
+        let mut core = AuthorityCore::new(AuthorityConfig::default());
         let _ = core.register_session(SessionContract::new(
             7,
             "alex",
@@ -1581,8 +1566,7 @@ mod tests {
 
     #[test]
     fn dimension_worlds_are_parked_without_chunk_aliasing() {
-        let mut core =
-            AuthorityCore::new(AuthorityConfig::default(), AuthorityTopology::Singleplayer);
+        let mut core = AuthorityCore::new(AuthorityConfig::default());
         let _ = core.register_session(SessionContract::new(
             7,
             "alex",
@@ -1635,7 +1619,7 @@ mod tests {
 
     #[test]
     fn sessions_in_multiple_dimensions_tick_and_dispatch_independently() {
-        let mut core = AuthorityCore::new(AuthorityConfig::default(), AuthorityTopology::Dedicated);
+        let mut core = AuthorityCore::new(AuthorityConfig::default());
         core.register_session(SessionContract::new(
             7,
             "alex",
@@ -1748,7 +1732,7 @@ mod tests {
 
     #[test]
     fn authority_boundary_does_not_reingest_presentation_inventory() {
-        let mut core = core(AuthorityTopology::Singleplayer);
+        let mut core = core();
         let mut gameplay = SessionGameplayState::default();
         let mut wire = crate::network::protocol::ItemWire::empty();
         wire.item = Item::Bread as u32;
@@ -1779,7 +1763,7 @@ mod tests {
 
     #[test]
     fn combat_mutates_headless_entity_without_state_fallback() {
-        let mut core = core(AuthorityTopology::Dedicated);
+        let mut core = core();
         let mut attacker = core.session(7).unwrap().gameplay;
         attacker.attack_cooldown_ticks = ATTACK_COOLDOWN_TICKS;
         assert!(core.set_session_gameplay(7, attacker));
@@ -1817,7 +1801,7 @@ mod tests {
 
     #[test]
     fn trade_conserves_items_and_mount_projects_session_state() {
-        let mut core = core(AuthorityTopology::Singleplayer);
+        let mut core = core();
         let villager = 900;
         let mut sell = crate::inventory::ItemStack::new(Item::Emerald, 1);
         sell.durability = 9;

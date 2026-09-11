@@ -7,9 +7,7 @@
 mod common;
 
 use common::tcp_harness::session_slot;
-use icraft::authority::contract::{
-    AuthorityTopology, SessionContract, SessionGameplayState, SessionInventorySlot,
-};
+use icraft::authority::contract::{SessionContract, SessionGameplayState, SessionInventorySlot};
 use icraft::authority::{AuthorityConfig, AuthorityCore};
 use icraft::block_entity::{BlockEntity, ChestBlockEntity};
 use icraft::brewing::{PotionData, PotionKind};
@@ -28,7 +26,7 @@ const CHEST: (i32, i32, i32) = (8, 80, 8);
 const BREW_STAND: (i32, i32, i32) = (9, 80, 8);
 
 fn new_core() -> AuthorityCore {
-    let mut core = AuthorityCore::new(AuthorityConfig::default(), AuthorityTopology::Dedicated);
+    let mut core = AuthorityCore::new(AuthorityConfig::default());
     core.register_session(SessionContract::new(
         SESSION_ID,
         "plan02",
@@ -519,8 +517,5 @@ fn leftover_container_click_envelope_is_rejected() {
     );
 
     assert_eq!(conserved_totals(&core), before);
-    assert_eq!(
-        chest_slot(&core, 2),
-        Some(ItemStack::new(Item::Coal, 3))
-    );
+    assert_eq!(chest_slot(&core, 2), Some(ItemStack::new(Item::Coal, 3)));
 }

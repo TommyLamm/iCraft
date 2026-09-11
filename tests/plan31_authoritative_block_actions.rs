@@ -4,7 +4,7 @@ use common::tcp_harness::{
     drive_until, gameplay_request as request, held, seeded_properties, session_slot as slot,
     wait_for_response, HeldLoopback, TcpClient,
 };
-use icraft::authority::contract::{AuthorityTopology, SessionGameplayState};
+use icraft::authority::contract::SessionGameplayState;
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::client::ClientToGame;
 use icraft::network::protocol::{
@@ -213,7 +213,6 @@ fn run_embedded_vector() {
     let (mut runtime, input) = ServerRuntime::new_embedded(
         properties,
         EmbeddedRuntimeOptions {
-            topology: AuthorityTopology::Singleplayer,
             transport: TransportMode::Disabled,
             local_session: Some(LocalSessionProfile::new(OWNER_ID, "plan31-owner")),
         },
@@ -315,7 +314,6 @@ fn run_tcp_vector(label: &str, listen: bool) {
         let (runtime, _input) = ServerRuntime::new_embedded(
             properties.clone(),
             EmbeddedRuntimeOptions {
-                topology: AuthorityTopology::ListenServer,
                 transport: TransportMode::Listen,
                 local_session: Some(LocalSessionProfile::new(OWNER_ID, "plan31-host")),
             },
@@ -759,7 +757,6 @@ fn run_tcp_vector(label: &str, listen: bool) {
     let (mut restored, _) = ServerRuntime::new_embedded(
         properties.clone(),
         EmbeddedRuntimeOptions {
-            topology: AuthorityTopology::Dedicated,
             transport: TransportMode::Disabled,
             local_session: None,
         },

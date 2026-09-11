@@ -2,7 +2,7 @@ use common::tcp_harness::{
     drive_until, held as tcp_held, seeded_properties, session_slot as tcp_slot, wait_for_response,
     HeldLoopback, TcpClient,
 };
-use icraft::authority::contract::{AuthorityTopology, SessionGameplayState};
+use icraft::authority::contract::SessionGameplayState;
 use icraft::authority::{AuthorityConfig, AuthorityCore};
 use icraft::block_entity::{
     BlockEntity, ChestBlockEntity, DispenserBlockEntity, DropperBlockEntity, FurnaceBlockEntity,
@@ -137,7 +137,7 @@ fn tool_for(kind: ContainerKind) -> Item {
 }
 
 fn core_with_pick() -> AuthorityCore {
-    let mut core = AuthorityCore::new(AuthorityConfig::default(), AuthorityTopology::Dedicated);
+    let mut core = AuthorityCore::new(AuthorityConfig::default());
     core.register_session(icraft::authority::contract::SessionContract::new(
         SESSION_ID,
         "plan34-owner",
@@ -280,7 +280,6 @@ fn run_tcp_container_vector(label: &str, listen: bool) {
         let (runtime, _) = ServerRuntime::new_embedded(
             properties.clone(),
             EmbeddedRuntimeOptions {
-                topology: AuthorityTopology::ListenServer,
                 transport: TransportMode::Listen,
                 local_session: Some(LocalSessionProfile::new(0x34_1000, "plan34-host")),
             },
@@ -444,12 +443,10 @@ fn run_tcp_container_vector(label: &str, listen: bool) {
                 if *player_id == owner_id
         )
     }));
-    assert!(!clients[1].events().iter().any(|event| {
-        matches!(
-            event,
-            ClientToGame::GameplayResponse { .. }
-        )
-    }));
+    assert!(!clients[1]
+        .events()
+        .iter()
+        .any(|event| { matches!(event, ClientToGame::GameplayResponse { .. }) }));
     assert!(!clients[1].events().iter().any(|event| {
         matches!(
             event,
@@ -524,7 +521,6 @@ fn run_tcp_container_vector(label: &str, listen: bool) {
     let (restored, _) = ServerRuntime::new_embedded(
         properties,
         EmbeddedRuntimeOptions {
-            topology: AuthorityTopology::Dedicated,
             transport: TransportMode::Disabled,
             local_session: None,
         },

@@ -2,7 +2,7 @@ mod common;
 
 use common::tcp_harness::{session_slot, temp_world, HeldLoopback};
 use glam::Vec3;
-use icraft::authority::contract::{AuthorityTopology, SessionGameplayState};
+use icraft::authority::contract::SessionGameplayState;
 use icraft::authority::transactions::BREW_TICKS;
 use icraft::block_entity::{BlockEntity, FurnaceBlockEntity};
 use icraft::dimension::Dimension;
@@ -82,7 +82,7 @@ struct TopologyHarness {
 }
 
 impl TopologyHarness {
-    fn new(label: &str, topology: AuthorityTopology, transport: TransportMode) -> Self {
+    fn new(label: &str, transport: TransportMode) -> Self {
         let mut properties = properties(label);
         properties.pvp = true;
         // The network thread is part of the listen topology even though this
@@ -94,7 +94,6 @@ impl TopologyHarness {
         let (mut runtime, input) = ServerRuntime::new_embedded(
             properties,
             EmbeddedRuntimeOptions {
-                topology,
                 transport,
                 local_session: Some(LocalSessionProfile::new(TOPOLOGY_SESSION_ID, "vector")),
             },
@@ -387,26 +386,13 @@ fn owner_session_update(
 
 #[test]
 fn plan24_plan22_gameplay_vectors_match_all_runtime_topologies() {
-    for (label, topology, transport) in [
-        (
-            "vector_singleplayer",
-            AuthorityTopology::Singleplayer,
-            TransportMode::Disabled,
-        ),
-        (
-            "vector_listen",
-            AuthorityTopology::ListenServer,
-            TransportMode::Listen,
-        ),
-        (
-            "vector_dedicated",
-            AuthorityTopology::Dedicated,
-            TransportMode::Disabled,
-        ),
+    for (label, transport) in [
+        ("vector_singleplayer", TransportMode::Disabled),
+        ("vector_listen", TransportMode::Listen),
+        ("vector_dedicated", TransportMode::Disabled),
     ] {
-        let mut harness = TopologyHarness::new(label, topology, transport);
+        let mut harness = TopologyHarness::new(label, transport);
         prepare_topology_fixture(&mut harness);
-        assert_eq!(harness.runtime.authority.topology, topology);
 
         // Fishing uses the offhand rod, so the combat sword remains selected.
         // The fixed-tick path owns hook creation and reel cleanup; a replay is
@@ -755,24 +741,12 @@ fn plan24_plan22_gameplay_vectors_match_all_runtime_topologies() {
 #[test]
 fn plan28_dispenser_item_projection_matches_all_runtime_topologies() {
     let mut baseline: Option<(u64, ItemWire)> = None;
-    for (label, topology, transport) in [
-        (
-            "dispenser_singleplayer",
-            AuthorityTopology::Singleplayer,
-            TransportMode::Disabled,
-        ),
-        (
-            "dispenser_listen",
-            AuthorityTopology::ListenServer,
-            TransportMode::Listen,
-        ),
-        (
-            "dispenser_dedicated",
-            AuthorityTopology::Dedicated,
-            TransportMode::Disabled,
-        ),
+    for (label, transport) in [
+        ("dispenser_singleplayer", TransportMode::Disabled),
+        ("dispenser_listen", TransportMode::Listen),
+        ("dispenser_dedicated", TransportMode::Disabled),
     ] {
-        let mut harness = TopologyHarness::new(label, topology, transport);
+        let mut harness = TopologyHarness::new(label, transport);
         let expected = prepare_dispenser_fixture(&mut harness);
         let mut projection = None;
         for _ in 0..8 {
@@ -794,8 +768,8 @@ fn plan28_dispenser_item_projection_matches_all_runtime_topologies() {
                 break;
             }
         }
-        let projection = projection
-            .unwrap_or_else(|| panic!("{topology:?} did not project dispenser output in {label}"));
+        let projection =
+            projection.unwrap_or_else(|| panic!("{label} did not project dispenser output"));
         assert_eq!(projection.1, expected);
         if let Some(previous) = baseline {
             assert_eq!(projection, previous, "topology projection diverged");
@@ -827,7 +801,6 @@ fn disabled_singleplayer_drains_local_request_through_fixed_tick_fifo() {
     )
     .unwrap();
 
-    assert_eq!(runtime.authority.topology, AuthorityTopology::Singleplayer);
     assert_eq!(runtime.transport_mode(), TransportMode::Disabled);
     let revision = runtime
         .authority
@@ -874,7 +847,6 @@ fn listen_runtime_routes_local_response_to_tick_output() {
     )
     .unwrap();
 
-    assert_eq!(runtime.authority.topology, AuthorityTopology::ListenServer);
     assert_eq!(runtime.transport_mode(), TransportMode::Listen);
     let revision = runtime
         .authority
@@ -911,7 +883,6 @@ fn legacy_constructor_remains_dedicated_listen_runtime() {
     let properties = listen_properties("dedicated");
     let world_dir = properties.world_dir.clone();
     let mut runtime = ServerRuntime::new(properties).unwrap();
-    assert_eq!(runtime.authority.topology, AuthorityTopology::Dedicated);
     assert_eq!(runtime.transport_mode(), TransportMode::Listen);
 
     runtime.tick().unwrap();

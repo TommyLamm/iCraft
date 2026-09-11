@@ -4,7 +4,7 @@ use common::tcp_harness::{
     drive_until, gameplay_request as request, seeded_properties, session_slot, wait_for_response,
     HeldLoopback, TcpClient,
 };
-use icraft::authority::contract::{AuthorityTopology, SessionGameplayState};
+use icraft::authority::contract::SessionGameplayState;
 use icraft::authority::fishing::water_probe_position;
 use icraft::fishing::{FishingHookStage, FISHING_INITIAL_WAIT_TICKS};
 use icraft::inventory::{Item, ItemStack};
@@ -163,7 +163,6 @@ fn run_embedded() {
     let (mut runtime, input) = ServerRuntime::new_embedded(
         properties,
         EmbeddedRuntimeOptions {
-            topology: AuthorityTopology::Singleplayer,
             transport: TransportMode::Disabled,
             local_session: Some(LocalSessionProfile::new(EMBEDDED_OWNER, "plan33-owner")),
         },
@@ -315,7 +314,6 @@ fn run_tcp(label: &str, listen: bool) {
         let (runtime, _input) = ServerRuntime::new_embedded(
             properties.clone(),
             EmbeddedRuntimeOptions {
-                topology: AuthorityTopology::ListenServer,
                 transport: TransportMode::Listen,
                 local_session: Some(LocalSessionProfile::new(EMBEDDED_OWNER, "plan33-host")),
             },

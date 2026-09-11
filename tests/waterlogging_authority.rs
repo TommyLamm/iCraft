@@ -1,4 +1,4 @@
-use icraft::authority::contract::{AuthorityTopology, SessionContract};
+use icraft::authority::contract::SessionContract;
 use icraft::authority::{AuthorityConfig, AuthorityCore};
 use icraft::dimension::Dimension;
 use icraft::inventory::Item;
@@ -47,8 +47,8 @@ fn request(
     }
 }
 
-fn setup_core(topology: AuthorityTopology) -> AuthorityCore {
-    let mut core = AuthorityCore::new(AuthorityConfig::default(), topology);
+fn setup_core() -> AuthorityCore {
+    let mut core = AuthorityCore::new(AuthorityConfig::default());
     core.register_session(SessionContract::new(
         SESSION_ID,
         "water",
@@ -83,7 +83,7 @@ fn source(core: &AuthorityCore) -> SlotRefWire {
 
 #[test]
 fn bucket_place_pickup_is_atomic_and_duplicate_idempotent() {
-    let mut core = setup_core(AuthorityTopology::Singleplayer);
+    let mut core = setup_core();
     let original_metadata = {
         let slot = core.session_mut(SESSION_ID).unwrap().gameplay.inventory[0]
             .as_mut()
@@ -155,51 +155,45 @@ fn bucket_place_pickup_is_atomic_and_duplicate_idempotent() {
 }
 
 #[test]
-fn fluid_mutation_projection_is_topology_independent_and_stale_is_noop() {
-    for topology in [
-        AuthorityTopology::Singleplayer,
-        AuthorityTopology::ListenServer,
-        AuthorityTopology::Dedicated,
-    ] {
-        let mut core = setup_core(topology);
-        let place = request(&core, 1, 1, source(&core));
-        let response = core.submit_request(place.clone());
-        assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
-        let snapshot = core.tick();
-        let mutation = snapshot
-            .mutations
-            .iter()
-            .find(|mutation| mutation.position == (8, 80, 8))
-            .expect("fluid mutation must be projected through the fixed tick");
-        assert_eq!(mutation.block, BlockType::OakSlab.to_wire());
-        assert_eq!(mutation.raw_fluid, FLUID_WATERLOGGED_BIT);
+fn fluid_mutation_projection_is_stale_noop() {
+    let mut core = setup_core();
+    let place = request(&core, 1, 1, source(&core));
+    let response = core.submit_request(place.clone());
+    assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+    let snapshot = core.tick();
+    let mutation = snapshot
+        .mutations
+        .iter()
+        .find(|mutation| mutation.position == (8, 80, 8))
+        .expect("fluid mutation must be projected through the fixed tick");
+    assert_eq!(mutation.block, BlockType::OakSlab.to_wire());
+    assert_eq!(mutation.raw_fluid, FLUID_WATERLOGGED_BIT);
 
-        let stale = request(&core, 2, 0, source(&core));
-        let stale_response = core.submit_request(stale);
-        assert!(matches!(
-            stale_response.outcome,
-            GameplayOutcome::Rejected {
-                reason: icraft::network::protocol::RejectReason::OutOfOrder
-            }
-        ));
-        assert!(core
-            .world_ref(Dimension::Overworld)
+    let stale = request(&core, 2, 0, source(&core));
+    let stale_response = core.submit_request(stale);
+    assert!(matches!(
+        stale_response.outcome,
+        GameplayOutcome::Rejected {
+            reason: icraft::network::protocol::RejectReason::OutOfOrder
+        }
+    ));
+    assert!(core
+        .world_ref(Dimension::Overworld)
+        .unwrap()
+        .chunks
+        .is_waterlogged(8, 80, 8));
+    assert_eq!(
+        core.session(SESSION_ID).unwrap().gameplay.inventory[0]
             .unwrap()
-            .chunks
-            .is_waterlogged(8, 80, 8));
-        assert_eq!(
-            core.session(SESSION_ID).unwrap().gameplay.inventory[0]
-                .unwrap()
-                .item
-                .item,
-            Item::Bucket.to_u32()
-        );
-    }
+            .item
+            .item,
+        Item::Bucket.to_u32()
+    );
 }
 
 #[test]
 fn malformed_face_is_rejected_before_world_or_inventory_mutation() {
-    let mut core = setup_core(AuthorityTopology::Dedicated);
+    let mut core = setup_core();
     let mut malformed = request(&core, 9, 1, source(&core));
     if let GameplayOperation::FluidUse { face, .. } = &mut malformed.operation {
         *face = [i8::MIN, 0, 0];
@@ -227,7 +221,7 @@ fn malformed_face_is_rejected_before_world_or_inventory_mutation() {
 
 #[test]
 fn bucket_does_not_replace_passable_plant_at_adjacent_face() {
-    let mut core = setup_core(AuthorityTopology::Dedicated);
+    let mut core = setup_core();
     core.with_world(Dimension::Overworld, |world| {
         world.set_block(8, 80, 8, BlockType::Stone, 0).unwrap();
         world.set_block(9, 80, 8, BlockType::Dandelion, 0).unwrap();
@@ -260,7 +254,7 @@ fn bucket_does_not_replace_passable_plant_at_adjacent_face() {
 
 #[test]
 fn raw_fluid_survives_v3_save_and_packet_roundtrip() {
-    let mut core = setup_core(AuthorityTopology::Singleplayer);
+    let mut core = setup_core();
     core.with_world(Dimension::Overworld, |world| {
         world.chunks.set_waterlogged(8, 80, 8, true);
         let chunk = world.chunks.chunks.get(&(0, 0)).unwrap();

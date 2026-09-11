@@ -1,4 +1,3 @@
-use crate::block_entity::BlockEntity;
 use crate::chunk_manager::ChunkManager;
 use crate::dimension::WorldHeight;
 use crate::entity::EntityType;
@@ -7,19 +6,6 @@ use crate::world::{section_and_local_y_to_world_y, BlockType, CHUNK_DEPTH, CHUNK
 use glam::Vec3;
 use std::collections::BTreeSet;
 
-/// Why a random-tick (or leftover helper) asked to change a block.
-/// Authority applies `pos` / `new_block` / `new_state` through
-/// `ServerWorld::set_block` and does not branch on this tag.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum MutationCause {
-    PlayerPlace { player_id: Option<u64> },
-    PlayerBreak { player_id: Option<u64> },
-    Redstone,
-    Explosion,
-    System,
-}
-
 /// Block change requested by random ticks. Applied by `ServerWorld`, not by
 /// leftover presentation `apply_batch`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,10 +13,6 @@ pub struct BlockMutationRequest {
     pub pos: (i32, i32, i32),
     pub new_block: BlockType,
     pub new_state: u8,
-    #[allow(dead_code)]
-    pub new_entity: Option<BlockEntity>,
-    #[allow(dead_code)]
-    pub cause: MutationCause,
 }
 
 /// Statistics for random tick sampling per frame.
@@ -104,8 +86,6 @@ where
                     pos,
                     new_block: BlockType::Dirt,
                     new_state: 0,
-                    new_entity: None,
-                    cause: MutationCause::System,
                 });
             }
 
@@ -116,8 +96,6 @@ where
                         pos,
                         new_block: BlockType::Farmland,
                         new_state: moisture + 1,
-                        new_entity: None,
-                        cause: MutationCause::System,
                     });
                 }
             } else {
@@ -126,8 +104,6 @@ where
                         pos,
                         new_block: BlockType::Farmland,
                         new_state: moisture - 1,
-                        new_entity: None,
-                        cause: MutationCause::System,
                     });
                 } else if block_above == BlockType::Air {
                     // Dry farmland with no crop -> decay to Dirt
@@ -135,8 +111,6 @@ where
                         pos,
                         new_block: BlockType::Dirt,
                         new_state: 0,
-                        new_entity: None,
-                        cause: MutationCause::System,
                     });
                 }
             }
@@ -151,8 +125,6 @@ where
                     pos,
                     new_block: BlockType::Air,
                     new_state: 0,
-                    new_entity: None,
-                    cause: MutationCause::System,
                 });
             }
 
@@ -166,8 +138,6 @@ where
                         pos,
                         new_block: block,
                         new_state: age + 1,
-                        new_entity: None,
-                        cause: MutationCause::System,
                     });
                 }
             }
@@ -180,8 +150,6 @@ where
                     pos,
                     new_block: BlockType::Dirt,
                     new_state: 0,
-                    new_entity: None,
-                    cause: MutationCause::System,
                 });
             }
             // Grass spread to adjacent dirt block
@@ -198,8 +166,6 @@ where
                             pos: target_pos,
                             new_block: BlockType::Grass,
                             new_state: 0,
-                            new_entity: None,
-                            cause: MutationCause::System,
                         });
                     }
                 }
@@ -231,8 +197,6 @@ where
                     pos,
                     new_block: BlockType::Air,
                     new_state: 0,
-                    new_entity: None,
-                    cause: MutationCause::System,
                 })
             } else {
                 None
@@ -251,8 +215,6 @@ where
                         pos,
                         new_block: log_type,
                         new_state: 0,
-                        new_entity: None,
-                        cause: MutationCause::System,
                     });
                 }
             }
@@ -268,8 +230,6 @@ where
                     pos,
                     new_block: BlockType::Water,
                     new_state: 0,
-                    new_entity: None,
-                    cause: MutationCause::System,
                 })
             } else {
                 None
@@ -282,8 +242,6 @@ where
                     pos,
                     new_block: BlockType::Air,
                     new_state: 0,
-                    new_entity: None,
-                    cause: MutationCause::System,
                 })
             } else {
                 None
@@ -295,8 +253,6 @@ where
                     pos,
                     new_block: BlockType::Air,
                     new_state: 0,
-                    new_entity: None,
-                    cause: MutationCause::System,
                 })
             } else {
                 None
@@ -309,8 +265,6 @@ where
                     pos,
                     new_block: BlockType::Air,
                     new_state: 0,
-                    new_entity: None,
-                    cause: MutationCause::System,
                 })
             } else {
                 None
@@ -342,8 +296,6 @@ where
             pos: (x, y + 1, z),
             new_block: block,
             new_state: 0,
-            new_entity: None,
-            cause: MutationCause::System,
         })
     } else {
         None

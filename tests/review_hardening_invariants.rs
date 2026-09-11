@@ -6,9 +6,7 @@
 mod common;
 
 use common::tcp_harness::HeldLoopback;
-use icraft::authority::contract::{
-    AuthorityTopology, SessionContract, SessionGameplayState, SessionInventorySlot,
-};
+use icraft::authority::contract::{SessionContract, SessionGameplayState, SessionInventorySlot};
 use icraft::authority::{AuthorityConfig, AuthorityCore};
 use icraft::chunk_manager::ChunkManager;
 use icraft::dimension::Dimension;
@@ -26,7 +24,7 @@ const SAM: u64 = 8;
 const POSITION: [f32; 3] = [8.0, 80.0, 8.0];
 
 fn core() -> AuthorityCore {
-    AuthorityCore::new(AuthorityConfig::default(), AuthorityTopology::Dedicated)
+    AuthorityCore::new(AuthorityConfig::default())
 }
 
 fn register(core: &mut AuthorityCore, id: u64, name: &str, dimension: Dimension) {

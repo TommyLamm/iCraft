@@ -1,4 +1,3 @@
-use crate::authority::contract::AuthorityTopology;
 use crate::camera::{Camera, CameraUniform};
 use crate::chunk_manager::{
     mark_block_mesh_dependencies, mark_section_mesh_dependencies, surrounding_chunk_coords,
@@ -4067,14 +4066,6 @@ impl State {
     /// this is set; the runtime is the only authority owner.
     pub(crate) fn has_in_process_runtime(&self) -> bool {
         self.embedded_runtime.is_some()
-    }
-
-    /// Return the authority topology without exposing transport internals to
-    /// presentation/input callers.
-    pub fn authority_topology(&self) -> Option<AuthorityTopology> {
-        self.embedded_runtime
-            .as_ref()
-            .map(EmbeddedRuntimeBridge::topology)
     }
 
     /// Advance the in-process authority by one fixed 20 Hz tick.  Dedicated

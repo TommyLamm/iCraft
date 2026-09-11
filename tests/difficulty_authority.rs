@@ -2,7 +2,6 @@ mod common;
 
 use common::tcp_harness::{temp_world, HeldLoopback};
 use glam::Vec3;
-use icraft::authority::contract::AuthorityTopology;
 use icraft::entity::EntityType;
 use icraft::game_rules::{Difficulty, WorldRules, WorldType};
 use icraft::server_runtime::{
@@ -111,7 +110,6 @@ fn difficulty_persists_through_server_properties_and_embedded_dedicated_parity()
     let (mut embedded, _) = ServerRuntime::new_embedded(
         persistence_props.clone(),
         EmbeddedRuntimeOptions {
-            topology: AuthorityTopology::ListenServer,
             transport: TransportMode::Disabled,
             local_session: Some(LocalSessionProfile::new(3, "embedded")),
         },
@@ -145,7 +143,6 @@ fn difficulty_persists_through_server_properties_and_embedded_dedicated_parity()
     let dedicated_dir = dedicated_props.world_dir.clone();
     let _port = reserved.release();
     let mut dedicated = ServerRuntime::new(dedicated_props).expect("dedicated runtime");
-    assert_eq!(dedicated.authority.topology, AuthorityTopology::Dedicated);
     assert_eq!(
         dedicated.authority.world_mut_active().difficulty,
         Difficulty::Hard

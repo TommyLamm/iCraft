@@ -7,8 +7,8 @@
 //! network thread only transports packets into the bounded event channel.
 
 use crate::authority::contract::{
-    AuthoritySnapshot, AuthorityTopology, SessionContract, SessionGameplayState,
-    SessionInventorySlot, SESSION_INVENTORY_SLOTS,
+    AuthoritySnapshot, SessionContract, SessionGameplayState, SessionInventorySlot,
+    SESSION_INVENTORY_SLOTS,
 };
 use crate::authority::interest::{
     capped_spawn_residency, residency_hysteresis_chunks, InterestKind, InterestSet,
@@ -49,7 +49,6 @@ mod session_sync;
 pub(super) const TICK_INTERVAL: Duration = Duration::from_millis(50);
 pub(super) const MAX_INBOUND_EVENTS_PER_TICK: usize = 512;
 pub(super) const WORLD_BOUND: f32 = 30_000_000.0;
-pub(super) const PLAYER_REACH: f32 = 8.0;
 pub(super) const AUTOSAVE_INTERVAL_TICKS: u64 = 6_000;
 pub(super) const HOST_COMMAND_QUEUE_CAPACITY: usize = 1_024;
 pub(super) const HOST_EVENT_QUEUE_CAPACITY: usize = 1_024;
@@ -129,7 +128,6 @@ impl LocalSessionProfile {
 /// to consume the runtime output yet.
 #[derive(Debug, Clone)]
 pub struct EmbeddedRuntimeOptions {
-    pub topology: AuthorityTopology,
     pub transport: TransportMode,
     pub local_session: Option<LocalSessionProfile>,
 }
@@ -137,7 +135,6 @@ pub struct EmbeddedRuntimeOptions {
 impl EmbeddedRuntimeOptions {
     pub fn singleplayer(local_session: LocalSessionProfile) -> Self {
         Self {
-            topology: AuthorityTopology::Singleplayer,
             transport: TransportMode::Disabled,
             local_session: Some(local_session),
         }
@@ -145,7 +142,6 @@ impl EmbeddedRuntimeOptions {
 
     pub fn listen(local_session: LocalSessionProfile) -> Self {
         Self {
-            topology: AuthorityTopology::ListenServer,
             transport: TransportMode::Listen,
             local_session: Some(local_session),
         }
@@ -934,7 +930,6 @@ impl ServerRuntime {
         let (runtime, _input) = Self::construct(
             properties,
             EmbeddedRuntimeOptions {
-                topology: AuthorityTopology::Dedicated,
                 transport: TransportMode::Listen,
                 local_session: None,
             },
@@ -1013,18 +1008,15 @@ impl ServerRuntime {
                 (Some(sender), Some(receiver))
             }
         };
-        let mut authority = AuthorityCore::new(
-            AuthorityConfig {
-                seed: level.seed,
-                dimension: level.spawn_dimension,
-                world_type: level.world_type,
-                generate_structures: level.generate_structures,
-                rules: level.rules,
-                difficulty,
-                render_distance: properties.simulation_distance as i32,
-            },
-            options.topology,
-        );
+        let mut authority = AuthorityCore::new(AuthorityConfig {
+            seed: level.seed,
+            dimension: level.spawn_dimension,
+            world_type: level.world_type,
+            generate_structures: level.generate_structures,
+            rules: level.rules,
+            difficulty,
+            render_distance: properties.simulation_distance as i32,
+        });
         authority.world_mut_active().time = level.time;
         let mut runtime = Self {
             properties,
@@ -1626,12 +1618,6 @@ pub(super) fn apply_gameplay_to_player_data(data: &mut PlayerData, gameplay: Ses
     inventory.dragged = gameplay.cursor.and_then(|s| s.to_stack());
     inventory.selected = usize::from(gameplay.selected_hotbar_slot.min(8));
     data.inventory = crate::save::InventoryData::from(&inventory);
-}
-
-fn within_reach(session: &PlayerSessionState, x: i32, y: i32, z: i32) -> bool {
-    let position = Vec3::from_array(session.data.position);
-    position.distance_squared(Vec3::new(x as f32, y as f32, z as f32))
-        <= PLAYER_REACH * PLAYER_REACH
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -2457,6 +2443,7 @@ mod tests {
         runtime.handle_join(1, "alex".into()).unwrap();
         runtime.handle_join(2, "steve".into()).unwrap();
         let before = runtime.authority.world().get_block(8, 80, 8);
+        let revision_before = runtime.authority.current_revision();
         let first = runtime
             .submit_request(
                 1,
@@ -2515,7 +2502,9 @@ mod tests {
                 reason: RejectReason::InvalidState
             }
         ));
-        assert!(second.server_sequence > first.server_sequence);
+        assert_eq!(runtime.authority.current_revision(), revision_before);
+        assert_eq!(first.server_sequence, revision_before);
+        assert_eq!(second.server_sequence, revision_before);
         assert_eq!(runtime.authority.world().get_block(8, 80, 8), before);
         let _ = runtime.shutdown();
         let _ = fs::remove_dir_all(&runtime.world_dir);
@@ -2578,9 +2567,9 @@ mod tests {
                 {
                     states += 1;
                 }
-                RuntimePresentationEvent::EntityDespawn {
-                    entity_id: id, ..
-                } if *id == entity_id => {
+                RuntimePresentationEvent::EntityDespawn { entity_id: id, .. }
+                    if *id == entity_id =>
+                {
                     despawns += 1;
                 }
                 _ => {}
@@ -2699,10 +2688,7 @@ mod tests {
         let player = runtime.players.get(&1).unwrap();
         assert_eq!(player.interest.dimension, runtime.level.spawn_dimension);
         let authority_session = runtime.authority.session(1).unwrap();
-        assert_eq!(
-            authority_session.dimension,
-            player.interest.dimension as u8
-        );
+        assert_eq!(authority_session.dimension, player.interest.dimension as u8);
         assert_eq!(authority_session.position, player.data.position);
         assert!(!authority_session.gameplay.is_dead);
         assert_eq!(
@@ -3042,7 +3028,6 @@ mod tests {
         let (mut runtime, _input) = ServerRuntime::new_embedded(
             properties,
             EmbeddedRuntimeOptions {
-                topology: AuthorityTopology::Dedicated,
                 transport: TransportMode::Disabled,
                 local_session: None,
             },

@@ -4,7 +4,7 @@ use common::tcp_harness::{
     drive_until, gameplay_request as request, held, loopback_properties, session_slot as slot,
     temp_world, wait_for_response, HeldLoopback, TcpClient,
 };
-use icraft::authority::contract::{AuthorityTopology, SessionGameplayState};
+use icraft::authority::contract::SessionGameplayState;
 use icraft::block_entity::BlockEntity;
 use icraft::dimension::Dimension;
 use icraft::entity::EntityType;
@@ -206,11 +206,6 @@ fn run_tcp_travel(label: &str, listen: bool) {
     let address = format!("{}:{}", props.bind, props.port);
     let _port = reserved.release();
     let options = EmbeddedRuntimeOptions {
-        topology: if listen {
-            AuthorityTopology::ListenServer
-        } else {
-            AuthorityTopology::Dedicated
-        },
         transport: TransportMode::Listen,
         local_session: listen.then(|| LocalSessionProfile::new(LOCAL_ID, "plan32-host")),
     };
@@ -395,7 +390,6 @@ fn dedicated_tcp_combat_completes_generated_dragon_lifecycle() {
     let (mut runtime, _) = ServerRuntime::new_embedded(
         props.clone(),
         EmbeddedRuntimeOptions {
-            topology: AuthorityTopology::Dedicated,
             transport: TransportMode::Listen,
             local_session: None,
         },
@@ -700,7 +694,6 @@ fn generated_end_city_loot_is_lazy_revisioned_and_persistent() {
     let (mut runtime, _) = ServerRuntime::new_embedded(
         props.clone(),
         EmbeddedRuntimeOptions {
-            topology: AuthorityTopology::Dedicated,
             transport: TransportMode::Disabled,
             local_session: None,
         },
@@ -761,7 +754,6 @@ fn generated_end_city_loot_is_lazy_revisioned_and_persistent() {
     let (mut restored, _) = ServerRuntime::new_embedded(
         props.clone(),
         EmbeddedRuntimeOptions {
-            topology: AuthorityTopology::Dedicated,
             transport: TransportMode::Disabled,
             local_session: None,
         },

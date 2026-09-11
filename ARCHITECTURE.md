@@ -73,7 +73,8 @@ All server paths -> AuthorityCore -> BTreeMap<Dimension, ServerWorld>
 
 `PresentationTopology` is `Embedded` or `JoinClient`, derived from role
 (Join wins) plus in-process runtime. Non-join launches are Embedded.
-There is no `LegacyOwner` and no `is_authoritative()`.
+There is no `LegacyOwner`, no `is_authoritative()`, and no
+`AuthorityTopology`. Listen vs embedded is `TransportMode::{Disabled, Listen}`.
 
 ## Ownership
 
@@ -161,7 +162,7 @@ input
 
 Leftover renderer-owned world simulation is gone. World mutation belongs in
 `AuthorityCore` / `ServerWorld`. Desktop `State` has no `SaveManager` and no
-presentation mutation index. Random ticks emit `world_tick::BlockMutationRequest`,
+presentation mutation index. Random ticks emit `world_tick::BlockMutationRequest` `{ pos, new_block, new_state }`,
 which `ServerWorld` applies; durable writes stay on `ServerRuntime`.
 
 ## Tick vs frame

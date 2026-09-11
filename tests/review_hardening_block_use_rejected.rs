@@ -5,7 +5,7 @@ use common::tcp_harness::{
     wait_for_response, HeldLoopback, TcpClient,
 };
 use icraft::authority::contract::{
-    AuthorityTopology, SessionGameplayState, SessionInventorySlot, SESSION_INVENTORY_SLOTS,
+    SessionGameplayState, SessionInventorySlot, SESSION_INVENTORY_SLOTS,
 };
 use icraft::entity::EntityType;
 use icraft::inventory::{Item, ItemStack};
@@ -58,11 +58,7 @@ fn inventory_wire(
 }
 
 fn rejected_place(block: BlockType) -> GameplayOperation {
-    let held = SessionSlotWire::new(
-        ItemWire::from_stack(&ItemStack::new(Item::Stone, 1)),
-        0,
-        0,
-    );
+    let held = SessionSlotWire::new(ItemWire::from_stack(&ItemStack::new(Item::Stone, 1)), 0, 0);
     GameplayOperation::BlockAction {
         action: BlockActionKind::Place,
         x: TARGET.0,
@@ -132,7 +128,6 @@ fn embedded_block_use_diamond_ore_is_unsupported_and_preserves_world() {
     let (mut runtime, input) = ServerRuntime::new_embedded(
         properties,
         EmbeddedRuntimeOptions {
-            topology: AuthorityTopology::Singleplayer,
             transport: TransportMode::Disabled,
             local_session: Some(LocalSessionProfile::new(OWNER_ID, "plan01-owner")),
         },
@@ -200,7 +195,6 @@ fn embedded_block_use_air_cannot_clear_chest() {
     let (mut runtime, _input) = ServerRuntime::new_embedded(
         properties,
         EmbeddedRuntimeOptions {
-            topology: AuthorityTopology::Singleplayer,
             transport: TransportMode::Disabled,
             local_session: Some(LocalSessionProfile::new(OWNER_ID, "plan01-air")),
         },
@@ -214,13 +208,7 @@ fn embedded_block_use_air_cannot_clear_chest() {
     let response = runtime
         .submit_request(
             OWNER_ID,
-            request(
-                &runtime,
-                OWNER_ID,
-                2,
-                1,
-                rejected_place(BlockType::Air),
-            ),
+            request(&runtime, OWNER_ID, 2, 1, rejected_place(BlockType::Air)),
         )
         .expect("direct rejected BlockAction");
     assert_block_action_rejected(
