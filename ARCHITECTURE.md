@@ -28,10 +28,10 @@ the desktop crate can re-export them. `loot`, `voxel_shape`, `worldgen`,
 `pub` because desktop `State` and `ServerWorld` expose `RecipeManager`.
 `sim_harness` / `final_acceptance` / `microbench` compile only under
 `cfg(test)` or feature `harness`. Desktop `--microbench` is `src/main.rs`'s
-own `mod`. `dynamic_resolution` is not in the default desktop compile (no
-live upscale pass; `cfg(test)` / `harness` only). Leftover renderer-owned
-world simulation (`legacy_sim` / `legacy_interaction` / `legacy_systems`)
-and feature `legacy_owner` are gone.
+own `mod`. Settings keys `dynamic_resolution` and `render_scale` were
+removed; leftover lines in old `settings.txt` are ignored on load.
+Leftover renderer-owned world simulation (`legacy_sim` /
+`legacy_interaction` / `legacy_systems`) and feature `legacy_owner` are gone.
 
 New gameplay belongs in `AuthorityCore` / `ServerWorld`. Start in the narrow
 domain module, then check projection, save, and protocol. Do not add

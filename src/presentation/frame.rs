@@ -3497,22 +3497,6 @@ impl State {
                 timestamp_writes: None,
             });
 
-            // Viewport-only scaling renders the world into the surface's
-            // top-left corner; without an offscreen target and upscale pass it
-            // is not dynamic resolution. Keep world rendering native-sized
-            // until that complete path exists.
-            let effective_scale = 1.0_f32;
-            if effective_scale < 0.999 {
-                render_pass.set_viewport(
-                    0.0,
-                    0.0,
-                    (self.size.width as f32 * effective_scale).max(1.0),
-                    (self.size.height as f32 * effective_scale).max(1.0),
-                    0.0,
-                    1.0,
-                );
-            }
-
             // Draw Skybox first
             if self.gpu_timestamps_inside_passes {
                 if let Some(qs) = &self.gpu_timestamp_query_set {
@@ -3758,16 +3742,6 @@ impl State {
                 if let Some(qs) = &self.gpu_timestamp_query_set {
                     render_pass.write_timestamp(qs, 12);
                 }
-            }
-            if effective_scale < 0.999 {
-                render_pass.set_viewport(
-                    0.0,
-                    0.0,
-                    self.size.width as f32,
-                    self.size.height as f32,
-                    0.0,
-                    1.0,
-                );
             }
             if !self.is_paused {
                 // 1. Draw Colored UI (slot/panel backgrounds). Backgrounds go

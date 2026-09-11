@@ -19,8 +19,6 @@ pub use icraft::{
 mod app;
 mod audio;
 mod camera;
-#[cfg(any(test, feature = "harness"))]
-mod dynamic_resolution;
 mod gpu_frame_resources;
 mod hand_renderer;
 mod menu;

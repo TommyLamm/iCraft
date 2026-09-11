@@ -122,8 +122,6 @@ pub struct GameSettings {
     pub mp_server_address: String,
     pub mp_join_port: String,
     pub mp_username: String,
-    pub render_scale: f32,
-    pub dynamic_resolution: bool,
     pub entity_distance_scale: f32,
     pub accessibility: AccessibilitySettings,
     pub resource_packs: Vec<String>,
@@ -149,8 +147,6 @@ impl Default for GameSettings {
             mp_server_address: "127.0.0.1".to_string(),
             mp_join_port: "25565".to_string(),
             mp_username: "PLAYER".to_string(),
-            render_scale: 1.0,
-            dynamic_resolution: false,
             entity_distance_scale: 1.0,
             accessibility: AccessibilitySettings::default(),
             resource_packs: Vec::new(),
@@ -243,15 +239,6 @@ impl GameSettings {
                 "mp_server_address" => self.mp_server_address = value.to_string(),
                 "mp_join_port" => self.mp_join_port = value.to_string(),
                 "mp_username" => self.mp_username = value.to_string(),
-                "render_scale" => {
-                    self.render_scale = value
-                        .parse::<f32>()
-                        .unwrap_or(self.render_scale)
-                        .clamp(0.5, 1.0)
-                }
-                "dynamic_resolution" => {
-                    self.dynamic_resolution = parse_bool(value, self.dynamic_resolution)
-                }
                 "entity_distance_scale" => {
                     self.entity_distance_scale = value
                         .parse::<f32>()
@@ -453,8 +440,6 @@ impl GameSettings {
                 "mp_server_address:{}\n",
                 "mp_join_port:{}\n",
                 "mp_username:{}\n",
-                "render_scale:{}\n",
-                "dynamic_resolution:{}\n",
                 "entity_distance_scale:{}\n",
                 "ui_scale:{}\n",
                 "chat_scale:{}\n",
@@ -498,8 +483,6 @@ impl GameSettings {
             settings.mp_server_address,
             settings.mp_join_port,
             settings.mp_username,
-            settings.render_scale,
-            settings.dynamic_resolution,
             settings.entity_distance_scale,
             settings.accessibility.ui_scale,
             settings.accessibility.chat_scale,
@@ -4462,6 +4445,26 @@ mod tests {
         );
 
         assert!((settings.weather_volume - 0.4).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn leftover_dynamic_resolution_settings_keys_are_ignored() {
+        let settings = GameSettings::from_file_contents(concat!(
+            "fov:90\n",
+            "render_scale:0.5\n",
+            "dynamic_resolution:true\n",
+            "entity_distance_scale:1.5\n",
+            "unknown_future_key:1\n",
+        ));
+
+        assert_eq!(settings.fov, 90.0);
+        assert!((settings.entity_distance_scale - 1.5).abs() < f32::EPSILON);
+
+        let contents = settings.to_file_contents();
+        assert!(!contents.contains("render_scale"));
+        assert!(!contents.contains("dynamic_resolution"));
+        assert!(contents.contains("entity_distance_scale:1.5\n"));
+        assert!(contents.contains("fov:90\n"));
     }
 
     #[test]
