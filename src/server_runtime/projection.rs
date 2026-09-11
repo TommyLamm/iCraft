@@ -832,6 +832,9 @@ impl ServerRuntime {
                 }
             }
         }
+        // `session_updates` is a dirty subset: absence means this session's
+        // gameplay.revision did not change this tick. Keep the last projected
+        // state. The dimension/revision gate below is unchanged.
         for update in &snapshot.session_updates {
             let Some(dimension) = Dimension::from_wire(update.dimension) else {
                 continue;

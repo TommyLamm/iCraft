@@ -1,6 +1,4 @@
-use super::contract::{
-    AuthoritySnapshot, SessionGameplayUpdate, SessionInventorySlot, WorldMutation, FIXED_TICK_HZ,
-};
+use super::contract::{AuthoritySnapshot, SessionInventorySlot, WorldMutation, FIXED_TICK_HZ};
 use super::{stack_from_slot, AuthorityCore};
 use crate::block_entity::BlockEntity;
 use crate::dimension::Dimension;
@@ -25,10 +23,14 @@ impl AuthorityCore {
             self.tick_mining(dimension);
             self.tick_portal_travel(dimension);
             let players: Vec<(PlayerId, [f32; 3])> = self
-                .sessions
-                .values()
-                .filter(|session| session.dimension == dimension as u8)
-                .map(|session| (session.id, session.position))
+                .session_ids_in_dimension(dimension)
+                .iter()
+                .copied()
+                .filter_map(|id| {
+                    self.sessions
+                        .get(&id)
+                        .map(|session| (session.id, session.position))
+                })
                 .collect();
             let world_snapshot = self
                 .world_mut(dimension)
@@ -95,35 +97,25 @@ impl AuthorityCore {
         // Restore the compatibility view for State / ServerRuntime / save.
         self.activate_dimension(active_before_tick);
 
+        let session_updates = self.take_dirty_session_updates();
         let snapshot = AuthoritySnapshot {
             tick: self.fixed_tick,
             revision,
             checksum: aggregate_dimension_checksums(&checksums),
             mutations,
-            session_updates: self
-                .sessions
-                .values()
-                .map(|session| SessionGameplayUpdate {
-                    player_id: session.id,
-                    dimension: session.dimension,
-                    state: session.gameplay,
-                })
-                .collect(),
+            session_updates,
         };
-        self.last_snapshot = snapshot.clone();
-        snapshot
+        // Replace rather than cloning the previous snapshot's session vector.
+        // The returned value clones only this tick's dirty session_updates.
+        let _previous = std::mem::replace(&mut self.last_snapshot, snapshot);
+        self.last_snapshot.clone()
     }
 
     fn tick_session_domains(&mut self, dimension: Dimension) {
         use crate::authority::transactions::{self, BrewTick, WorkstationContext};
         use crate::inventory::GameMode;
 
-        let ids: Vec<_> = self
-            .sessions
-            .values()
-            .filter(|session| session.dimension == dimension as u8)
-            .map(|session| session.id)
-            .collect();
+        let ids: Vec<_> = self.session_ids_in_dimension(dimension).to_vec();
         for id in ids {
             let Some((position, game_mode, original)) = self
                 .sessions
@@ -194,16 +186,12 @@ impl AuthorityCore {
                 // mutations advance the anti-stale baseline; fixed-tick
                 // presentation progress advances only gameplay.revision.
             }
+            self.mark_session_update(id);
         }
     }
 
     fn tick_mining(&mut self, dimension: Dimension) {
-        let ids: Vec<_> = self
-            .sessions
-            .values()
-            .filter(|session| session.dimension == dimension as u8)
-            .map(|session| session.id)
-            .collect();
+        let ids: Vec<_> = self.session_ids_in_dimension(dimension).to_vec();
         for id in ids {
             let Some((position, game_mode, progress)) = self
                 .sessions
@@ -315,6 +303,7 @@ impl AuthorityCore {
                     }
                     session.gameplay.revision = revision;
                 }
+                self.mark_session_update(id);
             }
         }
     }
@@ -334,6 +323,7 @@ impl AuthorityCore {
         if let Some(session) = self.sessions.get_mut(&id) {
             session.gameplay.revision = revision;
         }
+        self.mark_session_update(id);
     }
 
     pub(crate) fn commit_mining_break(
@@ -490,6 +480,7 @@ impl AuthorityCore {
             session.gameplay.revision = mutation.revision;
             session.last_revision = mutation.revision;
         }
+        self.mark_session_update(id);
         true
     }
 }

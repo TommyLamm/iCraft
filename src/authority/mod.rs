@@ -86,6 +86,12 @@ pub struct AuthorityCore {
     /// `BTreeMap` order (`Dimension` as `u8`) so tick/save/checksum stay stable.
     pub(crate) worlds: BTreeMap<Dimension, ServerWorld>,
     pub(crate) sessions: BTreeMap<PlayerId, SessionContract>,
+    /// Player ids grouped by session dimension. Tick phases look this up instead
+    /// of filtering the full session table once per loaded dimension.
+    pub(crate) sessions_by_dimension: BTreeMap<u8, Vec<PlayerId>>,
+    /// Sessions whose `gameplay.revision` (or join/dimension identity) changed
+    /// since the last published snapshot. `tick` drains this into `session_updates`.
+    pub(crate) dirty_session_ids: BTreeSet<PlayerId>,
     pub(crate) last_snapshot: AuthoritySnapshot,
     pub(crate) fixed_tick: u64,
     /// Mutations emitted between fixed ticks (for example an authenticated
@@ -119,6 +125,8 @@ impl AuthorityCore {
             config,
             worlds,
             sessions: BTreeMap::new(),
+            sessions_by_dimension: BTreeMap::new(),
+            dirty_session_ids: BTreeSet::new(),
             last_snapshot: AuthoritySnapshot::empty(),
             fixed_tick: 0,
             pending_mutations: Vec::new(),
@@ -287,12 +295,18 @@ impl AuthorityCore {
         self.ensure_dimension(target);
         self.activate_dimension(target);
         let revision = self.current_revision();
-        let Some(session) = self.sessions.get_mut(&id) else {
-            return false;
+        let previous_dimension = {
+            let Some(session) = self.sessions.get_mut(&id) else {
+                return false;
+            };
+            let previous_dimension = session.dimension;
+            session.dimension = target as u8;
+            session.last_revision = revision;
+            session.gameplay.revision = revision;
+            previous_dimension
         };
-        session.dimension = target as u8;
-        session.last_revision = revision;
-        session.gameplay.revision = revision;
+        self.reindex_session_dimension(id, previous_dimension, target as u8);
+        self.mark_session_update(id);
         true
     }
 
@@ -333,7 +347,11 @@ impl AuthorityCore {
             return Err(RejectReason::InvalidDimension);
         };
         self.ensure_dimension(dimension);
-        self.sessions.insert(session.id, session);
+        let id = session.id;
+        let dimension_wire = session.dimension;
+        self.sessions.insert(id, session);
+        self.index_insert_session(dimension_wire, id);
+        self.mark_session_update(id);
         Ok(())
     }
 
@@ -345,7 +363,10 @@ impl AuthorityCore {
         if let Some(dimension) = dimension {
             self.cleanup_session_lifecycle(id, dimension);
         }
-        self.sessions.remove(&id)
+        let session = self.sessions.remove(&id)?;
+        self.index_remove_session(session.dimension, id);
+        self.dirty_session_ids.remove(&id);
+        Some(session)
     }
 
     pub fn take_pending_dimension_transfers(&mut self) -> Vec<DimensionTransferIntent> {
@@ -362,6 +383,58 @@ impl AuthorityCore {
 
     pub fn sessions(&self) -> impl Iterator<Item = &SessionContract> {
         self.sessions.values()
+    }
+
+    fn index_insert_session(&mut self, dimension: u8, id: PlayerId) {
+        let ids = self.sessions_by_dimension.entry(dimension).or_default();
+        match ids.binary_search(&id) {
+            Ok(_) => {}
+            Err(index) => ids.insert(index, id),
+        }
+    }
+
+    fn index_remove_session(&mut self, dimension: u8, id: PlayerId) {
+        let Some(ids) = self.sessions_by_dimension.get_mut(&dimension) else {
+            return;
+        };
+        if let Ok(index) = ids.binary_search(&id) {
+            ids.remove(index);
+        }
+        if ids.is_empty() {
+            self.sessions_by_dimension.remove(&dimension);
+        }
+    }
+
+    fn reindex_session_dimension(&mut self, id: PlayerId, from: u8, to: u8) {
+        if from == to {
+            return;
+        }
+        self.index_remove_session(from, id);
+        self.index_insert_session(to, id);
+    }
+
+    pub(crate) fn session_ids_in_dimension(&self, dimension: Dimension) -> &[PlayerId] {
+        self.sessions_by_dimension
+            .get(&(dimension as u8))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub(crate) fn mark_session_update(&mut self, id: PlayerId) {
+        self.dirty_session_ids.insert(id);
+    }
+
+    fn take_dirty_session_updates(&mut self) -> Vec<SessionGameplayUpdate> {
+        std::mem::take(&mut self.dirty_session_ids)
+            .into_iter()
+            .filter_map(|id| {
+                self.sessions.get(&id).map(|session| SessionGameplayUpdate {
+                    player_id: session.id,
+                    dimension: session.dimension,
+                    state: session.gameplay,
+                })
+            })
+            .collect()
     }
 
     pub fn last_snapshot(&self) -> &AuthoritySnapshot {
@@ -384,10 +457,13 @@ impl AuthorityCore {
     }
 
     pub fn set_session_gameplay(&mut self, id: PlayerId, gameplay: SessionGameplayState) -> bool {
-        let Some(session) = self.sessions.get_mut(&id) else {
-            return false;
-        };
-        session.gameplay = gameplay;
+        {
+            let Some(session) = self.sessions.get_mut(&id) else {
+                return false;
+            };
+            session.gameplay = gameplay;
+        }
+        self.mark_session_update(id);
         true
     }
 
@@ -413,21 +489,24 @@ impl AuthorityCore {
         self.activate_dimension(dimension);
         let hardcore = self.world().rules.hardcore;
         let revision = self.world_mut_active().revisions.allocate();
-        let Some(session) = self.sessions.get_mut(&id) else {
-            return false;
-        };
-        session.gameplay.is_dead = false;
-        session.gameplay.death_source = None;
-        session.gameplay.health_milli = session.gameplay.max_health_milli;
-        session.gameplay.hunger_milli = 20_000;
-        session.gameplay.saturation_milli = 5_000;
-        session.gameplay.velocity_milli = [0; 3];
-        session.gameplay.mounted_entity = None;
-        if hardcore {
-            session.game_mode = crate::inventory::GameMode::Spectator;
+        {
+            let Some(session) = self.sessions.get_mut(&id) else {
+                return false;
+            };
+            session.gameplay.is_dead = false;
+            session.gameplay.death_source = None;
+            session.gameplay.health_milli = session.gameplay.max_health_milli;
+            session.gameplay.hunger_milli = 20_000;
+            session.gameplay.saturation_milli = 5_000;
+            session.gameplay.velocity_milli = [0; 3];
+            session.gameplay.mounted_entity = None;
+            if hardcore {
+                session.game_mode = crate::inventory::GameMode::Spectator;
+            }
+            session.last_revision = revision;
+            session.gameplay.revision = revision;
         }
-        session.last_revision = revision;
-        session.gameplay.revision = revision;
+        self.mark_session_update(id);
         true
     }
 
@@ -463,10 +542,14 @@ impl AuthorityCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::contract::{SessionGameplayState, SessionInventorySlot};
+    use crate::authority::contract::{
+        SessionBrewState, SessionFishingHookState, SessionGameplayState, SessionInventorySlot,
+    };
     use crate::entity::EntityType;
     use crate::inventory::Item;
-    use crate::network::protocol::{BlockActionKind, GameplayOperation, GameplayOutcome};
+    use crate::network::protocol::{
+        BlockActionKind, GameplayOperation, GameplayOutcome, SlotRefWire,
+    };
     use crate::world::BlockType;
     use contract::SessionContract;
 
@@ -1561,6 +1644,176 @@ mod tests {
         assert_eq!(
             core.world_mut_active().dimension,
             crate::dimension::Dimension::Nether
+        );
+    }
+
+    #[test]
+    fn session_dimension_index_tracks_register_move_and_remove() {
+        let mut core = AuthorityCore::new(AuthorityConfig::default());
+        core.register_session(SessionContract::new(
+            7,
+            "alex",
+            Dimension::Overworld as u8,
+            [8.0, 80.0, 8.0],
+            true,
+            true,
+        ))
+        .unwrap();
+        core.register_session(SessionContract::new(
+            8,
+            "sam",
+            Dimension::Nether as u8,
+            [8.0, 80.0, 8.0],
+            true,
+            true,
+        ))
+        .unwrap();
+        assert_eq!(
+            core.session_ids_in_dimension(Dimension::Overworld),
+            &[7]
+        );
+        assert_eq!(core.session_ids_in_dimension(Dimension::Nether), &[8]);
+
+        assert!(core.set_session_dimension(7, Dimension::Nether));
+        assert!(core.session_ids_in_dimension(Dimension::Overworld).is_empty());
+        assert_eq!(core.session_ids_in_dimension(Dimension::Nether), &[7, 8]);
+
+        assert!(core.set_session_dimension(7, Dimension::Nether));
+        assert_eq!(core.session_ids_in_dimension(Dimension::Nether), &[7, 8]);
+
+        assert!(core.remove_session(8).is_some());
+        assert_eq!(core.session_ids_in_dimension(Dimension::Nether), &[7]);
+        assert!(core.session_ids_in_dimension(Dimension::End).is_empty());
+    }
+
+    #[test]
+    fn session_updates_publish_join_and_dimension_change_but_not_idle_ticks() {
+        let mut core = AuthorityCore::new(AuthorityConfig::default());
+        core.register_session(SessionContract::new(
+            7,
+            "alex",
+            Dimension::Overworld as u8,
+            [8.0, 80.0, 8.0],
+            true,
+            true,
+        ))
+        .unwrap();
+
+        let joined = core.tick();
+        assert!(joined.session_updates.iter().any(|update| {
+            update.player_id == 7 && update.dimension == Dimension::Overworld as u8
+        }));
+        assert_eq!(joined.session_updates.len(), core.last_snapshot.session_updates.len());
+
+        let idle = core.tick();
+        assert!(idle.session_updates.is_empty());
+        assert!(core.last_snapshot.session_updates.is_empty());
+
+        assert!(core.set_session_dimension(7, Dimension::Nether));
+        let transferred = core.tick();
+        assert!(transferred.session_updates.iter().any(|update| {
+            update.player_id == 7 && update.dimension == Dimension::Nether as u8
+        }));
+        let idle_after_transfer = core.tick();
+        assert!(idle_after_transfer.session_updates.is_empty());
+    }
+
+    #[test]
+    fn mining_brew_and_fishing_revision_bumps_publish_dirty_session_updates() {
+        let mut core = core();
+        let _ = core.tick();
+        assert!(core.tick().session_updates.is_empty());
+
+        let target = (8, 81, 9);
+        core.world_mut_active()
+            .set_block(target.0, target.1, target.2, BlockType::Stone, 0)
+            .unwrap();
+        let held_stack = crate::inventory::ItemStack::new(Item::StonePickaxe, 1);
+        let held = crate::network::protocol::SessionSlotWire::new(
+            crate::network::protocol::ItemWire::from_stack(&held_stack),
+            0,
+            0,
+        );
+        let mut mining_gameplay = SessionGameplayState::default();
+        mining_gameplay.inventory[0] = Some(SessionInventorySlot::from(held));
+        core.set_session_gameplay(7, mining_gameplay);
+        assert!(matches!(
+            core.submit_request(GameplayRequest {
+                request_id: 200,
+                client_sequence: 1,
+                session_id: 7,
+                dimension: 0,
+                client_revision: 0,
+                operation: GameplayOperation::BlockAction {
+                    action: BlockActionKind::StartBreak,
+                    x: target.0,
+                    y: target.1,
+                    z: target.2,
+                    face: [0, 0, -1],
+                    hand: 0,
+                    held: Some(held),
+                    block: BlockType::Air.to_wire(),
+                    look_milli: [0, -100, 995],
+                },
+            })
+            .outcome,
+            GameplayOutcome::Accepted { .. }
+        ));
+        let mining_tick = core.tick();
+        let mining_update = mining_tick
+            .session_updates
+            .iter()
+            .find(|update| update.player_id == 7)
+            .expect("mining revision bump must publish");
+        assert!(mining_update.state.mining.is_some());
+        assert!(mining_update.state.revision > 0);
+
+        core.world_mut_active()
+            .set_block(8, 80, 8, BlockType::BrewingStand, 0)
+            .unwrap();
+        let mut brew_gameplay = core.session(7).unwrap().gameplay;
+        brew_gameplay.mining = None;
+        brew_gameplay.brew = Some(SessionBrewState {
+            station: [8, 80, 8],
+            ingredient: SlotRefWire {
+                index: 0,
+                count: 1,
+                expected: held,
+            },
+            bottles: [None; 3],
+            remaining_ticks: 4,
+        });
+        assert!(core.set_session_gameplay(7, brew_gameplay));
+        let brew_tick = core.tick();
+        let brew_update = brew_tick
+            .session_updates
+            .iter()
+            .find(|update| update.player_id == 7)
+            .expect("brew revision bump must publish");
+        assert_eq!(
+            brew_update.state.brew.map(|brew| brew.remaining_ticks),
+            Some(3)
+        );
+
+        let _ = core.tick();
+        let mut fishing_gameplay = core.session(7).unwrap().gameplay;
+        fishing_gameplay.brew = None;
+        fishing_gameplay.fishing_hook = Some(SessionFishingHookState {
+            entity_id: super::AUTHORITY_ENTITY_ID_START,
+            position_milli: [8_000, 80_000, 8_000],
+            velocity_milli: [0, 0, 0],
+            stage: 1,
+            wait_ticks_remaining: 8,
+            bite_ticks_remaining: 0,
+        });
+        assert!(core.set_session_gameplay(7, fishing_gameplay));
+        let fishing_tick = core.tick();
+        assert!(
+            fishing_tick
+                .session_updates
+                .iter()
+                .any(|update| update.player_id == 7),
+            "fishing tick must publish a dirty session update"
         );
     }
 

@@ -8,12 +8,7 @@ use glam::Vec3;
 
 impl AuthorityCore {
     pub(crate) fn tick_portal_travel(&mut self, dimension: Dimension) {
-        let ids: Vec<_> = self
-            .sessions
-            .values()
-            .filter(|session| session.dimension == dimension as u8)
-            .map(|session| session.id)
-            .collect();
+        let ids: Vec<_> = self.session_ids_in_dimension(dimension).to_vec();
 
         for id in ids {
             let Some((position, game_mode, cooldown, contact_time, requested)) =
@@ -83,6 +78,7 @@ impl AuthorityCore {
                             session.last_revision = revision;
                             session.gameplay.revision = revision;
                         }
+                        self.mark_session_update(id);
                     }
                     continue;
                 }

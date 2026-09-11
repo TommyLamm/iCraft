@@ -181,6 +181,9 @@ impl AuthorityCore {
                 session.cache_response(response.clone());
             }
         }
+        if matches!(response.outcome, GameplayOutcome::Accepted { .. }) {
+            self.mark_session_update(id);
+        }
         if let GameplayOutcome::Accepted { revision } = response.outcome {
             for changed_id in std::mem::take(&mut self.pending_session_revisions) {
                 if changed_id == id {
@@ -190,6 +193,7 @@ impl AuthorityCore {
                     session.last_revision = revision;
                     session.gameplay.revision = revision;
                 }
+                self.mark_session_update(changed_id);
             }
         } else {
             self.pending_session_revisions.clear();

@@ -145,6 +145,13 @@ input
   simulation union, not the unbounded residency map. Columns that leave every
   session's view/simulation sets (plus `interest::RESIDENCY_HYSTERESIS`, same
   Chebyshev ring as client unload) are flushed if dirty and evicted.
+- `AuthorityCore` keeps a `BTreeMap<u8, Vec<PlayerId>>` session index, updated
+  on register / remove / `set_session_dimension`. The four per-dimension tick
+  phases look it up instead of filtering the full session table. Snapshot
+  `session_updates` lists only sessions whose gameplay changed this tick
+  (join, dimension change, and mining / brew / fishing / cooldown revision
+  bumps). `last_snapshot` is replaced in place so the previous session vector
+  is not cloned.
 - Entity spawn/despawn follows view-distance interest. `EntityState` follows
   simulation-distance and is sent only when pose, health, or animation
   changed, or when the entity newly entered that session's simulation set.

@@ -2,11 +2,15 @@ mod common;
 
 use common::tcp_harness::{
     drive_until, gameplay_request as request, seeded_properties, session_slot, wait_for_response,
-    HeldLoopback, TcpClient,
+    HeldLoopback, TcpClient, EVENT_TIMEOUT, STEP_SLEEP,
 };
+use std::thread;
+use std::time::Instant;
 use icraft::authority::contract::SessionGameplayState;
 use icraft::authority::fishing::water_probe_position;
-use icraft::fishing::{FishingHookStage, FISHING_INITIAL_WAIT_TICKS};
+use icraft::fishing::{
+    FishingHookStage, FISHING_INITIAL_WAIT_TICKS, FISHING_REPEAT_WAIT_TICKS,
+};
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::client::ClientToGame;
 use icraft::network::protocol::{
@@ -351,9 +355,40 @@ fn run_tcp(label: &str, listen: bool) {
 
     let cast = request(&runtime, owner, 0x33_101, 1, fishing(0));
     clients[0].send_request(cast.clone());
-    let cast_response = {
-        let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
-        wait_for_response(&mut runtime, &mut refs, 0, cast.request_id)
+    // Listen-mode TCP can burn dozens of fixed ticks before the cast response
+    // arrives. Seed water under the live hook each iteration so it lands instead
+    // of despawning for distance while sockets catch up.
+    let (cast_response, hook_id) = {
+        let deadline = Instant::now() + EVENT_TIMEOUT;
+        let request_id = cast.request_id;
+        loop {
+            runtime.tick().expect("Plan33 TCP cast tick");
+            if runtime
+                .authority
+                .session(owner)
+                .and_then(|session| session.gameplay.fishing_hook)
+                .is_some()
+            {
+                seed_water_under_hook(&mut runtime, owner);
+            }
+            for client in &mut clients {
+                client.drain();
+            }
+            if let Some(response) = clients[0].take_response(request_id) {
+                let hook_id = runtime
+                    .authority
+                    .session(owner)
+                    .and_then(|session| session.gameplay.fishing_hook)
+                    .expect("Plan33 TCP cast hook")
+                    .entity_id;
+                break (response, hook_id);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for Plan33 cast response"
+            );
+            thread::sleep(STEP_SLEEP);
+        }
     };
     assert!(matches!(
         cast_response.outcome,
@@ -362,13 +397,29 @@ fn run_tcp(label: &str, listen: bool) {
     let duplicate_before = runtime.metrics.duplicate_requests;
     clients[0].send_request(cast);
     {
-        let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
-        drive_until(
-            &mut runtime,
-            &mut refs,
-            "Plan33 cached cast duplicate",
-            |runtime, _| runtime.metrics.duplicate_requests > duplicate_before,
-        );
+        let deadline = Instant::now() + EVENT_TIMEOUT;
+        loop {
+            runtime.tick().expect("Plan33 TCP duplicate tick");
+            if runtime
+                .authority
+                .session(owner)
+                .and_then(|session| session.gameplay.fishing_hook)
+                .is_some()
+            {
+                seed_water_under_hook(&mut runtime, owner);
+            }
+            for client in &mut clients {
+                client.drain();
+            }
+            if runtime.metrics.duplicate_requests > duplicate_before {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for Plan33 cached cast duplicate"
+            );
+            thread::sleep(STEP_SLEEP);
+        }
     }
     assert_eq!(
         runtime
@@ -390,15 +441,18 @@ fn run_tcp(label: &str, listen: bool) {
             ClientToGame::PlayerSessionUpdate { player_id, .. } if *player_id == owner
         )
     }));
-    let hook_id = runtime
-        .authority
-        .session(owner)
-        .and_then(|session| session.gameplay.fishing_hook)
-        .expect("Plan33 TCP cast hook")
-        .entity_id;
+    assert!(
+        runtime
+            .authority
+            .session(owner)
+            .and_then(|session| session.gameplay.fishing_hook)
+            .is_some_and(|hook| hook.entity_id == hook_id),
+        "Plan33 TCP cast hook must survive duplicate wait"
+    );
 
     let mut nibbled = false;
-    for _ in 0..(FISHING_INITIAL_WAIT_TICKS + 8) {
+    // Cast/duplicate waits may already have consumed the initial wait window.
+    for _ in 0..(FISHING_INITIAL_WAIT_TICKS + FISHING_REPEAT_WAIT_TICKS + 8) {
         seed_water_under_hook(&mut runtime, owner);
         runtime.tick().expect("Plan33 TCP fishing tick");
         for client in &mut clients {
