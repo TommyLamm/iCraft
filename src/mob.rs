@@ -112,10 +112,6 @@ pub fn explode(
         .collect()
 }
 
-fn get_highest_solid_y(chunk_manager: &ChunkManager, x: i32, z: i32) -> Option<i32> {
-    chunk_manager.highest_solid_y(x, z)
-}
-
 /// Deterministic time-and-position-varying PRNG helper for ambient mob spawning.
 pub fn ambient_spawn_rng(player_pos: Vec3, entity_count: usize, time: f32) -> impl FnMut() -> u32 {
     let time_bits = (time * 1000.0) as u32;
@@ -155,7 +151,7 @@ pub fn spawn_mobs(
     let spawn_x = (player_pos.x + angle.cos() * dist) as i32;
     let spawn_z = (player_pos.z + angle.sin() * dist) as i32;
 
-    if let Some(solid_y) = get_highest_solid_y(chunk_manager, spawn_x, spawn_z) {
+    if let Some(solid_y) = chunk_manager.highest_solid_y(spawn_x, spawn_z) {
         let spawn_y = solid_y + 1;
         let height = chunk_manager.dimension.height();
         if spawn_y >= height.min_y && spawn_y < height.max_y_exclusive() - 1 {

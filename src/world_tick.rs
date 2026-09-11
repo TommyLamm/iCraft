@@ -393,37 +393,14 @@ pub struct HopperTickResult {
     pub budget_exhausted: bool,
 }
 
-/// 測試／leftover renderer；權威禁止。
-///
-/// Walks every loaded column (`columns == None`). Authority must call
-/// [`tick_hoppers_in_columns`] with the simulation union instead.
-pub fn tick_all_loaded_hoppers(
-    chunk_manager: &mut ChunkManager,
-    max_transfers_per_tick: usize,
-) -> usize {
-    tick_all_loaded_hoppers_with_entities(chunk_manager, None, max_transfers_per_tick).transfers
-}
-
-/// 測試／leftover renderer；權威禁止。
-///
-/// Walks every loaded column (`columns == None`). Authority must call
-/// [`tick_hoppers_in_columns`] with the simulation union instead.
-pub fn tick_all_loaded_hoppers_with_entities(
-    chunk_manager: &mut ChunkManager,
-    entity_manager: Option<&mut crate::entity::EntityManager>,
-    max_transfers_per_tick: usize,
-) -> HopperTickResult {
-    tick_hoppers_in_columns(chunk_manager, entity_manager, max_transfers_per_tick, None)
-}
-
 /// Authority hopper tick. A transfer is planned against cloned source/target
 /// entities and committed only after both sided-capability checks succeed, so
 /// a failed destination never consumes the source slot. Dropped item entities
 /// are considered after container pulls and are removed or decremented only
 /// after the hopper accepts one complete metadata-bearing stack item.
 ///
-/// `columns` is the simulation-union residency set. Do not pass `None` from
-/// authority; that path is leftover-only via [`tick_all_loaded_hoppers`].
+/// `columns` is the simulation-union residency set. Authority always passes
+/// `Some(union)`; tests pass `Some(all_loaded)`.
 pub fn tick_hoppers_in_columns(
     chunk_manager: &mut ChunkManager,
     mut entity_manager: Option<&mut crate::entity::EntityManager>,
@@ -639,6 +616,30 @@ fn transfer_one(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    fn all_loaded(manager: &ChunkManager) -> BTreeSet<(i32, i32)> {
+        manager.chunks.keys().copied().collect()
+    }
+
+    fn tick_hoppers(manager: &mut ChunkManager, max_transfers_per_tick: usize) -> usize {
+        let columns = all_loaded(manager);
+        tick_hoppers_in_columns(manager, None, max_transfers_per_tick, Some(&columns)).transfers
+    }
+
+    fn tick_hoppers_with_entities(
+        manager: &mut ChunkManager,
+        entity_manager: Option<&mut crate::entity::EntityManager>,
+        max_transfers_per_tick: usize,
+    ) -> HopperTickResult {
+        let columns = all_loaded(manager);
+        tick_hoppers_in_columns(
+            manager,
+            entity_manager,
+            max_transfers_per_tick,
+            Some(&columns),
+        )
+    }
 
     const H: WorldHeight = WorldHeight::OVERWORLD;
 
@@ -874,7 +875,7 @@ mod tests {
 
         // Execute hopper ticks
         // First tick: top hopper pulls 1 IronOre from top chest
-        tick_all_loaded_hoppers(&mut manager, 64);
+        tick_hoppers(&mut manager, 64);
         let top_h_be = manager.get_block_entity(0, 65, 0).unwrap();
         assert_eq!(
             top_h_be.get_stack(0),
@@ -887,7 +888,7 @@ mod tests {
         }
 
         // Second tick: top hopper pushes 1 IronOre into Furnace slot 0
-        tick_all_loaded_hoppers(&mut manager, 64);
+        tick_hoppers(&mut manager, 64);
         let furn_be = manager.get_block_entity(0, 64, 0).unwrap();
         assert_eq!(
             furn_be.get_stack(0),
@@ -942,7 +943,7 @@ mod tests {
 
         let recipes = RecipeManager::new();
         for _ in 0..1800 {
-            let _ = tick_all_loaded_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK);
+            let _ = tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK);
             if let Some(BlockEntity::Furnace(furnace)) = manager.get_block_entity_mut(0, 64, 0) {
                 let _ = furnace.tick(&recipes);
             }
@@ -994,7 +995,7 @@ mod tests {
         }
         manager.set_block_entity(1, 64, 0, Some(BlockEntity::Chest(full)));
 
-        let result = tick_all_loaded_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK);
+        let result = tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK);
         assert_eq!(result, 0);
         assert_eq!(
             manager.get_block_entity(0, 64, 0).unwrap().get_stack(0),
@@ -1023,7 +1024,7 @@ mod tests {
 
         // x=16 belongs to an unloaded chunk.  The source remains untouched.
         assert_eq!(
-            tick_all_loaded_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
+            tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
             0
         );
         assert_eq!(
@@ -1039,7 +1040,7 @@ mod tests {
         manager.set_block(16, 64, 0, BlockType::Chest);
         manager.set_block_entity(16, 64, 0, Some(BlockEntity::Chest(ChestBlockEntity::new())));
         assert_eq!(
-            tick_all_loaded_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
+            tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
             1
         );
         assert_eq!(
@@ -1074,7 +1075,7 @@ mod tests {
             ))),
         );
 
-        let result = tick_all_loaded_hoppers(&mut manager, 1);
+        let result = tick_hoppers(&mut manager, 1);
         assert_eq!(result, 1);
         assert!(manager
             .get_block_entity(0, 64, 0)
@@ -1106,7 +1107,7 @@ mod tests {
         manager.set_block_entity(1, 64, 0, Some(BlockEntity::Chest(ChestBlockEntity::new())));
 
         assert_eq!(
-            tick_all_loaded_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
+            tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
             0
         );
         assert_eq!(
@@ -1149,7 +1150,7 @@ mod tests {
             entity.dropped_count = stack.count;
         }
 
-        let result = tick_all_loaded_hoppers_with_entities(&mut manager, Some(&mut entities), 1);
+        let result = tick_hoppers_with_entities(&mut manager, Some(&mut entities), 1);
         assert_eq!(result.transfers, 1);
         assert_eq!(
             manager.get_block_entity(0, 64, 0).unwrap().get_stack(0),
@@ -1190,7 +1191,7 @@ mod tests {
         right.transfer_cooldown = 4;
         manager.set_block_entity(2, 64, 0, Some(BlockEntity::Hopper(right)));
 
-        tick_all_loaded_hoppers(&mut manager, 1);
+        tick_hoppers(&mut manager, 1);
         let remaining = match manager.get_block_entity(2, 64, 0) {
             Some(BlockEntity::Hopper(h)) => h.transfer_cooldown,
             _ => 255,
@@ -1218,7 +1219,7 @@ mod tests {
         manager.dirty_chunks.clear();
 
         assert_eq!(
-            tick_all_loaded_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
+            tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
             0
         );
         let remaining = match manager.get_block_entity(0, 64, 0) {
@@ -1251,7 +1252,7 @@ mod tests {
         manager.dirty_chunks.clear();
 
         assert_eq!(
-            tick_all_loaded_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
+            tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
             1
         );
         let remaining = match manager.get_block_entity(0, 64, 0) {

@@ -280,11 +280,6 @@ impl ChunkLodMeshData {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ChunkMeshBundle {
-    pub levels: [ChunkLodMeshData; 3],
-    pub section_connectivity: Vec<crate::culling::SectionConnectivity>,
-}
 
 /// CPU result for exactly one 16^3 section. `identity` is checked when a
 /// worker result is integrated; the three levels intentionally mirror the
@@ -310,11 +305,6 @@ impl SectionMeshBundle {
     }
 }
 
-impl ChunkMeshBundle {
-    pub fn level(&self, lod: LodLevel) -> &ChunkLodMeshData {
-        &self.levels[lod as usize]
-    }
-}
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 struct Plane {

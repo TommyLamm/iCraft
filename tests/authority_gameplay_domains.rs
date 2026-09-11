@@ -811,3 +811,31 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
     };
     rejected(&core.submit_request(stale), RejectReason::InvalidRevision);
 }
+
+#[test]
+fn consecutive_sleep_requests_are_not_invalid_state() {
+    let mut core = new_core();
+    put_block(&mut core, [8, 80, 8], BlockType::Bed);
+    let first = submit(
+        &mut core,
+        1,
+        1,
+        GameplayOperation::Sleep {
+            x: 8,
+            y: 80,
+            z: 8,
+        },
+    );
+    accepted(&first);
+    let second = submit(
+        &mut core,
+        2,
+        2,
+        GameplayOperation::Sleep {
+            x: 8,
+            y: 80,
+            z: 8,
+        },
+    );
+    accepted(&second);
+}

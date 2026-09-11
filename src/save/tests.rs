@@ -1692,14 +1692,13 @@ fn from_chunk_compression_failure_returns_err_not_empty_blocks() {
 
 #[test]
 fn restore_saved_chunk_does_not_insert_corrupt_inner_zlib() {
-    let mut world = crate::server_world::ServerWorld::new(
+    let mut world = crate::server_world::ServerWorld::new_with_difficulty(
         7,
         crate::dimension::Dimension::Overworld,
         crate::game_rules::WorldType::Superflat,
         false,
         crate::game_rules::WorldRules::default(),
-        2,
-    );
+        2, crate::game_rules::Difficulty::default());
     assert!(world.chunks.chunks.contains_key(&(0, 0)));
 
     let mut data = ChunkSaveData::from_chunk(&Chunk::empty(0, 0)).unwrap();
@@ -1739,14 +1738,13 @@ fn legal_region_with_empty_inner_zlib_is_not_replaced_by_generated_terrain() {
         .expect("envelope still readable");
     assert!(loaded.restore_to_chunk(&mut Chunk::empty(0, 0)).is_err());
 
-    let mut world = crate::server_world::ServerWorld::new(
+    let mut world = crate::server_world::ServerWorld::new_with_difficulty(
         99,
         crate::dimension::Dimension::Overworld,
         crate::game_rules::WorldType::Default,
         false,
         crate::game_rules::WorldRules::default(),
-        2,
-    );
+        2, crate::game_rules::Difficulty::default());
     assert!(world.restore_saved_chunk(&loaded).is_err());
     assert!(!world.chunks.chunks.contains_key(&(0, 0)));
 
@@ -1830,14 +1828,13 @@ fn player_modified_chunk_with_corrupt_inner_zlib_is_not_written_as_generated() {
     });
     overwrite_region_chunk_payload(&region_path, 0, 0, corrupt_payload.clone());
 
-    let mut world = crate::server_world::ServerWorld::new(
+    let mut world = crate::server_world::ServerWorld::new_with_difficulty(
         12345,
         crate::dimension::Dimension::Overworld,
         crate::game_rules::WorldType::Default,
         true,
         crate::game_rules::WorldRules::default(),
-        2,
-    );
+        2, crate::game_rules::Difficulty::default());
     let loaded = SaveManager::new(&world_dir)
         .load_chunk(0, 0)
         .expect("region envelope remains readable");

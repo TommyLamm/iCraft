@@ -14,9 +14,6 @@ pub enum SoundMaterial {
 }
 
 pub const CHUNK_WIDTH: usize = 16;
-/// Legacy dense-column height (256). Live bounds are `Dimension::height()`,
-/// not this constant.
-pub const CHUNK_HEIGHT: usize = 256;
 pub const CHUNK_DEPTH: usize = 16;
 
 /// Canonical raw fluid-byte layout shared by chunk storage, mesh snapshots,
@@ -45,111 +42,6 @@ pub enum Biome {
     Beach,
     Ocean,
     DeepOcean,
-}
-
-#[cfg(test)]
-fn place_oak_tree(
-    blocks: &mut Box<[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
-    local_x: i32,
-    local_z: i32,
-    start_y: i32,
-    height: i32,
-) {
-    // Place log trunk
-    for dy in 0..height {
-        let y = start_y + dy;
-        if y >= 0
-            && y < CHUNK_HEIGHT as i32
-            && local_x >= 0
-            && local_x < CHUNK_WIDTH as i32
-            && local_z >= 0
-            && local_z < CHUNK_DEPTH as i32
-        {
-            blocks[local_x as usize][y as usize][local_z as usize] = BlockType::OakLog;
-        }
-    }
-    // Place leaves canopy
-    for ly in (height - 3)..=height {
-        let y = start_y + ly;
-        if y < 0 || y >= CHUNK_HEIGHT as i32 {
-            continue;
-        }
-        let radius: i32 = if ly == height {
-            1
-        } else if ly == height - 1 {
-            1
-        } else {
-            2
-        };
-        for dx in -radius..=radius {
-            for dz in -radius..=radius {
-                if radius == 2 && dx.abs() == 2 && dz.abs() == 2 {
-                    continue;
-                } // Remove corners for 5x5
-                let lx = local_x + dx;
-                let lz = local_z + dz;
-                if lx >= 0 && lx < CHUNK_WIDTH as i32 && lz >= 0 && lz < CHUNK_DEPTH as i32 {
-                    let block = blocks[lx as usize][y as usize][lz as usize];
-                    if block == BlockType::Air || block == BlockType::OakLeaves {
-                        blocks[lx as usize][y as usize][lz as usize] = BlockType::OakLeaves;
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-fn place_spruce_tree(
-    blocks: &mut Box<[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
-    local_x: i32,
-    local_z: i32,
-    start_y: i32,
-    height: i32,
-) {
-    for dy in 0..height {
-        let y = start_y + dy;
-        if y >= 0
-            && y < CHUNK_HEIGHT as i32
-            && local_x >= 0
-            && local_x < CHUNK_WIDTH as i32
-            && local_z >= 0
-            && local_z < CHUNK_DEPTH as i32
-        {
-            blocks[local_x as usize][y as usize][local_z as usize] = BlockType::SpruceLog;
-        }
-    }
-    for ly in 2..=height {
-        let y = start_y + ly;
-        if y < 0 || y >= CHUNK_HEIGHT as i32 {
-            continue;
-        }
-        let layer_from_top = height - ly;
-        let (radius, is_cross): (i32, bool) = if layer_from_top == 0 {
-            (0, false)
-        } else if layer_from_top == 1 {
-            (1, true)
-        } else if layer_from_top % 2 == 0 {
-            (1, false)
-        } else {
-            (2, true)
-        };
-        for dx in -radius..=radius {
-            for dz in -radius..=radius {
-                if is_cross && dx.abs() == radius && dz.abs() == radius {
-                    continue;
-                }
-                let lx = local_x + dx;
-                let lz = local_z + dz;
-                if lx >= 0 && lx < CHUNK_WIDTH as i32 && lz >= 0 && lz < CHUNK_DEPTH as i32 {
-                    let block = blocks[lx as usize][y as usize][lz as usize];
-                    if block == BlockType::Air {
-                        blocks[lx as usize][y as usize][lz as usize] = BlockType::SpruceLeaves;
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -1853,54 +1745,10 @@ impl BlockType {
     }
 }
 
-/// Search around target_pos for a safe, standable position with 2 air blocks above solid ground.
-pub fn find_safe_spawn_position(
-    chunk_manager: &crate::chunk_manager::ChunkManager,
-    target_pos: (i32, i32, i32),
-) -> (glam::Vec3, bool) {
-    let (tx, ty, tz) = target_pos;
-    for r in 0..=4i32 {
-        for dx in -r..=r {
-            for dz in -r..=r {
-                if dx.abs() != r && dz.abs() != r {
-                    continue;
-                }
-                let x = tx + dx;
-                let z = tz + dz;
-                for y in (ty - 10..=ty + 10).rev() {
-                    let floor_block = chunk_manager.get_block(x, y, z);
-                    let feet_block = chunk_manager.get_block(x, y + 1, z);
-                    let head_block = chunk_manager.get_block(x, y + 2, z);
-                    if floor_block.properties().is_solid
-                        && !matches!(
-                            floor_block,
-                            BlockType::Lava | BlockType::Fire | BlockType::Cactus
-                        )
-                        && feet_block.properties().is_passable
-                        && !matches!(feet_block, BlockType::Lava | BlockType::Fire)
-                        && head_block.properties().is_passable
-                        && !matches!(head_block, BlockType::Lava | BlockType::Fire)
-                    {
-                        return (
-                            glam::Vec3::new(x as f32 + 0.5, (y + 1) as f32, z as f32 + 0.5),
-                            true,
-                        );
-                    }
-                }
-            }
-        }
-    }
-    (
-        glam::Vec3::new(tx as f32 + 0.5, ty as f32, tz as f32 + 0.5),
-        false,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::redstone::Direction;
-    use glam::Vec3;
 
     #[test]
     fn block_type_wire_roundtrip_covers_all_variants() {
@@ -2044,36 +1892,7 @@ mod tests {
         assert_eq!(BlockType::OakPlanks.min_harvest_material(), None);
     }
 
-    #[test]
-    fn test_tree_placement_bounds() {
-        let mut blocks = vec![[[BlockType::Air; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]
-            .try_into()
-            .unwrap();
-        // Oak tree at local coordinates: should not panic when inside or touching edges
-        place_oak_tree(&mut blocks, 8, 8, 64, 5);
-        assert_eq!(blocks[8][64][8], BlockType::OakLog);
-        assert_eq!(blocks[8][65][8], BlockType::OakLog);
-        assert_eq!(blocks[8][68][8], BlockType::OakLog);
 
-        // Spruce tree at border
-        place_spruce_tree(&mut blocks, 0, 0, 64, 7);
-        assert_eq!(blocks[0][64][0], BlockType::SpruceLog);
-    }
-
-    #[test]
-    fn test_find_safe_spawn_position_fallback() {
-        let mut cm = crate::chunk_manager::ChunkManager::new(8);
-        cm.chunks
-            .insert((0, 0), crate::world::chunk::Chunk::new(0, 0));
-        // Create ground block at (0, 63, 0) with Air above
-        cm.set_block(0, 63, 0, BlockType::Cobblestone);
-        cm.set_block(0, 64, 0, BlockType::Air);
-        cm.set_block(0, 65, 0, BlockType::Air);
-
-        let (pos, safe) = find_safe_spawn_position(&cm, (0, 64, 0));
-        assert!(safe);
-        assert_eq!(pos, Vec3::new(0.5, 64.0, 0.5));
-    }
 
     #[test]
     fn block_state_encoding_roundtrip() {

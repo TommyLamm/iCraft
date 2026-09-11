@@ -13,8 +13,6 @@ use crate::network::protocol::{
 };
 use std::collections::VecDeque;
 
-/// Bump this when the authoritative request/session semantics change.
-pub const AUTHORITY_CONTRACT_VERSION: u16 = 2;
 pub const FIXED_TICK_HZ: u32 = 20;
 pub const RESPONSE_CACHE_CAPACITY: usize = 128;
 
@@ -670,10 +668,6 @@ impl SessionContract {
         self.response_cache.push_back(response);
     }
 
-    pub fn cache_len(&self) -> usize {
-        self.response_cache.len()
-    }
-
     pub fn validate_sequence(&self, request: &GameplayRequest) -> Result<(), RejectReason> {
         if request.client_sequence <= self.last_client_sequence {
             Err(RejectReason::OutOfOrder)
@@ -843,11 +837,11 @@ mod tests {
                 },
             });
         }
-        assert_eq!(session.cache_len(), RESPONSE_CACHE_CAPACITY);
         assert!(session.cached_response(0).is_none());
         assert!(session
             .cached_response(RESPONSE_CACHE_CAPACITY as u128)
             .is_some());
+        assert!(session.cached_response(1).is_some());
         let vectors = common_gameplay_vectors();
         assert_eq!(vectors.len(), 8);
         assert_eq!(vectors[0].request_id, 0x1001);

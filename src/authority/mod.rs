@@ -26,8 +26,8 @@ pub(crate) const ATTACK_COOLDOWN_TICKS: u16 = 5;
 
 pub use contract::{
     common_gameplay_vectors, milli_within_abs_limit, position_to_milli, position_to_milli_opt,
-    RevisionClock, AUTHORITY_CONTRACT_VERSION, FIXED_TICK_HZ, POSITION_ABS_LIMIT,
-    POSITION_MILLI_ABS_LIMIT, RESPONSE_CACHE_CAPACITY,
+    RevisionClock, FIXED_TICK_HZ, POSITION_ABS_LIMIT, POSITION_MILLI_ABS_LIMIT,
+    RESPONSE_CACHE_CAPACITY,
 };
 
 // Dimension is a wire-ordered enum and is used as the deterministic key for
@@ -448,15 +448,6 @@ impl AuthorityCore {
         self.world().revisions.current()
     }
 
-    pub fn session_gameplay(&self, id: PlayerId) -> Option<SessionGameplayUpdate> {
-        let session = self.sessions.get(&id)?;
-        Some(SessionGameplayUpdate {
-            player_id: id,
-            dimension: session.dimension,
-            state: session.gameplay,
-        })
-    }
-
     pub fn set_session_gameplay(&mut self, id: PlayerId, gameplay: SessionGameplayState) -> bool {
         {
             let Some(session) = self.sessions.get_mut(&id) else {
@@ -509,15 +500,6 @@ impl AuthorityCore {
         }
         self.mark_session_update(id);
         true
-    }
-
-    pub fn common_vector_snapshot(&mut self) -> Vec<(GameplayResponse, AuthoritySnapshot)> {
-        let mut responses = Vec::new();
-        for request in common_gameplay_vectors() {
-            let response = self.submit_request(request);
-            responses.push((response, self.last_snapshot().clone()));
-        }
-        responses
     }
 
     /// Drain request mutations without advancing the simulation clock.
@@ -652,7 +634,7 @@ mod tests {
         let duplicate = core.submit_request(request);
         assert_eq!(first, duplicate);
         assert_eq!(core.session(7).unwrap().last_client_sequence, 0);
-        assert_eq!(core.session(7).unwrap().cache_len(), 1);
+        assert!(core.session(7).unwrap().cached_response(9).is_some());
     }
 
     #[test]
@@ -2101,13 +2083,19 @@ mod tests {
             4,
             1,
         )];
-        assert!(core.world_mut_active().ensure_villager(
-            villager,
-            [9.0, 80.0, 8.0],
-            crate::village::poi::VillagerProfession::Farmer,
-            crate::village::trade::VillagerLevel::Novice,
-            offers,
-        ));
+        {
+            let world = core.world_mut_active();
+            let mut entity = crate::entity::Entity::new(
+                villager,
+                EntityType::Villager,
+                glam::Vec3::new(9.0, 80.0, 8.0),
+            );
+            entity.profession = crate::village::poi::VillagerProfession::Farmer;
+            entity.villager_level = crate::village::trade::VillagerLevel::Novice;
+            entity.offers = offers;
+            world.entities.entities.push(entity);
+            world.entities.rebuild_indexes();
+        }
         let mut gameplay = SessionGameplayState::default();
         let mut wheat = crate::network::protocol::ItemWire::empty();
         wheat.item = Item::Wheat as u32;
@@ -2150,11 +2138,15 @@ mod tests {
         assert_eq!(emerald.can_place_on, 0x22);
 
         let vehicle = 901;
-        assert!(core.world_mut_active().ensure_vehicle(
-            vehicle,
-            EntityType::Boat,
-            [9.0, 80.0, 8.0],
-        ));
+        {
+            let world = core.world_mut_active();
+            world.entities.entities.push(crate::entity::Entity::new(
+                vehicle,
+                EntityType::Boat,
+                glam::Vec3::new(9.0, 80.0, 8.0),
+            ));
+            world.entities.rebuild_indexes();
+        }
         let response = core.submit_request(GameplayRequest {
             request_id: 33,
             client_sequence: 2,

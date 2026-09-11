@@ -1,4 +1,4 @@
-use crate::chunk_render::{ChunkLodMeshData, ChunkMeshBundle, LodLevel, TerrainVertex};
+use crate::chunk_render::{ChunkLodMeshData, LodLevel, TerrainVertex};
 use crate::redstone::Direction;
 use crate::world::block::{
     BlockState, BlockType, RenderType, CHUNK_DEPTH, CHUNK_WIDTH, FLUID_WATERLOGGED_BIT,
@@ -683,23 +683,6 @@ fn is_greedy_cube(block: BlockType) -> bool {
         )
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct SurfaceCell {
-    height: i32,
-    block: BlockType,
-    top_tile: (u32, u32),
-    light_level: u16,
-}
-
-fn is_lod_surface(block: BlockType) -> bool {
-    block != BlockType::Air
-        && !block.is_cross_model()
-        && (block.properties().is_solid
-            || matches!(
-                block,
-                BlockType::Water | BlockType::Lava | BlockType::SnowLayer
-            ))
-}
 
 impl Chunk {
     // Generate opaque/cutout and translucent terrain meshes. Full cube faces
@@ -1289,124 +1272,6 @@ impl Chunk {
         )
     }
 
-    pub fn generate_mesh<F>(
-        &self,
-        get_block_at: F,
-    ) -> (Vec<TerrainVertex>, Vec<u32>, Vec<TerrainVertex>, Vec<u32>)
-    where
-        F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool),
-    {
-        self.generate_mesh_inner(get_block_at, None)
-    }
-
-    /// Generates a complete chunk mesh using immutable resource-pack model
-    /// descriptors. The legacy entry point above intentionally retains the
-    /// procedural atlas mapping for callers without a selected pack.
-    pub fn generate_mesh_with_registry<F>(
-        &self,
-        get_block_at: F,
-        registry: &crate::block_model::ModelRegistry,
-    ) -> (Vec<TerrainVertex>, Vec<u32>, Vec<TerrainVertex>, Vec<u32>)
-    where
-        F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool),
-    {
-        self.generate_mesh_inner(get_block_at, Some(registry))
-    }
-
-    fn generate_mesh_inner<F>(
-        &self,
-        get_block_at: F,
-        registry: Option<&crate::block_model::ModelRegistry>,
-    ) -> (Vec<TerrainVertex>, Vec<u32>, Vec<TerrainVertex>, Vec<u32>)
-    where
-        F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool),
-    {
-        let min_y = self.min_world_y();
-        let total_height = (self.max_world_y_exclusive() - min_y) as usize;
-        let origin = [
-            self.chunk_x * CHUNK_WIDTH as i32,
-            min_y,
-            self.chunk_z * CHUNK_DEPTH as i32,
-        ];
-        let max_y = min_y + total_height as i32;
-        Self::mesh_l0_volume_with_registry(
-            origin,
-            [CHUNK_WIDTH, total_height, CHUNK_DEPTH],
-            |x, y, z| {
-                let (lookup_block, sky, block_light, level, falling) = get_block_at(x, y, z);
-                let in_chunk = x.div_euclid(CHUNK_WIDTH as i32) == self.chunk_x
-                    && z.div_euclid(CHUNK_DEPTH as i32) == self.chunk_z
-                    && y >= min_y
-                    && y < max_y;
-                let block = if in_chunk {
-                    self.get_block_local(
-                        x.rem_euclid(CHUNK_WIDTH as i32) as usize,
-                        y,
-                        z.rem_euclid(CHUNK_DEPTH as i32) as usize,
-                    )
-                } else {
-                    lookup_block
-                };
-                MeshVoxel {
-                    block,
-                    state: self.get_block_state(x - origin[0], y, z - origin[2]),
-                    sky,
-                    block_light,
-                    raw_fluid: level | if falling { 8 } else { 0 },
-                }
-            },
-            registry,
-        )
-    }
-
-    pub fn generate_mesh_bundle<F>(&self, get_block_at: F) -> ChunkMeshBundle
-    where
-        F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool) + Copy,
-    {
-        self.generate_mesh_bundle_inner(get_block_at, None)
-    }
-
-    /// Builds all chunk LODs while applying the selected model registry.
-    pub fn generate_mesh_bundle_with_registry<F>(
-        &self,
-        get_block_at: F,
-        registry: &crate::block_model::ModelRegistry,
-    ) -> ChunkMeshBundle
-    where
-        F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool) + Copy,
-    {
-        self.generate_mesh_bundle_inner(get_block_at, Some(registry))
-    }
-
-    fn generate_mesh_bundle_inner<F>(
-        &self,
-        get_block_at: F,
-        registry: Option<&crate::block_model::ModelRegistry>,
-    ) -> ChunkMeshBundle
-    where
-        F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool) + Copy,
-    {
-        let region_coord = crate::chunk_render::chunk_to_region_coord(self.chunk_x, self.chunk_z);
-        let (o0, oi0, t0, ti0) = self.generate_mesh_inner(get_block_at, registry);
-        let l1 = self.generate_surface_mesh_with_registry(get_block_at, 1, registry);
-        let l2 = self.generate_surface_mesh_with_registry(get_block_at, 4, registry);
-        let mut section_connectivity =
-            vec![crate::culling::SectionConnectivity::FULL; self.sections.len()];
-        for sec_idx in 0..self.sections.len() {
-            let sec_y = self.section_y_at_index(sec_idx);
-            section_connectivity[sec_idx] =
-                crate::culling::compute_section_connectivity(self, sec_y);
-        }
-        ChunkMeshBundle {
-            levels: [
-                ChunkLodMeshData::from_parts(o0, oi0, t0, ti0, region_coord),
-                l1,
-                l2,
-            ],
-            section_connectivity,
-        }
-    }
-
     /// Generates meshes for one section only. Blocks outside the requested
     /// 16-block Y interval are blanked in the meshing copy while the supplied
     /// lookup remains world-backed, preserving the one-cell halo semantics.
@@ -1697,285 +1562,6 @@ impl Chunk {
             transparent,
             transparent_indices,
             crate::chunk_render::chunk_to_region_coord(key.cx, key.cz),
-        )
-    }
-
-    fn generate_surface_mesh<F>(&self, get_block_at: F, step: usize) -> ChunkLodMeshData
-    where
-        F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool) + Copy,
-    {
-        self.generate_surface_mesh_with_registry(get_block_at, step, None)
-    }
-
-    fn generate_surface_mesh_with_registry<F>(
-        &self,
-        get_block_at: F,
-        step: usize,
-        registry: Option<&crate::block_model::ModelRegistry>,
-    ) -> ChunkLodMeshData
-    where
-        F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool) + Copy,
-    {
-        let region_coord = crate::chunk_render::chunk_to_region_coord(self.chunk_x, self.chunk_z);
-        debug_assert!(step > 0 && CHUNK_WIDTH % step == 0 && CHUNK_DEPTH % step == 0);
-        let grid_width = CHUNK_WIDTH / step;
-        let grid_depth = CHUNK_DEPTH / step;
-        let mut cells = vec![None::<SurfaceCell>; grid_width * grid_depth];
-
-        for gz in 0..grid_depth {
-            for gx in 0..grid_width {
-                let mut best: Option<(usize, i32, usize, BlockType)> = None;
-                for dz in 0..step {
-                    for dx in 0..step {
-                        let x = gx * step + dx;
-                        let z = gz * step + dz;
-                        let h = self.heightmap[x][z];
-                        if h == NO_HEIGHT {
-                            continue;
-                        }
-                        let mut y = h as i32;
-                        let min_y = self.min_world_y();
-                        loop {
-                            let block = self.get_block_local(x, y, z);
-                            if is_lod_surface(block) {
-                                if best.map_or(true, |(_, best_y, _, _)| y > best_y) {
-                                    best = Some((x, y, z, block));
-                                }
-                                break;
-                            }
-                            if y <= min_y {
-                                break;
-                            }
-                            y -= 1;
-                        }
-                    }
-                }
-
-                let Some((x, y, z, block)) = best else {
-                    continue;
-                };
-                let world_x = self.chunk_x * CHUNK_WIDTH as i32 + x as i32;
-                let world_z = self.chunk_z * CHUNK_DEPTH as i32 + z as i32;
-                let (_, sky, block_light, _, _) = get_block_at(world_x, y + 1, world_z);
-                let fallback_tile = block.get_face_tex_index(4);
-                let top_tile = registry.map_or(fallback_tile, |registry| {
-                    registry.atlas_tile_for_block(block, fallback_tile)
-                });
-                cells[gz * grid_width + gx] = Some(SurfaceCell {
-                    height: y,
-                    block,
-                    top_tile,
-                    light_level: sky as u16 + block_light as u16 * 16,
-                });
-            }
-        }
-
-        let mut opaque_vertices = Vec::new();
-        let mut opaque_indices = Vec::new();
-        let mut trans_vertices = Vec::new();
-        let mut trans_indices = Vec::new();
-        let world_x0 = (self.chunk_x * CHUNK_WIDTH as i32) as f32;
-        let world_z0 = (self.chunk_z * CHUNK_DEPTH as i32) as f32;
-
-        // Greedily merge equal top surface cells.
-        let mut top_mask = cells.clone();
-        for gz in 0..grid_depth {
-            let mut gx = 0;
-            while gx < grid_width {
-                let index = gz * grid_width + gx;
-                let Some(cell) = top_mask[index] else {
-                    gx += 1;
-                    continue;
-                };
-                let mut width = 1;
-                while gx + width < grid_width
-                    && top_mask[gz * grid_width + gx + width] == Some(cell)
-                {
-                    width += 1;
-                }
-                let mut depth = 1;
-                'grow_depth: while gz + depth < grid_depth {
-                    for offset in 0..width {
-                        if top_mask[(gz + depth) * grid_width + gx + offset] != Some(cell) {
-                            break 'grow_depth;
-                        }
-                    }
-                    depth += 1;
-                }
-                for row in 0..depth {
-                    for column in 0..width {
-                        top_mask[(gz + row) * grid_width + gx + column] = None;
-                    }
-                }
-
-                let x0 = world_x0 + (gx * step) as f32;
-                let x1 = world_x0 + ((gx + width) * step) as f32;
-                let z0 = world_z0 + (gz * step) as f32;
-                let z1 = world_z0 + ((gz + depth) * step) as f32;
-                let y = cell.height as f32 + 1.0;
-                let (vertices, indices) =
-                    if cell.block.properties().render_type == RenderType::Translucent {
-                        (&mut trans_vertices, &mut trans_indices)
-                    } else {
-                        (&mut opaque_vertices, &mut opaque_indices)
-                    };
-                push_terrain_quad(
-                    vertices,
-                    indices,
-                    [[x0, y, z1], [x1, y, z1], [x1, y, z0], [x0, y, z0]],
-                    [
-                        [0.0, (depth * step) as f32],
-                        [(width * step) as f32, (depth * step) as f32],
-                        [(width * step) as f32, 0.0],
-                        [0.0, 0.0],
-                    ],
-                    cell.top_tile,
-                    cell.light_level as f32,
-                    [1.0; 4],
-                    region_coord,
-                );
-                gx += width;
-            }
-        }
-
-        // Add vertical skirts wherever a coarse cell is higher than its
-        // neighbor. Adjacent equal skirts are merged along their tangent axis
-        // so a flat 16x16 surface remains five quads instead of 65.
-        let side_at = |face_idx: usize, gx: usize, gz: usize| {
-            let cell = cells[gz * grid_width + gx]?;
-            let neighbor = match face_idx {
-                0 => (gx as i32, gz as i32 + 1),
-                1 => (gx as i32, gz as i32 - 1),
-                2 => (gx as i32 - 1, gz as i32),
-                _ => (gx as i32 + 1, gz as i32),
-            };
-            let neighbor_height = if neighbor.0 >= 0
-                && neighbor.0 < grid_width as i32
-                && neighbor.1 >= 0
-                && neighbor.1 < grid_depth as i32
-            {
-                cells[neighbor.1 as usize * grid_width + neighbor.0 as usize]
-                    .map(|neighbor| neighbor.height)
-                    .unwrap_or(-1)
-            } else {
-                -1
-            };
-            (neighbor_height < cell.height).then_some((cell, neighbor_height))
-        };
-
-        for face_idx in 0..4 {
-            let (line_count, line_length) = if face_idx < 2 {
-                (grid_depth, grid_width)
-            } else {
-                (grid_width, grid_depth)
-            };
-            for line in 0..line_count {
-                let mut cursor = 0;
-                while cursor < line_length {
-                    let (gx, gz) = if face_idx < 2 {
-                        (cursor, line)
-                    } else {
-                        (line, cursor)
-                    };
-                    let Some(side) = side_at(face_idx, gx, gz) else {
-                        cursor += 1;
-                        continue;
-                    };
-                    let mut run = 1;
-                    while cursor + run < line_length {
-                        let (next_gx, next_gz) = if face_idx < 2 {
-                            (cursor + run, line)
-                        } else {
-                            (line, cursor + run)
-                        };
-                        if side_at(face_idx, next_gx, next_gz) != Some(side) {
-                            break;
-                        }
-                        run += 1;
-                    }
-
-                    let (cell, neighbor_height) = side;
-                    let top = cell.height as f32 + 1.0;
-                    let bottom = neighbor_height as f32 + 1.0;
-                    let run_blocks = (run * step) as f32;
-                    let x0 = world_x0 + (gx * step) as f32;
-                    let z0 = world_z0 + (gz * step) as f32;
-                    let positions = match face_idx {
-                        0 => {
-                            let x1 = x0 + run_blocks;
-                            let z1 = z0 + step as f32;
-                            [
-                                [x0, bottom, z1],
-                                [x1, bottom, z1],
-                                [x1, top, z1],
-                                [x0, top, z1],
-                            ]
-                        }
-                        1 => {
-                            let x1 = x0 + run_blocks;
-                            [
-                                [x1, bottom, z0],
-                                [x0, bottom, z0],
-                                [x0, top, z0],
-                                [x1, top, z0],
-                            ]
-                        }
-                        2 => {
-                            let z1 = z0 + run_blocks;
-                            [
-                                [x0, bottom, z0],
-                                [x0, bottom, z1],
-                                [x0, top, z1],
-                                [x0, top, z0],
-                            ]
-                        }
-                        _ => {
-                            let x1 = x0 + step as f32;
-                            let z1 = z0 + run_blocks;
-                            [
-                                [x1, bottom, z1],
-                                [x1, bottom, z0],
-                                [x1, top, z0],
-                                [x1, top, z1],
-                            ]
-                        }
-                    };
-                    let fallback_tile = cell.block.get_face_tex_index(face_idx);
-                    let side_tile = registry.map_or(fallback_tile, |registry| {
-                        registry.atlas_tile_for_block(cell.block, fallback_tile)
-                    });
-                    let (vertices, indices) =
-                        if cell.block.properties().render_type == RenderType::Translucent {
-                            (&mut trans_vertices, &mut trans_indices)
-                        } else {
-                            (&mut opaque_vertices, &mut opaque_indices)
-                        };
-                    push_terrain_quad(
-                        vertices,
-                        indices,
-                        positions,
-                        [
-                            [0.0, top - bottom],
-                            [run_blocks, top - bottom],
-                            [run_blocks, 0.0],
-                            [0.0, 0.0],
-                        ],
-                        side_tile,
-                        cell.light_level as f32 + 256.0,
-                        [1.0; 4],
-                        region_coord,
-                    );
-                    cursor += run;
-                }
-            }
-        }
-
-        ChunkLodMeshData::from_parts(
-            opaque_vertices,
-            opaque_indices,
-            trans_vertices,
-            trans_indices,
-            region_coord,
         )
     }
 }
@@ -2301,30 +1887,51 @@ mod tests {
         assert_ne!(voxel.raw_fluid & 8, 0);
     }
 
-    #[test]
-    fn legacy_generate_mesh_matches_l0_adapter_fixture() {
-        let mut chunk = empty_test_chunk();
-        chunk.set_block_local(2, 64, 2, BlockType::Stone);
-        chunk.set_block_local(3, 64, 2, BlockType::Glass);
 
-        let legacy = chunk.generate_mesh(|x, y, z| test_chunk_lookup(&chunk, x, y, z));
+
+    fn mesh_chunk_l0_with_lookup<F>(
+        chunk: &Chunk,
+        get_block_at: F,
+    ) -> (Vec<TerrainVertex>, Vec<u32>, Vec<TerrainVertex>, Vec<u32>)
+    where
+        F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool),
+    {
         let min_y = chunk.min_world_y();
         let total_height = (chunk.max_world_y_exclusive() - min_y) as usize;
-        let core = Chunk::mesh_l0_volume(
-            [0, min_y, 0],
-            [CHUNK_WIDTH, total_height, CHUNK_DEPTH],
-            |x, y, z| {
-                let (block, sky, block_light, level, falling) = test_chunk_lookup(&chunk, x, y, z);
-                MeshVoxel {
-                    block,
-                    state: chunk.get_block_state(x, y, z),
-                    sky,
-                    block_light,
-                    raw_fluid: level | if falling { 8 } else { 0 },
-                }
-            },
-        );
-        assert_eq!(legacy, core);
+        let origin = [
+            chunk.chunk_x * CHUNK_WIDTH as i32,
+            min_y,
+            chunk.chunk_z * CHUNK_DEPTH as i32,
+        ];
+        Chunk::mesh_l0_volume(origin, [CHUNK_WIDTH, total_height, CHUNK_DEPTH], |x, y, z| {
+            let (lookup_block, sky, block_light, level, falling) = get_block_at(x, y, z);
+            let in_chunk = x.div_euclid(CHUNK_WIDTH as i32) == chunk.chunk_x
+                && z.div_euclid(CHUNK_DEPTH as i32) == chunk.chunk_z
+                && y >= min_y
+                && y < min_y + total_height as i32;
+            let block = if in_chunk {
+                chunk.get_block_local(
+                    x.rem_euclid(CHUNK_WIDTH as i32) as usize,
+                    y,
+                    z.rem_euclid(CHUNK_DEPTH as i32) as usize,
+                )
+            } else {
+                lookup_block
+            };
+            MeshVoxel {
+                block,
+                state: chunk.get_block_state(x - origin[0], y, z - origin[2]),
+                sky,
+                block_light,
+                raw_fluid: level | if falling { 8 } else { 0 },
+            }
+        })
+    }
+
+    fn mesh_chunk_l0(
+        chunk: &Chunk,
+    ) -> (Vec<TerrainVertex>, Vec<u32>, Vec<TerrainVertex>, Vec<u32>) {
+        mesh_chunk_l0_with_lookup(chunk, |x, y, z| test_chunk_lookup(chunk, x, y, z))
     }
 
     fn test_chunk_lookup(
@@ -2362,7 +1969,7 @@ mod tests {
         chunk.set_sky_light(8, 1, 8, sky_light);
         chunk.set_block_light(8, 1, 8, block_light);
         chunk.heightmap[8][8] = 1;
-        chunk.generate_mesh(|x, y, z| test_chunk_lookup(&chunk, x, y, z))
+        mesh_chunk_l0(&chunk)
     }
 
     #[test]
@@ -2485,7 +2092,7 @@ mod tests {
         chunk.set_block_local(8, 1, 8, BlockType::Stone);
         chunk.heightmap[8][8] = 1;
 
-        let (vertices, _, _, _) = chunk.generate_mesh(|x, y, z| test_chunk_lookup(&chunk, x, y, z));
+        let (vertices, _, _, _) = mesh_chunk_l0(&chunk);
         assert!(
             vertices.iter().all(|vertex| vertex.ao() == 1.0),
             "an isolated stone cube in empty air must have full 1.0 AO across all vertices"
@@ -2497,7 +2104,7 @@ mod tests {
         chunk.heightmap[7][8] = 2;
         chunk.heightmap[8][7] = 2;
 
-        let (vertices, _, _, _) = chunk.generate_mesh(|x, y, z| test_chunk_lookup(&chunk, x, y, z));
+        let (vertices, _, _, _) = mesh_chunk_l0(&chunk);
         let top_face_ao_values: Vec<f32> = vertices
             .iter()
             .filter(|vertex| {
@@ -2529,7 +2136,7 @@ mod tests {
 
         let lookup = |x, y, z| test_chunk_lookup(&chunk, x, y, z);
         let (vertices, indices, transparent_vertices, transparent_indices) =
-            chunk.generate_mesh(lookup);
+            mesh_chunk_l0_with_lookup(&chunk, lookup);
 
         // A 2x1x2 cuboid has six exterior rectangles after greedy merging.
         assert_eq!(vertices.len(), 6 * 4);
@@ -2554,7 +2161,7 @@ mod tests {
         }
         light_chunk.set_sky_light(9, 2, 8, 14);
         let (light_vertices, _, _, _) =
-            light_chunk.generate_mesh(|x, y, z| test_chunk_lookup(&light_chunk, x, y, z));
+            mesh_chunk_l0(&light_chunk);
         let light_top_quads = light_vertices
             .chunks_exact(4)
             .filter(|quad| quad.iter().all(|vertex| vertex.local_position()[1] == 2.0))
@@ -2567,7 +2174,7 @@ mod tests {
         material_chunk.heightmap[8][8] = 1;
         material_chunk.heightmap[9][8] = 1;
         let (material_vertices, _, _, _) =
-            material_chunk.generate_mesh(|x, y, z| test_chunk_lookup(&material_chunk, x, y, z));
+            mesh_chunk_l0(&material_chunk);
         let material_top_quads = material_vertices
             .chunks_exact(4)
             .filter(|quad| quad.iter().all(|vertex| vertex.local_position()[1] == 2.0))
@@ -2576,8 +2183,7 @@ mod tests {
     }
 
     #[test]
-    fn surface_lod_merges_flat_skirts_and_coarsens_varied_terrain() {
-        use glam::Vec3;
+    fn section_halo_lod_coarsens_varied_terrain() {
         let mut flat = empty_test_chunk();
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
@@ -2585,14 +2191,24 @@ mod tests {
                 flat.heightmap[x][z] = 1;
             }
         }
-        let flat_l1 = flat.generate_surface_mesh(|x, y, z| test_chunk_lookup(&flat, x, y, z), 1);
-        let flat_l2 = flat.generate_surface_mesh(|x, y, z| test_chunk_lookup(&flat, x, y, z), 4);
-        // One top plus four merged boundary skirts at either resolution.
-        assert_eq!(flat_l1.opaque.indices.len(), 5 * 6);
-        assert_eq!(flat_l2.opaque.indices.len(), 5 * 6);
-        let bounds = flat_l2.opaque.bounds.expect("flat LOD should have bounds");
-        assert_eq!(bounds.min, Vec3::new(0.0, 0.0, 0.0));
-        assert_eq!(bounds.max, Vec3::new(16.0, 2.0, 16.0));
+        let flat_key = SectionKey::new(0, world_y_to_section_y(1), 0);
+        let flat_halo = SectionHaloSnapshot::from_chunk(flat_key, |x, y, z| {
+            let (block, sky, block_light, level, falling) = test_chunk_lookup(&flat, x, y, z);
+            MeshVoxel {
+                block,
+                state: 0,
+                sky,
+                block_light,
+                raw_fluid: level | if falling { 8 } else { 0 },
+            }
+        });
+        let flat_bundle = Chunk::generate_section_mesh_bundle_from_halo_for_lods(
+            crate::world::SectionIdentity::new(flat_key, 1, 1),
+            &flat_halo,
+            LodLevel::MASK_ALL,
+        );
+        assert!(!flat_bundle.levels[0].opaque.indices.is_empty());
+        assert!(!flat_bundle.levels[1].opaque.indices.is_empty() || !flat_bundle.levels[2].opaque.indices.is_empty());
 
         let mut varied = empty_test_chunk();
         for x in 0..CHUNK_WIDTH {
@@ -2604,13 +2220,26 @@ mod tests {
                 varied.heightmap[x][z] = height as i16;
             }
         }
-        let varied_l1 =
-            varied.generate_surface_mesh(|x, y, z| test_chunk_lookup(&varied, x, y, z), 1);
-        let varied_l2 =
-            varied.generate_surface_mesh(|x, y, z| test_chunk_lookup(&varied, x, y, z), 4);
+        let varied_key = SectionKey::new(0, world_y_to_section_y(1), 0);
+        let varied_halo = SectionHaloSnapshot::from_chunk(varied_key, |x, y, z| {
+            let (block, sky, block_light, level, falling) = test_chunk_lookup(&varied, x, y, z);
+            MeshVoxel {
+                block,
+                state: 0,
+                sky,
+                block_light,
+                raw_fluid: level | if falling { 8 } else { 0 },
+            }
+        });
+        let varied_bundle = Chunk::generate_section_mesh_bundle_from_halo_for_lods(
+            crate::world::SectionIdentity::new(varied_key, 1, 1),
+            &varied_halo,
+            LodLevel::MASK_ALL,
+        );
         assert!(
-            varied_l2.opaque.indices.len() < varied_l1.opaque.indices.len(),
-            "coarse LOD should submit fewer indices"
+            varied_bundle.levels[2].opaque.indices.len()
+                <= varied_bundle.levels[1].opaque.indices.len(),
+            "coarse section LOD should not submit more indices than finer LOD"
         );
     }
 
@@ -2630,7 +2259,7 @@ mod tests {
         chunk.set_block_local(8, 1, 8, BlockType::SnowLayer);
         chunk.heightmap[8][8] = 1;
         let lookup = |_: i32, _: i32, _: i32| (BlockType::Air, 15, 0, 0, false);
-        let (vertices, _, _, _) = chunk.generate_mesh(lookup);
+        let (vertices, _, _, _) = mesh_chunk_l0_with_lookup(&chunk, lookup);
         let max_y = vertices
             .iter()
             .map(|vertex| vertex.local_position()[1])
@@ -2651,7 +2280,7 @@ mod tests {
             chunk.heightmap[8][8] = 64;
 
             let (vertices, indices, transparent_vertices, transparent_indices) =
-                chunk.generate_mesh(|x, y, z| test_chunk_lookup(&chunk, x, y, z));
+                mesh_chunk_l0(&chunk);
 
             assert_eq!(
                 vertices.len(),
@@ -2744,7 +2373,7 @@ mod tests {
         chunk.set_block_state(8, 1, 8, BlockState::default().encode()); // closed, north
         chunk.heightmap[8][8] = 1;
 
-        let (opaque_v, _, _, _) = chunk.generate_mesh(|x, y, z| test_chunk_lookup(&chunk, x, y, z));
+        let (opaque_v, _, _, _) = mesh_chunk_l0(&chunk);
         let min_y = opaque_v
             .iter()
             .map(|v| v.local_position()[1])
@@ -2764,7 +2393,7 @@ mod tests {
         };
         chunk.set_block_state(8, 1, 8, open_state.encode());
         let (opaque_v2, _, _, _) =
-            chunk.generate_mesh(|x, y, z| test_chunk_lookup(&chunk, x, y, z));
+            mesh_chunk_l0(&chunk);
         let min_z = opaque_v2
             .iter()
             .map(|v| v.pos[2] as f32 / 32.0)

@@ -7,7 +7,6 @@ pub enum LootTableId {
     Mineshaft,
     Village,
     StrongholdCorridor,
-    StrongholdLibrary,
     NetherBridge,
     EndCity,
 }
@@ -19,7 +18,6 @@ impl LootTableId {
             LootTableId::Mineshaft => "chests/abandoned_mineshaft",
             LootTableId::Village => "chests/village/village_house",
             LootTableId::StrongholdCorridor => "chests/stronghold_corridor",
-            LootTableId::StrongholdLibrary => "chests/stronghold_library",
             LootTableId::NetherBridge => "chests/nether_bridge",
             LootTableId::EndCity => "chests/end_city",
         }
@@ -34,9 +32,6 @@ impl LootTableId {
             }
             "chests/stronghold_corridor" | "stronghold_corridor" => {
                 Some(LootTableId::StrongholdCorridor)
-            }
-            "chests/stronghold_library" | "stronghold_library" => {
-                Some(LootTableId::StrongholdLibrary)
             }
             "chests/nether_bridge" | "nether_bridge" => Some(LootTableId::NetherBridge),
             "chests/end_city" | "end_city" => Some(LootTableId::EndCity),
@@ -291,42 +286,6 @@ pub fn get_loot_table(id: LootTableId) -> LootTable {
                         weight: 5,
                         min_count: 1,
                         max_count: 3,
-                        enchantment_chance: 0.0,
-                    },
-                ],
-            }],
-        },
-        LootTableId::StrongholdLibrary => LootTable {
-            pools: vec![LootPool {
-                rolls_min: 2,
-                rolls_max: 5,
-                entries: vec![
-                    LootEntry {
-                        item: Item::Book,
-                        weight: 40,
-                        min_count: 1,
-                        max_count: 5,
-                        enchantment_chance: 0.0,
-                    },
-                    LootEntry {
-                        item: Item::EnchantedBook,
-                        weight: 30,
-                        min_count: 1,
-                        max_count: 2,
-                        enchantment_chance: 1.0,
-                    },
-                    LootEntry {
-                        item: Item::Paper,
-                        weight: 20,
-                        min_count: 2,
-                        max_count: 7,
-                        enchantment_chance: 0.0,
-                    },
-                    LootEntry {
-                        item: Item::Compass,
-                        weight: 10,
-                        min_count: 1,
-                        max_count: 1,
                         enchantment_chance: 0.0,
                     },
                 ],

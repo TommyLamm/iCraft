@@ -2337,7 +2337,7 @@ mod tests {
         let mut item = ItemWire::empty();
         item.item = crate::inventory::Item::Diamond as u32;
         item.count = 3;
-        let gameplay = &mut runtime.authority.session_mut(99).unwrap().gameplay;
+        let mut gameplay = runtime.authority.session(99).unwrap().gameplay;
         gameplay.health_milli = 0;
         gameplay.is_dead = true;
         gameplay.death_source = Some(6);
@@ -2346,6 +2346,7 @@ mod tests {
         gameplay.selected_hotbar_slot = 5;
         gameplay.inventory[0] = Some(SessionInventorySlot::from_wire(item, 1, 2));
         gameplay.revision = 1;
+        assert!(runtime.authority.set_session_gameplay(99, gameplay));
 
         let output = runtime.tick_with_output().unwrap();
         let updates: Vec<_> = output

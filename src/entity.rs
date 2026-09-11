@@ -866,13 +866,6 @@ impl EntityManager {
         self.scratch.id_list = ids;
     }
 
-    /// Compatibility shim for callers outside the entity runtime. New code
-    /// should use `sync_entity_positions` when moved ids are available.
-    #[deprecated(note = "use sync_entity_positions when moved ids are available")]
-    pub fn update_spatial_indexes(&mut self) {
-        self.sync_positions();
-    }
-
     pub fn get_by_id(&self, id: u64) -> Option<&Entity> {
         self.id_to_index
             .get(&id)
@@ -885,11 +878,6 @@ impl EntityManager {
         } else {
             None
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn get_index_by_id(&self, id: u64) -> Option<usize> {
-        self.id_to_index.get(&id).copied()
     }
 
     pub fn spawn(&mut self, entity_type: EntityType, pos: Vec3) -> u64 {
@@ -985,17 +973,6 @@ impl EntityManager {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn clear(&mut self) {
-        self.entities.clear();
-        self.id_to_index.clear();
-        self.type_buckets.clear();
-        self.spatial_buckets.clear();
-        self.entity_chunks.clear();
-        self.bump_spatial_revision();
-        self.bump_checksum_epoch();
-    }
-
     pub fn count_passive(&self) -> usize {
         self.type_buckets
             .iter()
@@ -1016,19 +993,6 @@ impl EntityManager {
     pub fn get_entities_by_type(&self, entity_type: EntityType) -> impl Iterator<Item = &Entity> {
         self.type_buckets
             .get(&entity_type)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.get_by_id(*id))
-    }
-
-    #[allow(dead_code)]
-    pub fn get_entities_in_chunk(
-        &self,
-        chunk_x: i32,
-        chunk_z: i32,
-    ) -> impl Iterator<Item = &Entity> {
-        self.spatial_buckets
-            .get(&(chunk_x, chunk_z))
             .into_iter()
             .flatten()
             .filter_map(|id| self.get_by_id(*id))
@@ -1162,10 +1126,10 @@ mod tests {
 
         assert_eq!(em.position_sync_visits - visits, 1);
         assert!(!em
-            .get_entities_in_chunk(0, 0)
+            .query_radius(Vec3::new(1.0, 64.0, 1.0), 2.0)
             .any(|entity| entity.id == moved));
         assert!(em
-            .get_entities_in_chunk(1, 0)
+            .query_radius(Vec3::new(17.0, 64.0, 1.0), 2.0)
             .any(|entity| entity.id == moved));
         assert_eq!(em.entities.len(), 32);
     }

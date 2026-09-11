@@ -641,55 +641,6 @@ pub fn block_selection_shape(
     shape.translate(Vec3::new(fx, fy, fz))
 }
 
-/// Occlusion shape for face culling and line-of-sight calculation.
-pub fn block_occlusion_shape(block: BlockType, _state_raw: u8, pos: (i32, i32, i32)) -> VoxelShape {
-    let (fx, fy, fz) = (pos.0 as f32, pos.1 as f32, pos.2 as f32);
-
-    let shape = if block.properties().render_type == crate::world::RenderType::Opaque
-        && block.properties().is_solid
-        && matches!(
-            block,
-            BlockType::Grass
-                | BlockType::Dirt
-                | BlockType::Stone
-                | BlockType::Sand
-                | BlockType::Gravel
-                | BlockType::OakLog
-                | BlockType::OakPlanks
-                | BlockType::Cobblestone
-                | BlockType::Bedrock
-                | BlockType::CoalOre
-                | BlockType::IronOre
-                | BlockType::GoldOre
-                | BlockType::DiamondOre
-                | BlockType::RedstoneOre
-                | BlockType::Brick
-                | BlockType::StoneBrick
-                | BlockType::Clay
-                | BlockType::Sandstone
-                | BlockType::Obsidian
-                | BlockType::CraftingTable
-                | BlockType::Furnace
-                | BlockType::FurnaceLit
-                | BlockType::Chest
-                | BlockType::TNT
-                | BlockType::Bookshelf
-                | BlockType::BirchLog
-                | BlockType::BirchPlanks
-                | BlockType::SpruceLog
-                | BlockType::SprucePlanks
-                | BlockType::Netherrack
-                | BlockType::SoulSand
-                | BlockType::EndStone
-                | BlockType::Purpur
-        ) {
-        VoxelShape::FULL_CUBE
-    } else {
-        VoxelShape::EMPTY
-    };
-
-    shape.translate(Vec3::new(fx, fy, fz))
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -798,12 +749,4 @@ mod tests {
         assert!((t_step - 1.0).abs() < 1e-4); // hits top step at y = 1.0
     }
 
-    #[test]
-    fn non_full_blocks_have_empty_occlusion() {
-        assert!(block_occlusion_shape(BlockType::OakSlab, 0, (0, 0, 0)).is_empty());
-        assert!(block_occlusion_shape(BlockType::OakStair, 0, (0, 0, 0)).is_empty());
-        assert!(block_occlusion_shape(BlockType::OakFence, 0, (0, 0, 0)).is_empty());
-        assert!(block_occlusion_shape(BlockType::CobblestoneWall, 0, (0, 0, 0)).is_empty());
-        assert!(block_occlusion_shape(BlockType::GlassPane, 0, (0, 0, 0)).is_empty());
-    }
 }

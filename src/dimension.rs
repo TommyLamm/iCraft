@@ -8,8 +8,8 @@ use std::collections::VecDeque;
 
 pub type BlockPos = (i32, i32, i32);
 
-const NETHER_HEIGHT: usize = 128;
 const LAVA_LEVEL: usize = 31;
+const NETHER_COLUMN_HEIGHT: usize = WorldHeight::NETHER.height() as usize;
 const END_CITY_X: i32 = 1_032;
 const END_CITY_Z: i32 = 8;
 const END_CITY_BASE_Y: i32 = 71;
@@ -297,7 +297,7 @@ fn generate_overworld_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
 }
 
 fn contains_block(
-    blocks: &[[[BlockType; CHUNK_DEPTH]; NETHER_HEIGHT]; CHUNK_WIDTH],
+    blocks: &[[[BlockType; CHUNK_DEPTH]; NETHER_COLUMN_HEIGHT]; CHUNK_WIDTH],
     target: BlockType,
 ) -> bool {
     blocks
@@ -308,7 +308,7 @@ fn contains_block(
 }
 
 fn generate_nether_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
-    let mut blocks = [[[BlockType::Air; CHUNK_DEPTH]; NETHER_HEIGHT]; CHUNK_WIDTH];
+    let mut blocks = [[[BlockType::Air; CHUNK_DEPTH]; NETHER_COLUMN_HEIGHT]; CHUNK_WIDTH];
     let caves = Perlin::new(seed ^ 0x4E45_5448);
     let caverns = Perlin::new(seed ^ 0xC0A7_3E55);
     let valleys = Perlin::new(seed ^ 0x5015_A4D0);
@@ -322,13 +322,13 @@ fn generate_nether_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
                 .abs()
                 < 0.20;
 
-            for y in 0..NETHER_HEIGHT {
-                let block = if y == 0 || y == NETHER_HEIGHT - 1 {
+            for y in 0..NETHER_COLUMN_HEIGHT {
+                let block = if y == 0 || y == NETHER_COLUMN_HEIGHT - 1 {
                     BlockType::Bedrock
                 } else if y <= 4
                     && crate::worldgen::hash_coord(seed, world_x, y as i32, world_z, 0) % 5
                         < (5 - y) as u32
-                    || y >= NETHER_HEIGHT - 5
+                    || y >= NETHER_COLUMN_HEIGHT - 5
                         && crate::worldgen::hash_coord(
                             seed ^ 0xBED0_CAFE,
                             world_x,
@@ -336,7 +336,7 @@ fn generate_nether_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
                             world_z,
                             0,
                         ) % 5
-                            < (y - (NETHER_HEIGHT - 5) + 1) as u32
+                            < (y - (NETHER_COLUMN_HEIGHT - 5) + 1) as u32
                 {
                     BlockType::Bedrock
                 } else {
@@ -365,7 +365,7 @@ fn generate_nether_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
             }
 
             if valley {
-                for y in 6..(NETHER_HEIGHT - 5) {
+                for y in 6..(NETHER_COLUMN_HEIGHT - 5) {
                     if blocks[x][y][z] == BlockType::Netherrack
                         && matches!(blocks[x][y + 1][z], BlockType::Air | BlockType::Lava)
                     {
@@ -384,7 +384,7 @@ fn generate_nether_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
         for z in 0..CHUNK_DEPTH {
             let world_x = chunk_x * CHUNK_WIDTH as i32 + x as i32;
             let world_z = chunk_z * CHUNK_DEPTH as i32 + z as i32;
-            for y in 35..(NETHER_HEIGHT - 6) {
+            for y in 35..(NETHER_COLUMN_HEIGHT - 6) {
                 if blocks[x][y][z] == BlockType::Air
                     && blocks[x][y + 1][z] == BlockType::Netherrack
                     && crate::worldgen::hash_coord(
@@ -446,7 +446,7 @@ fn generate_nether_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
         }
     }
 
-    let mut block_light = [[[0u8; CHUNK_DEPTH]; NETHER_HEIGHT]; CHUNK_WIDTH];
+    let mut block_light = [[[0u8; CHUNK_DEPTH]; NETHER_COLUMN_HEIGHT]; CHUNK_WIDTH];
     let mut heightmap: Box<[[i16; CHUNK_DEPTH]; CHUNK_WIDTH]> =
         vec![[crate::world::NO_HEIGHT; CHUNK_DEPTH]; CHUNK_WIDTH]
             .try_into()
@@ -455,7 +455,7 @@ fn generate_nether_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
 
     for x in 0..CHUNK_WIDTH {
         for z in 0..CHUNK_DEPTH {
-            for y in (0..NETHER_HEIGHT).rev() {
+            for y in (0..NETHER_COLUMN_HEIGHT).rev() {
                 let block = blocks[x][y][z];
                 if heightmap[x][z] == crate::world::NO_HEIGHT && block != BlockType::Air {
                     heightmap[x][z] = y as i16;
@@ -490,7 +490,7 @@ fn generate_nether_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
             if nx < 0
                 || nx >= CHUNK_WIDTH as isize
                 || ny < 0
-                || ny >= NETHER_HEIGHT as isize
+                || ny >= NETHER_COLUMN_HEIGHT as isize
                 || nz < 0
                 || nz >= CHUNK_DEPTH as isize
             {
@@ -1064,7 +1064,7 @@ mod tests {
             for z in 0..CHUNK_DEPTH {
                 assert_eq!(chunk.get_block_local(x, 0, z), BlockType::Bedrock);
                 assert_eq!(
-                    chunk.get_block_local(x, (NETHER_HEIGHT - 1) as i32, z),
+                    chunk.get_block_local(x, (NETHER_COLUMN_HEIGHT - 1) as i32, z),
                     BlockType::Bedrock
                 );
             }

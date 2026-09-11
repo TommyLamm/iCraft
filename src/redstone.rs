@@ -93,18 +93,6 @@ impl Direction {
         }
     }
 
-    pub fn dx(self) -> i32 {
-        self.delta().0
-    }
-
-    pub fn dy(self) -> i32 {
-        self.delta().1
-    }
-
-    pub fn dz(self) -> i32 {
-        self.delta().2
-    }
-
     pub fn opposite(self) -> Self {
         match self {
             Self::North => Self::South,
@@ -390,19 +378,9 @@ impl RedstoneSystem {
         bytes
     }
 
-    /// Alias for [`Self::canonical_snapshot`] for generic harness callers.
-    pub fn snapshot(&self) -> Vec<u8> {
-        self.canonical_snapshot()
-    }
-
     /// Computes the canonical FNV-1a checksum for [`Self::canonical_snapshot`].
     pub fn canonical_checksum(&self) -> u64 {
         fnv1a(&self.canonical_snapshot())
-    }
-
-    /// Short alias for callers that only need the canonical redstone checksum.
-    pub fn checksum(&self) -> u64 {
-        self.canonical_checksum()
     }
 
     pub fn power_at(&self, pos: BlockPos) -> u8 {
@@ -410,13 +388,6 @@ impl RedstoneSystem {
             .get(&pos)
             .map(|state| state.signal.power)
             .unwrap_or(0)
-    }
-
-    pub fn charge_at(&self, pos: BlockPos) -> ChargeKind {
-        self.components
-            .get(&pos)
-            .map(|state| state.signal.charge)
-            .unwrap_or(ChargeKind::Unpowered)
     }
 
     pub fn block_state_at(&self, manager: &ChunkManager, pos: BlockPos) -> RedstoneState {

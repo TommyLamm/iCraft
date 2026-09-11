@@ -2398,19 +2398,6 @@ mod tests {
             })
             .unwrap();
         host_tx
-            .try_send(HostToServer::BroadcastPlayerHealth {
-                sequence: 3,
-                player_id,
-                health: 14.0,
-                max_health: 20.0,
-                hunger: 17.0,
-                saturation: 2.0,
-                oxygen: 280.0,
-                is_dead: false,
-                death_reason: 0,
-            })
-            .unwrap();
-        host_tx
             .try_send(HostToServer::PlayerEffect {
                 to: None,
                 sequence: 3,
@@ -2426,10 +2413,9 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         let mut saw_spawn = false;
         let mut latest_entity_x = None;
-        let mut health = None;
         let mut effects = None;
         while std::time::Instant::now() < deadline
-            && (!saw_spawn || latest_entity_x != Some(3.0) || health.is_none() || effects.is_none())
+            && (!saw_spawn || latest_entity_x != Some(3.0) || effects.is_none())
         {
             let Ok(event) = event_rx.recv_timeout(Duration::from_millis(250)) else {
                 continue;
@@ -2441,11 +2427,6 @@ mod tests {
                 ClientToGame::EntityState { state, .. } if state.entity_id == 77 => {
                     latest_entity_x = Some(state.position[0]);
                 }
-                ClientToGame::PlayerHealth {
-                    player_id: id,
-                    health: value,
-                    ..
-                } if id == player_id => health = Some(value),
                 ClientToGame::PlayerEffect {
                     player_id: id,
                     effects: value,
@@ -2456,7 +2437,6 @@ mod tests {
         }
         assert!(saw_spawn);
         assert_eq!(latest_entity_x, Some(3.0));
-        assert_eq!(health, Some(14.0));
         assert_eq!(effects.unwrap()[0].level, 2);
 
         host_tx

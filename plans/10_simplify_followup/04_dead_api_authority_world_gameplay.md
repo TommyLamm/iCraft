@@ -49,12 +49,12 @@
 
 ## 精確 acceptance
 
-- [ ] 上三表符號刪除；`cargo check --all-targets` 無 `dead_code` 警告來自這些位置。
-- [ ] `sleeping_players`：實作醒來／跳夜（離床或天亮 `clear`），**或**刪欄位只留床方塊檢查；新增測試「連續兩次 `/sleep` 都不是 `InvalidState`」。
-- [ ] `server_world.rs` 測試改走 `AuthorityCore::submit_request`；`dispatch` 刪除。
-- [ ] `world_tick`／`fluid` 測試改呼叫 `*_in_columns(..., Some(all_loaded))`；wrapper 刪除。
-- [ ] `BlockMutationRequest` 縮為 `pos`＋`new_block`＋`new_state`（+ 必要 fluid 欄位）。
-- [ ] `mesh.rs` 測試改走 `mesh_l0_volume`／section halo 入口。
+- [x] 上三表符號刪除；`cargo check --all-targets` 無 `dead_code` 警告來自這些位置。
+- [x] `sleeping_players`：實作醒來／跳夜（離床或天亮 `clear`），**或**刪欄位只留床方塊檢查；新增測試「連續兩次 `/sleep` 都不是 `InvalidState`」。
+- [x] `server_world.rs` 測試改走 `AuthorityCore::submit_request`；`dispatch` 刪除。
+- [x] `world_tick`／`fluid` 測試改呼叫 `*_in_columns(..., Some(all_loaded))`；wrapper 刪除。
+- [x] `BlockMutationRequest` 縮為 `pos`＋`new_block`＋`new_state`（+ 必要 fluid 欄位）。
+- [x] `mesh.rs` 測試改走 `mesh_l0_volume`／section halo 入口。
 
 ## 預計檔案與測試
 
@@ -74,3 +74,30 @@
 - 渲染／UI／存檔／資源側死 API（Plan 05）。
 - `active_dimension`／`world()`（Plan 11）。
 - error enum 塌縮（Plan 10）。
+
+## 實作與證據
+
+### 改了什麼
+
+- 刪權威死 API：`session_gameplay` getter、`AUTHORITY_CONTRACT_VERSION`、`common_vector_snapshot`、`cache_len`、`place_bonus_chest`、`close_container_viewers`（非 forced）、`ServerWorld::new`（測試改 `new_with_difficulty`）、`ensure_villager`／`ensure_vehicle`（測試改直接 `entities.push`＋`rebuild_indexes`）。
+- 修 `/sleep`：刪 `sleeping_players` 欄位，只留床方塊檢查；`tests/authority_gameplay_domains.rs::consecutive_sleep_requests_are_not_invalid_state`。
+- 刪 `HostToServer::{BroadcastPlayerHealth, BroadcastSleepStateSync}` 與 egress／client 測試注入。
+- 刪世界死 API：chunk 級 `generate_mesh*`／`generate_surface_mesh*`／`ChunkMeshBundle`、column dirty-mesh queue、`CHUNK_HEIGHT`／`SECTION_COUNT`／樹 helper／`find_safe_spawn_position`／`block_occlusion_shape`；Nether 陣列高度改 `WorldHeight::NETHER.height()`。
+- 刪玩法死 API：redstone alias／`charge_at`／`Direction::d*`、entity `clear`／`get_index_by_id`／`update_spatial_indexes`／`get_entities_in_chunk`、`tick_all_loaded_*` wrappers、`StrongholdLibrary`、weather authority RNG helpers、`match_recipe`／`get_highest_solid_y` aliases。
+- Wave 09 已完成項核對：`ServerWorld::dispatch`、`MutationCause`／`BlockMutationRequest` 收縮、`sample_all_loaded_random_ticks` 已不在源碼；本計劃不再重做。
+- 附帶修兩個既有測試漂移：session 投影改 `set_session_gameplay`（dirty mark）；waterlogged slab 斷言改讀 `local_position()`（`REGION_ORIGIN_Y` 編碼）。
+
+### 測了什麼
+
+- `cargo test --lib`：731 passed
+- `cargo test --lib world::mesh::`／`fluid::`／`world_tick::`／`server_world::`／`authority::`
+- `cargo test --test authority_gameplay_domains consecutive_sleep`
+- `cargo test --test headless_server_authority`
+- `cargo check --all-targets`；`cargo check --bin icraft-server`
+
+### 留下的缺口
+
+- `Packet::PlayerHealth`／`SleepStateSync` 與 join presentation 消費鏈仍在（Plan 07／08 事件塌縮範圍）。
+- Nether 仍用 dense 中間陣列（`NETHER_COLUMN_HEIGHT`）；paletted 直填留給 Plan 16。
+- `get_entities_by_type` 仍 `#[allow(dead_code)]`（本表未列）。
+- 完整 skip-night／wake 睡眠語意未實作（本計劃採刪欄位方案）。

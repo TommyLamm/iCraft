@@ -1,10 +1,7 @@
-use crate::world::block::{BlockType, RenderType, CHUNK_HEIGHT};
+use crate::world::block::{BlockType, RenderType};
 use std::mem::{size_of, size_of_val};
 
 pub const SECTION_SIZE: usize = 16;
-/// Number of 16-high sections in a legacy 256-tall dense column.
-/// Live dimensions use `WorldHeight::section_count()`.
-pub const SECTION_COUNT: usize = CHUNK_HEIGHT / SECTION_SIZE;
 pub const SECTION_VOLUME: usize = SECTION_SIZE * SECTION_SIZE * SECTION_SIZE;
 
 pub const fn world_y_to_section_y(y: i32) -> i8 {

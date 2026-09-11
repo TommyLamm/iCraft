@@ -1224,16 +1224,22 @@ mod tests {
         assert!(trans_vertices
             .iter()
             .all(|vertex| vertex.atlas_tile == [3, 4]));
-        assert!(trans_vertices.iter().all(|vertex| vertex.pos[1] >= 16));
-        assert!(trans_vertices.iter().all(|vertex| vertex.pos[1] <= 32));
-        let has_horizontal_quad = |vertices: &[TerrainVertex], indices: &[u32], y: u16| {
+        // Packed `pos.y` is relative to `REGION_ORIGIN_Y`; compare decoded local Y.
+        assert!(trans_vertices
+            .iter()
+            .all(|vertex| vertex.local_position()[1] >= 0.5));
+        assert!(trans_vertices
+            .iter()
+            .all(|vertex| vertex.local_position()[1] <= 1.0));
+        let has_horizontal_quad = |vertices: &[TerrainVertex], indices: &[u32], y: f32| {
             indices.chunks_exact(6).any(|quad| {
-                quad.iter()
-                    .all(|index| vertices[*index as usize].pos[1] == y)
+                quad.iter().all(|index| {
+                    (vertices[*index as usize].local_position()[1] - y).abs() < 1e-3
+                })
             })
         };
-        assert!(!has_horizontal_quad(&trans_vertices, &trans_indices, 16));
-        assert!(has_horizontal_quad(&trans_vertices, &trans_indices, 32));
+        assert!(!has_horizontal_quad(&trans_vertices, &trans_indices, 0.5));
+        assert!(has_horizontal_quad(&trans_vertices, &trans_indices, 1.0));
 
         let mut top_vertices = Vec::new();
         let mut top_indices = Vec::new();
@@ -1255,9 +1261,11 @@ mod tests {
         );
         assert_eq!(top_vertices.len(), 20);
         assert_eq!(top_indices.len(), 30);
-        assert!(top_vertices.iter().all(|vertex| vertex.pos[1] <= 16));
-        assert!(!has_horizontal_quad(&top_vertices, &top_indices, 16));
-        assert!(has_horizontal_quad(&top_vertices, &top_indices, 0));
+        assert!(top_vertices
+            .iter()
+            .all(|vertex| vertex.local_position()[1] <= 0.5));
+        assert!(!has_horizontal_quad(&top_vertices, &top_indices, 0.5));
+        assert!(has_horizontal_quad(&top_vertices, &top_indices, 0.0));
 
         let before = trans_vertices.len();
         append_waterlogged_slab_mesh(

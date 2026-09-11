@@ -957,10 +957,6 @@ impl RecipeManager {
         self.smelting_recipes.iter().find(|r| r.input == input)
     }
 
-    pub fn match_recipe(&self, grid: &[Option<ItemStack>], grid_size: usize) -> Option<ItemStack> {
-        self.match_crafting_recipe(grid, grid_size)
-    }
-
     pub fn match_crafting_recipe(
         &self,
         grid: &[Option<ItemStack>],

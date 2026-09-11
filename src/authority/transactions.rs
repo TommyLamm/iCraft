@@ -216,7 +216,7 @@ pub fn execute_craft(
     }
 
     let output = recipes
-        .match_recipe(&grid[..active_len], usize::from(grid_size))
+        .match_crafting_recipe(&grid[..active_len], usize::from(grid_size))
         .ok_or(TransactionError::InvalidRecipe)?;
     let output_slot = slot_from_stack(output);
     let mut candidate = *session;

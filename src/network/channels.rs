@@ -142,17 +142,6 @@ pub enum HostToServer {
         sequence: u64,
         entity_id: u64,
     },
-    BroadcastPlayerHealth {
-        sequence: u64,
-        player_id: PlayerId,
-        health: f32,
-        max_health: f32,
-        hunger: f32,
-        saturation: f32,
-        oxygen: f32,
-        is_dead: bool,
-        death_reason: u8,
-    },
     PlayerEffect {
         to: Option<PlayerId>,
         sequence: u64,
@@ -244,10 +233,6 @@ pub enum HostToServer {
         to: PlayerId,
         position: [f32; 3],
         dimension: u8,
-    },
-    BroadcastSleepStateSync {
-        player_id: PlayerId,
-        is_sleeping: bool,
     },
     SendGameplayResponse {
         to: PlayerId,

@@ -68,7 +68,6 @@ pub struct ServerWorld {
     /// Redstone actions are drained after the world tick by AuthorityCore so
     /// globally unique entity ids can be assigned before execution.
     pending_redstone_actions: Vec<RedstoneAction>,
-    pub sleeping_players: BTreeSet<PlayerId>,
     block_revisions: BTreeMap<(i32, i32, i32), u64>,
     /// XOR of per-entry FNV-1a fingerprints for `block_revisions`.
     /// Maintained on insert/remove so idle ticks do not scan the map.
@@ -88,25 +87,6 @@ pub struct ContainerClosure {
 }
 
 impl ServerWorld {
-    pub fn new(
-        seed: u32,
-        dimension: Dimension,
-        world_type: WorldType,
-        generate_structures: bool,
-        rules: WorldRules,
-        render_distance: i32,
-    ) -> Self {
-        Self::new_with_difficulty(
-            seed,
-            dimension,
-            world_type,
-            generate_structures,
-            rules,
-            render_distance,
-            Difficulty::default(),
-        )
-    }
-
     pub fn new_with_difficulty(
         seed: u32,
         dimension: Dimension,
@@ -137,7 +117,6 @@ impl ServerWorld {
             pending_container_closures: Vec::new(),
             pending_mutations: Vec::new(),
             pending_redstone_actions: Vec::new(),
-            sleeping_players: BTreeSet::new(),
             block_revisions: BTreeMap::new(),
             block_revision_checksum: 0,
             chunk_revisions: BTreeMap::new(),
@@ -447,16 +426,6 @@ impl ServerWorld {
         for entity in data {
             self.entities.add_restored_entity(entity);
         }
-    }
-
-    /// Remove a player's container viewer registrations on logout, dimension
-    /// change, or a failed reconnect. Empty viewer sets are pruned so they do
-    /// not keep routing slots to a departed identity.
-    pub fn close_container_viewers(&mut self, player_id: PlayerId) {
-        self.container_viewers.retain(|_, viewers| {
-            viewers.remove(&player_id);
-            !viewers.is_empty()
-        });
     }
 
     /// Remove one exact viewer registration and report whether it existed.
@@ -1101,34 +1070,6 @@ impl ServerWorld {
         }
     }
 
-    /// Test fixture: seed the optional world-creation chest.
-    ///
-    /// Production tick and world-creation paths do not call this helper.
-    #[cfg(test)]
-    pub fn place_bonus_chest(&mut self, position: (i32, i32, i32)) -> Option<WorldMutation> {
-        if self.get_block(position.0, position.1, position.2) != BlockType::Air {
-            return None;
-        }
-        let mutation = self
-            .set_block(position.0, position.1, position.2, BlockType::Chest, 0)
-            .ok()??;
-        if let Some(BlockEntity::Chest(chest)) = self
-            .chunks
-            .get_block_entity_mut(position.0, position.1, position.2)
-        {
-            use crate::inventory::{Item, ItemStack};
-            for (slot, item, count) in [
-                (0, Item::OakLog, 4),
-                (1, Item::OakPlanks, 8),
-                (2, Item::Stick, 8),
-                (3, Item::Bread, 4),
-            ] {
-                chest.set_stack(slot, Some(ItemStack::new(item, count)));
-            }
-        }
-        Some(mutation)
-    }
-
     pub fn validate_request(
         &self,
         request: &GameplayRequest,
@@ -1156,62 +1097,6 @@ impl ServerWorld {
             return Err(RejectReason::PermissionDenied);
         }
         Ok(())
-    }
-
-    /// Test fixture: seed a session-facing villager.
-    ///
-    /// Existing IDs/types are never overwritten, preserving duplicate-identity
-    /// and deterministic trade semantics. Production tick does not call this.
-    #[cfg(test)]
-    pub fn ensure_villager(
-        &mut self,
-        villager_id: u64,
-        position: [f32; 3],
-        profession: crate::village::poi::VillagerProfession,
-        level: crate::village::trade::VillagerLevel,
-        offers: Vec<crate::village::trade::TradeOffer>,
-    ) -> bool {
-        if let Some(entity) = self.entities.get_by_id(villager_id) {
-            return entity.entity_type == EntityType::Villager;
-        }
-        let mut entity = crate::entity::Entity::new(
-            villager_id,
-            EntityType::Villager,
-            Vec3::from_array(position),
-        );
-        entity.profession = profession;
-        entity.villager_level = level;
-        entity.offers = offers;
-        self.entities.entities.push(entity);
-        self.entities.rebuild_indexes();
-        true
-    }
-
-    /// Test fixture: seed a boat, minecart, or horse. Production tick does
-    /// not call this helper.
-    #[cfg(test)]
-    pub fn ensure_vehicle(
-        &mut self,
-        vehicle_id: u64,
-        entity_type: EntityType,
-        position: [f32; 3],
-    ) -> bool {
-        if !matches!(
-            entity_type,
-            EntityType::Boat | EntityType::Minecart | EntityType::Horse
-        ) {
-            return false;
-        }
-        if let Some(entity) = self.entities.get_by_id(vehicle_id) {
-            return entity.entity_type == entity_type;
-        }
-        self.entities.entities.push(crate::entity::Entity::new(
-            vehicle_id,
-            entity_type,
-            Vec3::from_array(position),
-        ));
-        self.entities.rebuild_indexes();
-        true
     }
 
     pub fn ensure_entity(
@@ -1443,12 +1328,12 @@ impl ServerWorld {
         x: i32,
         y: i32,
         z: i32,
-        player_id: PlayerId,
+        _player_id: PlayerId,
     ) -> Result<Option<WorldMutation>, RejectReason> {
+        // Bed presence is the only sleep gate. A former `sleeping_players`
+        // insert-only set latched the first success forever (second `/sleep`
+        // always `InvalidState`) and was never read or cleared on wake/dawn.
         if self.get_block(x, y, z) != BlockType::Bed {
-            return Err(RejectReason::InvalidState);
-        }
-        if !self.sleeping_players.insert(player_id) {
             return Err(RejectReason::InvalidState);
         }
         Ok(Some(self.touch_revision(x, y, z)))
@@ -1572,7 +1457,7 @@ impl ServerWorld {
         }
 
         // These systems mutate actual block entities/chunks, not a shadow map.
-        // Simulation-union only — do not call tick_all_loaded_*.
+        // Simulation-union only — always pass Some(union) to *_in_columns.
         let hopper = crate::world_tick::tick_hoppers_in_columns(
             &mut self.chunks,
             Some(&mut self.entities),
@@ -2291,14 +2176,13 @@ mod tests {
 
     #[test]
     fn block_mutation_changes_real_chunk_and_revision() {
-        let mut world = ServerWorld::new(
+        let mut world = ServerWorld::new_with_difficulty(
             7,
             Dimension::Overworld,
             WorldType::Superflat,
             false,
             WorldRules::default(),
-            2,
-        );
+            2, Difficulty::default());
         let old = world.get_block(8, 80, 8);
         let mutation = world
             .set_block(8, 80, 8, BlockType::Chest, 0)
@@ -2312,14 +2196,13 @@ mod tests {
 
     #[test]
     fn authoritative_dispenser_matrix_preserves_payload_and_revisions() {
-        let mut world = ServerWorld::new(
+        let mut world = ServerWorld::new_with_difficulty(
             17,
             Dimension::Overworld,
             WorldType::Superflat,
             false,
             WorldRules::default(),
-            2,
-        );
+            2, Difficulty::default());
         let source = (8, 80, 8);
         let front = (8, 80, 9);
         world
@@ -2371,14 +2254,13 @@ mod tests {
 
     #[test]
     fn authoritative_dropper_insert_is_merge_first_and_fallback_is_one_item() {
-        let mut world = ServerWorld::new(
+        let mut world = ServerWorld::new_with_difficulty(
             17,
             Dimension::Overworld,
             WorldType::Superflat,
             false,
             WorldRules::default(),
-            2,
-        );
+            2, Difficulty::default());
         let source = (8, 80, 8);
         let target = (8, 80, 9);
         world
@@ -2464,14 +2346,13 @@ mod tests {
 
     #[test]
     fn authoritative_dispense_skips_unloaded_front_without_consumption() {
-        let mut world = ServerWorld::new(
+        let mut world = ServerWorld::new_with_difficulty(
             17,
             Dimension::Overworld,
             WorldType::Superflat,
             false,
             WorldRules::default(),
-            2,
-        );
+            2, Difficulty::default());
         let source = (15, 80, 8);
         world
             .set_block(source.0, source.1, source.2, BlockType::Dispenser, 0)
@@ -2508,14 +2389,13 @@ mod tests {
 
     #[test]
     fn dispenser_invalid_entity_id_is_atomic_and_bucket_consumes_one_with_rollback() {
-        let mut world = ServerWorld::new(
+        let mut world = ServerWorld::new_with_difficulty(
             17,
             Dimension::Overworld,
             WorldType::Superflat,
             false,
             WorldRules::default(),
-            2,
-        );
+            2, Difficulty::default());
         let source = (8, 80, 8);
         let front = (8, 80, 9);
         world
@@ -2629,14 +2509,13 @@ mod tests {
 
     #[test]
     fn bucket_rejects_flowing_or_falling_source_without_consumption() {
-        let mut world = ServerWorld::new(
+        let mut world = ServerWorld::new_with_difficulty(
             17,
             Dimension::Overworld,
             WorldType::Superflat,
             false,
             WorldRules::default(),
-            2,
-        );
+            2, Difficulty::default());
         let source = (8, 80, 8);
         let front = (8, 80, 9);
         world
@@ -2700,14 +2579,13 @@ mod tests {
 
     #[test]
     fn chest_first_and_last_viewer_toggle_authoritative_state() {
-        let mut world = ServerWorld::new(
+        let mut world = ServerWorld::new_with_difficulty(
             7,
             Dimension::Overworld,
             WorldType::Superflat,
             false,
             WorldRules::default(),
-            2,
-        );
+            2, Difficulty::default());
         let position = (8, 80, 8);
         world
             .set_block(position.0, position.1, position.2, BlockType::Chest, 0)
@@ -2740,14 +2618,13 @@ mod tests {
 
     #[test]
     fn forced_last_viewer_closes_chest_once_and_other_viewer_keeps_it_open() {
-        let mut world = ServerWorld::new(
+        let mut world = ServerWorld::new_with_difficulty(
             7,
             Dimension::Overworld,
             WorldType::Superflat,
             false,
             WorldRules::default(),
-            2,
-        );
+            2, Difficulty::default());
         let position = (8, 80, 8);
         world
             .set_block(position.0, position.1, position.2, BlockType::Chest, 0)
@@ -2774,14 +2651,13 @@ mod tests {
 
     #[test]
     fn chest_block_break_emits_dimension_scoped_closures() {
-        let mut world = ServerWorld::new(
+        let mut world = ServerWorld::new_with_difficulty(
             7,
             Dimension::Nether,
             WorldType::Superflat,
             false,
             WorldRules::default(),
-            2,
-        );
+            2, Difficulty::default());
         let position = (8, 80, 8);
         world
             .set_block(position.0, position.1, position.2, BlockType::Chest, 0)
@@ -2808,14 +2684,13 @@ mod tests {
 
     #[test]
     fn double_chest_open_publishes_partner_state_mutation() {
-        let mut world = ServerWorld::new(
+        let mut world = ServerWorld::new_with_difficulty(
             7,
             Dimension::Overworld,
             WorldType::Superflat,
             false,
             WorldRules::default(),
-            2,
-        );
+            2, Difficulty::default());
         let left = (8, 80, 8);
         let right = (9, 80, 8);
         let left_state = crate::world::BlockState {
@@ -2857,14 +2732,13 @@ mod tests {
     #[test]
     fn fixed_tick_checksum_is_deterministic() {
         let make = || {
-            let mut world = ServerWorld::new(
+            let mut world = ServerWorld::new_with_difficulty(
                 7,
                 Dimension::Overworld,
                 WorldType::Superflat,
                 false,
                 WorldRules::default(),
-                2,
-            );
+                2, Difficulty::default());
             world
                 .entities
                 .spawn(EntityType::Zombie, Vec3::new(10.0, 80.0, 10.0));
@@ -2876,14 +2750,13 @@ mod tests {
     #[test]
     fn checksum_distinguishes_raw_fluid_mutations() {
         let make = || {
-            ServerWorld::new(
+            ServerWorld::new_with_difficulty(
                 7,
                 Dimension::Overworld,
                 WorldType::Superflat,
                 false,
                 WorldRules::default(),
-                2,
-            )
+                2, Difficulty::default())
         };
         let mut plain = make();
         let mut waterlogged = make();
@@ -2920,14 +2793,13 @@ mod tests {
     }
 
     fn superflat_world(seed: u32) -> ServerWorld {
-        ServerWorld::new(
+        ServerWorld::new_with_difficulty(
             seed,
             Dimension::Overworld,
             WorldType::Superflat,
             false,
             WorldRules::default(),
-            2,
-        )
+            2, Difficulty::default())
     }
 
     #[test]
@@ -3288,15 +3160,19 @@ mod tests {
 
     #[test]
     fn mount_requires_range_and_updates_authoritative_passengers() {
-        let mut world = ServerWorld::new(
+        let mut world = ServerWorld::new_with_difficulty(
             7,
             Dimension::Overworld,
             WorldType::Superflat,
             false,
             WorldRules::default(),
-            2,
-        );
-        assert!(world.ensure_vehicle(11, EntityType::Boat, [9.0, 80.0, 8.0]));
+            2, Difficulty::default());
+        world.entities.entities.push(crate::entity::Entity::new(
+            11,
+            EntityType::Boat,
+            glam::Vec3::new(9.0, 80.0, 8.0),
+        ));
+        world.entities.rebuild_indexes();
         assert_eq!(world.apply_mount(7, 11, [8.0, 80.0, 8.0]), Ok(Some(11)));
         assert!(world
             .entities
@@ -3304,7 +3180,12 @@ mod tests {
             .unwrap()
             .passengers
             .contains(&7));
-        assert!(world.ensure_vehicle(12, EntityType::Boat, [100.0, 80.0, 8.0]));
+        world.entities.entities.push(crate::entity::Entity::new(
+            12,
+            EntityType::Boat,
+            glam::Vec3::new(100.0, 80.0, 8.0),
+        ));
+        world.entities.rebuild_indexes();
         assert_eq!(
             world.apply_mount(7, 12, [8.0, 80.0, 8.0]),
             Err(RejectReason::TooFar)
@@ -3319,20 +3200,22 @@ mod tests {
 
     #[test]
     fn trade_second_cost_failure_rolls_back_first_cost() {
-        let mut world = ServerWorld::new(
+        let mut world = ServerWorld::new_with_difficulty(
             7,
             Dimension::Overworld,
             WorldType::Superflat,
             false,
             WorldRules::default(),
-            2,
-        );
-        assert!(world.ensure_villager(
-            21,
-            [9.0, 80.0, 8.0],
-            crate::village::poi::VillagerProfession::Farmer,
-            crate::village::trade::VillagerLevel::Novice,
-            vec![crate::village::trade::TradeOffer::new(
+            2, Difficulty::default());
+        {
+            let mut entity = crate::entity::Entity::new(
+                21,
+                EntityType::Villager,
+                glam::Vec3::new(9.0, 80.0, 8.0),
+            );
+            entity.profession = crate::village::poi::VillagerProfession::Farmer;
+            entity.villager_level = crate::village::trade::VillagerLevel::Novice;
+            entity.offers = vec![crate::village::trade::TradeOffer::new(
                 crate::inventory::ItemStack::new(crate::inventory::Item::Wheat, 2),
                 Some(crate::inventory::ItemStack::new(
                     crate::inventory::Item::Carrot,
@@ -3341,8 +3224,10 @@ mod tests {
                 crate::inventory::ItemStack::new(crate::inventory::Item::Emerald, 1),
                 4,
                 1,
-            )],
-        ));
+            )];
+            world.entities.entities.push(entity);
+            world.entities.rebuild_indexes();
+        }
         let mut gameplay = SessionGameplayState::default();
         let mut wheat = crate::network::protocol::ItemWire::empty();
         wheat.item = crate::inventory::Item::Wheat as u32;
@@ -3359,14 +3244,13 @@ mod tests {
 
     #[test]
     fn tick_automation_walks_simulation_columns_not_residency() {
-        let mut world = ServerWorld::new(
+        let mut world = ServerWorld::new_with_difficulty(
             7,
             Dimension::Overworld,
             WorldType::Superflat,
             false,
             WorldRules::default(),
-            2,
-        );
+            2, Difficulty::default());
         world.set_block(8, 80, 8, BlockType::Hopper, 0).unwrap();
         world.set_block(128, 80, 8, BlockType::Hopper, 0).unwrap();
         if let Some(BlockEntity::Hopper(hopper)) = world.chunks.get_block_entity_mut(8, 80, 8) {
@@ -3391,14 +3275,13 @@ mod tests {
 
     #[test]
     fn evict_flushes_dirty_then_removes_unkept_columns() {
-        let mut world = ServerWorld::new(
+        let mut world = ServerWorld::new_with_difficulty(
             7,
             Dimension::Overworld,
             WorldType::Superflat,
             false,
             WorldRules::default(),
-            2,
-        );
+            2, Difficulty::default());
         world
             .set_block(128, 80, 8, BlockType::DiamondOre, 0)
             .unwrap();
@@ -3420,14 +3303,13 @@ mod tests {
     fn do_fire_tick_false_filters_fire_random_ticks() {
         let mut rules = WorldRules::default();
         rules.do_fire_tick = false;
-        let mut world = ServerWorld::new(
+        let mut world = ServerWorld::new_with_difficulty(
             11,
             Dimension::Overworld,
             WorldType::Superflat,
             false,
             rules,
-            2,
-        );
+            2, Difficulty::default());
         world.set_block(4, 65, 4, BlockType::Fire, 0).unwrap();
         let players = [(1u64, [4.0_f32, 65.0, 4.0])];
         for _ in 0..400 {

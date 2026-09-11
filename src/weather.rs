@@ -228,14 +228,6 @@ impl WeatherSystem {
         random_offset(&mut self.presentation_rng, radius)
     }
 
-    pub fn authority_random_offset(&mut self, radius: i32) -> i32 {
-        random_offset(&mut self.authority_rng, radius)
-    }
-
-    pub fn authority_random_seed(&mut self) -> u32 {
-        next_random(&mut self.authority_rng)
-    }
-
     fn random_duration_ticks(&mut self) -> f32 {
         MIN_WEATHER_TICKS
             + random_unit(&mut self.authority_rng) * (MAX_WEATHER_TICKS - MIN_WEATHER_TICKS)
@@ -364,10 +356,10 @@ mod tests {
             with_particles.presentation_random_offset(14);
         }
 
-        assert_eq!(
-            with_particles.authority_random_seed(),
-            without_particles.authority_random_seed()
-        );
+        assert_eq!(with_particles.snapshot(), without_particles.snapshot());
+        with_particles.update_authoritative(1.0, 0.05);
+        without_particles.update_authoritative(1.0, 0.05);
+        assert_eq!(with_particles.snapshot(), without_particles.snapshot());
     }
 
     #[test]

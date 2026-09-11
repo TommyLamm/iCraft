@@ -188,31 +188,6 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
                 state: *state,
             },
         )),
-        HostToServer::BroadcastPlayerHealth {
-            sequence,
-            player_id,
-            health,
-            max_health,
-            hunger,
-            saturation,
-            oxygen,
-            is_dead,
-            death_reason,
-        } => Some((
-            None,
-            Packet::PlayerHealth {
-                protocol_version: PROTOCOL_VERSION,
-                sequence: *sequence,
-                player_id: *player_id,
-                health: *health,
-                max_health: *max_health,
-                hunger: *hunger,
-                saturation: *saturation,
-                oxygen: *oxygen,
-                is_dead: *is_dead,
-                death_reason: *death_reason,
-            },
-        )),
         _ => None,
     };
     if let Some((to, packet)) = state_entry {
@@ -461,18 +436,6 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
             Some(to),
             true,
         ),
-        HostToServer::BroadcastSleepStateSync {
-            player_id,
-            is_sleeping,
-        } => (
-            Packet::SleepStateSync {
-                protocol_version: PROTOCOL_VERSION,
-                player_id,
-                is_sleeping,
-            },
-            None,
-            true,
-        ),
         HostToServer::SendGameplayResponse { to, response } => {
             let response = normalize_host_response(sessions, to, response).await;
             let packet = Packet::GameplayResponse {
@@ -502,7 +465,6 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
         | HostToServer::EntityState { .. }
         | HostToServer::PlayerEffect { .. }
         | HostToServer::SendPlayerSessionUpdate { .. }
-        | HostToServer::BroadcastPlayerHealth { .. }
         | HostToServer::SendChunk { .. }
         | HostToServer::DisconnectCatchupClient { .. }
         | HostToServer::DisconnectClient { .. } => {
