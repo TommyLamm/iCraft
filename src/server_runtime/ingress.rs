@@ -53,8 +53,8 @@ impl ServerRuntime {
             }
             ServerToHost::ChatFromClient { id, message } => {
                 if let Some(sender) = self
-                    .players
-                    .get(&id)
+                    .authority
+                    .session(id)
                     .map(|session| session.username.clone())
                 {
                     self.enqueue_host(HostToServer::project_broadcast(Packet::ChatMessage {
@@ -129,11 +129,11 @@ impl ServerRuntime {
     ) -> io::Result<()> {
         let username = normalize_player_identity(&username)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        if self
-            .players
-            .values()
-            .any(|session| session.username == username)
-        {
+        if self.authority.sessions().any(|session| {
+            session
+                .username
+                .eq_ignore_ascii_case(username.as_str())
+        }) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 format!("duplicate player identity: {username}"),
@@ -171,8 +171,6 @@ impl ServerRuntime {
             }
         };
         let mut session = PlayerSessionState::new(
-            id,
-            username,
             storage,
             data,
             current_dimension,
@@ -183,10 +181,10 @@ impl ServerRuntime {
         let dimension = session.interest.dimension as u8;
         let mut authority_session = SessionContract::new(
             id,
-            session.username.clone(),
+            username.clone(),
             dimension,
             session.data.position,
-            self.properties.operators.contains(&session.username),
+            self.properties.operators.contains(&username),
             self.level.cheats_enabled,
         );
         authority_session.game_mode = session.data.game_mode;
@@ -331,7 +329,12 @@ impl ServerRuntime {
     }
 
     pub(super) fn handle_leave(&mut self, id: u64) -> io::Result<()> {
-        self.sync_game_mode(id);
+        self.sync_gameplay_projection(id);
+        let username = self
+            .authority
+            .session(id)
+            .map(|session| session.username.clone())
+            .unwrap_or_else(|| format!("player-{id}"));
         if let Some(session) = self.players.remove(&id) {
             let dimension = session.interest.dimension;
             self.interest_index_clear_session(
@@ -347,11 +350,8 @@ impl ServerRuntime {
             }
             self.authority
                 .with_world(dimension, |world| world.close_container_viewers_forced(id));
-            if let Err(error) = self.save_player(&session) {
-                eprintln!(
-                    "[ServerRuntime] leave save failed for {}: {error}",
-                    session.username
-                );
+            if let Err(error) = self.save_player(id, &session) {
+                eprintln!("[ServerRuntime] leave save failed for {username}: {error}");
             }
         }
         self.authority.remove_session(id);
@@ -393,14 +393,14 @@ impl ServerRuntime {
         let block_position = (x.floor() as i32, y.floor() as i32, z.floor() as i32);
         let mut targets: Vec<_> = self
             .players
-            .values()
-            .filter(|target| {
-                target.id != id
+            .iter()
+            .filter(|(target_id, target)| {
+                **target_id != id
                     && target
                         .interest
                         .wants(dimension, InterestKind::Block(block_position))
             })
-            .map(|target| target.id)
+            .map(|(target_id, _)| *target_id)
             .collect();
         targets.sort_unstable();
         for target in targets {
@@ -495,8 +495,10 @@ impl ServerRuntime {
                 }
                 match operation {
                     GameplayOperation::Command { .. } => {
-                        let runtime_position =
-                            self.players.get(&id).map(|session| session.data.position);
+                        let runtime_position = self
+                            .players
+                            .get(&id)
+                            .map(|session| session.last_pose_position);
                         let authority_position =
                             self.authority.session(id).map(|session| session.position);
                         if let (Some(runtime_position), Some(authority_position)) =
@@ -579,7 +581,7 @@ impl ServerRuntime {
         let Some((_old_dimension, position)) = self
             .players
             .get(&id)
-            .map(|session| (session.interest.dimension, session.data.position))
+            .map(|session| (session.interest.dimension, session.last_pose_position))
         else {
             return false;
         };

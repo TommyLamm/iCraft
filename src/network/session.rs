@@ -772,18 +772,22 @@ impl Default for CatchupMailbox {
 }
 
 /// Transport-side state for the authoritative gameplay envelope. The
-/// authority core owns accepted sequences and world mutation. The network
-/// allocates missing client sequences and keeps a bounded replay window so
-/// out-of-order packets never cross the host channel (NetworkServer tests
-/// and the TCP thread have no AuthorityCore).
+/// authority core owns accepted sequences, the response cache, and world
+/// mutation. The network allocates missing client sequences, tracks in-flight
+/// request ids, and keeps a sequence watermark so out-of-order packets never
+/// cross the host channel (NetworkServer tests and the TCP thread have no
+/// AuthorityCore). Completed request ids (not responses) are remembered so a
+/// retransmit can be forwarded to the single authority cache.
 #[derive(Debug)]
 pub(crate) struct GameplaySessionState {
     pub(crate) next_request_id: RequestId,
     pub(crate) last_client_sequence: u64,
     pub(crate) last_client_revision: u64,
     pub(crate) last_server_sequence: ServerSequence,
-    pub(crate) response_cache: VecDeque<GameplayResponse>,
     pub(crate) in_flight: HashSet<RequestId>,
+    /// Bounded set of finished request ids used only to forward retransmits to
+    /// authority. Does not store `GameplayResponse` bodies.
+    completed_request_ids: VecDeque<RequestId>,
     pub(crate) current_dimension: u8,
 }
 
@@ -794,8 +798,8 @@ impl Default for GameplaySessionState {
             last_client_sequence: 0,
             last_client_revision: 0,
             last_server_sequence: 0,
-            response_cache: VecDeque::with_capacity(crate::authority::RESPONSE_CACHE_CAPACITY),
             in_flight: HashSet::new(),
+            completed_request_ids: VecDeque::with_capacity(crate::authority::RESPONSE_CACHE_CAPACITY),
             current_dimension: 0,
         }
     }
@@ -813,19 +817,23 @@ impl GameplaySessionState {
         self.last_server_sequence
     }
 
-    pub(crate) fn cache_response(&mut self, response: GameplayResponse) {
-        self.in_flight.remove(&response.request_id);
-        if self.response_cache.len() >= crate::authority::RESPONSE_CACHE_CAPACITY {
-            self.response_cache.pop_front();
-        }
-        self.response_cache.push_back(response);
+    pub(crate) fn clear_in_flight(&mut self, request_id: RequestId) {
+        self.in_flight.remove(&request_id);
     }
 
-    pub(crate) fn cached_response(&self, request_id: RequestId) -> Option<GameplayResponse> {
-        self.response_cache
-            .iter()
-            .find(|response| response.request_id == request_id)
-            .cloned()
+    pub(crate) fn mark_completed(&mut self, request_id: RequestId) {
+        self.clear_in_flight(request_id);
+        if self.completed_request_ids.iter().any(|id| *id == request_id) {
+            return;
+        }
+        if self.completed_request_ids.len() >= crate::authority::RESPONSE_CACHE_CAPACITY {
+            self.completed_request_ids.pop_front();
+        }
+        self.completed_request_ids.push_back(request_id);
+    }
+
+    pub(crate) fn is_completed(&self, request_id: RequestId) -> bool {
+        self.completed_request_ids.iter().any(|id| *id == request_id)
     }
 
     pub(crate) fn rejection(
@@ -833,13 +841,12 @@ impl GameplaySessionState {
         request_id: RequestId,
         reason: RejectReason,
     ) -> GameplayResponse {
-        let response = GameplayResponse {
+        self.mark_completed(request_id);
+        GameplayResponse {
             request_id,
             server_sequence: self.allocate_server_sequence(),
             outcome: crate::network::protocol::GameplayOutcome::Rejected { reason },
-        };
-        self.cache_response(response.clone());
-        response
+        }
     }
 }
 

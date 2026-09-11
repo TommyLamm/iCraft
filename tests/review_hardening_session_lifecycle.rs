@@ -119,7 +119,7 @@ fn end_gateway_hop_accepts_destination_pose() {
         .unwrap();
     runtime.tick().unwrap();
 
-    assert_eq!(runtime.players[&LOCAL_ID].data.position, stepped);
+    assert_eq!(runtime.players[&LOCAL_ID].last_pose_position, stepped);
     assert_eq!(
         runtime.authority.session(LOCAL_ID).unwrap().position,
         stepped

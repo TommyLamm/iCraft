@@ -463,12 +463,31 @@ mod tests {
             Packet::GameplayResponse { response, .. } if response == accepted
         ));
 
-        // A retransmit is answered from the bounded cache and never forwarded
-        // to the authority a second time.
+        // A retransmit after the host cleared in-flight is forwarded again so
+        // the single authority response cache can answer; transport no longer
+        // stores GameplayResponse copies.
         client
             .send(&Packet::GameplayRequest {
                 request: request.clone(),
             })
+            .await
+            .unwrap();
+        let retransmit = server
+            .next_event_matching(|event| matches!(event, ServerToHost::GameplayRequest { .. }))
+            .await;
+        assert!(matches!(
+            retransmit,
+            ServerToHost::GameplayRequest { id: event_id, request: forwarded }
+                if event_id == id && forwarded.request_id == 700
+        ));
+        server
+            .host_tx
+            .send(HostToServer::project_session(
+                id,
+                Packet::GameplayResponse {
+                    response: accepted.clone(),
+                },
+            ))
             .await
             .unwrap();
         let duplicate = recv_matching(&mut client, |packet| {
@@ -479,22 +498,6 @@ mod tests {
             duplicate,
             Packet::GameplayResponse { response, .. } if response == accepted
         ));
-        assert!(
-            time::timeout(Duration::from_millis(100), async {
-                loop {
-                    if matches!(
-                        server.event_rx.try_recv(),
-                        Ok(ServerToHost::GameplayRequest { .. })
-                    ) {
-                        return true;
-                    }
-                    time::sleep(Duration::from_millis(5)).await;
-                }
-            })
-            .await
-            .is_err(),
-            "duplicate request was forwarded"
-        );
 
         client
             .send(&Packet::GameplayRequest {
@@ -522,6 +525,8 @@ mod tests {
                     )
         ));
 
+        // Stale revision and bounds checks live in authority preflight; TCP
+        // only filters sequence + rate-limit + in_flight, so these forward.
         client
             .send(&Packet::GameplayRequest {
                 request: GameplayRequest {
@@ -533,21 +538,35 @@ mod tests {
             })
             .await
             .unwrap();
-        let stale = recv_matching(&mut client, |packet| {
+        let stale_forward = server
+            .next_event_matching(|event| matches!(event, ServerToHost::GameplayRequest { .. }))
+            .await;
+        assert!(matches!(
+            stale_forward,
+            ServerToHost::GameplayRequest { request: forwarded, .. }
+                if forwarded.request_id == 702 && forwarded.client_revision == 4
+        ));
+        // Clear in-flight so the next forward is not suppressed.
+        server
+            .host_tx
+            .send(HostToServer::project_session(
+                id,
+                Packet::GameplayResponse {
+                    response: GameplayResponse {
+                        request_id: 702,
+                        server_sequence: 0,
+                        outcome: crate::network::protocol::GameplayOutcome::Rejected {
+                            reason: RejectReason::InvalidRevision,
+                        },
+                    },
+                },
+            ))
+            .await
+            .unwrap();
+        let _ = recv_matching(&mut client, |packet| {
             matches!(packet, Packet::GameplayResponse { .. })
         })
         .await;
-        assert!(matches!(
-            stale,
-            Packet::GameplayResponse { response, .. }
-                if response.server_sequence > accepted.server_sequence
-                    && matches!(
-                        response.outcome,
-                        crate::network::protocol::GameplayOutcome::Rejected {
-                            reason: RejectReason::InvalidRevision
-                        }
-                    )
-        ));
 
         client
             .send(&Packet::GameplayRequest {
@@ -563,24 +582,16 @@ mod tests {
             })
             .await
             .unwrap();
-        let bounds = recv_matching(&mut client, |packet| {
-            matches!(packet, Packet::GameplayResponse { .. })
-        })
-        .await;
+        let bounds_forward = server
+            .next_event_matching(|event| matches!(event, ServerToHost::GameplayRequest { .. }))
+            .await;
         assert!(matches!(
-            bounds,
-            Packet::GameplayResponse { response, .. }
-                if response.server_sequence > accepted.server_sequence
-                    && matches!(
-                        response.outcome,
-                        crate::network::protocol::GameplayOutcome::Rejected {
-                            reason: RejectReason::StringTooLong
-                        }
-                    )
+            bounds_forward,
+            ServerToHost::GameplayRequest { request: forwarded, .. }
+                if forwarded.request_id == 703
         ));
         let metrics = server.metrics.snapshot();
-        assert_eq!(metrics.duplicate_requests, 1);
-        assert_eq!(metrics.rejected_requests, 3);
+        assert_eq!(metrics.rejected_requests, 1);
         server.stop().await;
     }
 

@@ -119,23 +119,31 @@ policy variants are gone.
 Worlds live in a `BTreeMap` keyed by `Dimension`. `active_dimension` is a
 compatibility key, not a moved slot.
 
-Two session records stay separate because interest and the save codec cannot
-enter the deterministic core:
+One contract plus a runtime overlay stay separate because interest, Instant
+pose clocks, and the save codec cannot enter the deterministic core:
 
-- `SessionContract` in `AuthorityCore` owns pose, dimension, and the accepted
-  client sequence.
-- `PlayerSessionState` in `ServerRuntime` owns interest, the save codec,
-  `Instant` pose clocks, and teleport allowance.
+- `SessionContract` in `AuthorityCore` owns username, pose, dimension,
+  game mode, the accepted client sequence, and the single 128-deep
+  `GameplayResponse` cache.
+- `PlayerSessionState` in `ServerRuntime` is keyed by `PlayerId` and owns
+  interest, the save codec (`PlayerData`), Instant pose clocks
+  (`last_pose_position` / teleport allowance), and projection scratch.
+  It does not mirror id / username / live pose / dimension / game_mode.
 
 Pose / dimension / game mode / gameplay overlays go only through
 `write_pose`, `sync_pose_from_authority`, `sync_dimension`, `sync_game_mode`,
 and `sync_gameplay_projection` in `src/server_runtime/session_sync.rs`.
-`sync_gameplay_projection` always overlays `game_mode` too so `/gamemode`,
-hardcore→spectator, join, and save cannot split `SessionContract` from
-`PlayerData`. `teleport_session` grants `teleport_allowance` before
-`write_pose`. TCP ingress still rejects out-of-order sequences before they
-cross the host channel (the network thread has no `AuthorityCore`); that
-watermark is not a second accepted-sequence source.
+`write_pose` updates the contract (and pose clocks / interest); it does not
+dual-write live pose into `PlayerData`. `sync_gameplay_projection` overlays
+game_mode, gameplay, and pose onto `PlayerData` for projection/save.
+`teleport_session` grants `teleport_allowance` before `write_pose`.
+
+TCP ingress keeps rate-limit, in-flight dedupe, a completed-request-id set
+(for forwarding retransmits to the authority cache), and a sequence watermark
+filter. It does not store `GameplayResponse` bodies. Bounds / revision /
+reach / spectator gates live in authority `preflight` (`dispatch.rs`).
+Block / combat handlers use `SessionActionView` (`Copy`) instead of cloning
+the full contract.
 
 Float→milli pose conversion and the milli abs bound live in
 `authority::contract` (`position_to_milli` / `POSITION_MILLI_ABS_LIMIT`).
@@ -147,10 +155,12 @@ Block / interaction reach is `interaction::PLAYER_REACH` (still 8.0) with
 ```text
 input
   -> bounded runtime/network queue
+  -> TCP: rate-limit + in_flight + sequence watermark (no response cache)
   -> authenticated GameplayRequest
-  -> session + sequence + dimension + revision + interest/reach/state checks
+  -> authority preflight (bounds + sequence + dimension + revision +
+     spectator + reach/state) then single response-cache lookup
   -> atomic AuthorityCore / ServerWorld mutation
-  -> dimension-scoped revision + cached GameplayResponse
+  -> dimension-scoped revision + cached GameplayResponse (authority only)
   -> AuthoritySnapshot / targeted presentation event
   -> embedded State projection or TCP client projection
 ```

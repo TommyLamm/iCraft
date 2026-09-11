@@ -429,7 +429,7 @@ fn run_tcp_vector(label: &str, listen: bool) {
             }
         ));
     }
-    clients[0].send_request(cancel_request(&runtime, owner_id, 2, 2));
+    clients[0].send_request(cancel_request(&runtime, owner_id, 2, 3));
     {
         let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
         let response = wait_for_response(&mut runtime, &mut refs, 0, 2);
@@ -454,7 +454,7 @@ fn run_tcp_vector(label: &str, listen: bool) {
 
     clients[0].clear_events();
     clients[1].clear_events();
-    clients[0].send_request(start_request(&runtime, owner_id, 3, 3, wire));
+    clients[0].send_request(start_request(&runtime, owner_id, 3, 4, wire));
     {
         let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
         let response = wait_for_response(&mut runtime, &mut refs, 0, 3);
@@ -545,7 +545,7 @@ fn run_tcp_vector(label: &str, listen: bool) {
         &runtime,
         owner_id,
         6,
-        4,
+        5,
         PLACE_TARGET,
         chest_wire,
         BlockType::Chest,
@@ -610,7 +610,7 @@ fn run_tcp_vector(label: &str, listen: bool) {
         &runtime,
         owner_id,
         7,
-        5,
+        6,
         PLACE_TARGET,
         wire,
     ));
@@ -683,7 +683,7 @@ fn run_tcp_vector(label: &str, listen: bool) {
         &runtime,
         owner_id,
         8,
-        6,
+        7,
         RECONNECT_TARGET,
         wire,
         RECONNECT_LOOK,

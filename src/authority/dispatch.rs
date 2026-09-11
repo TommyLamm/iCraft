@@ -1,8 +1,8 @@
 use super::AuthorityCore;
 use crate::authority::combat;
 use crate::authority::contract::{
-    self, position_to_milli, MiningProgressState, SessionGameplayState, SessionInventorySlot,
-    WorldMutation,
+    self, position_to_milli, MiningProgressState, SessionContract, SessionGameplayState,
+    SessionInventorySlot, WorldMutation,
 };
 use crate::authority::fishing;
 use crate::authority::transactions;
@@ -11,15 +11,71 @@ use crate::network::protocol::{
     BlockActionKind, ContainerAction, GameplayOperation, GameplayOutcome, GameplayRequest,
     GameplayResponse, ItemWire, PlayerId, RejectReason, SessionSlotWire,
 };
+use crate::server_world::ServerWorld;
+
+#[derive(Debug, Clone, Copy)]
+struct PreflightContext {
+    dimension: Dimension,
+    position: [f32; 3],
+    operator: bool,
+}
+
+/// Session-side half of the single authority preflight (sequence / revision /
+/// spectator). Bounds are checked separately so malformed packets do not
+/// consume the client sequence. World reach and operator command checks follow
+/// via [`ServerWorld::validate_request`].
+fn preflight_session(
+    session: &SessionContract,
+    request: &GameplayRequest,
+    current_revision: u64,
+) -> Result<PreflightContext, RejectReason> {
+    let Some(dimension) = Dimension::from_wire(request.dimension) else {
+        return Err(RejectReason::InvalidDimension);
+    };
+    if session.dimension != request.dimension {
+        return Err(RejectReason::InvalidDimension);
+    }
+    session.validate_sequence(request)?;
+    if request.client_revision > current_revision {
+        return Err(RejectReason::InvalidRevision);
+    }
+    if request.client_revision < session.last_revision {
+        return Err(RejectReason::InvalidRevision);
+    }
+    if session.game_mode == crate::inventory::GameMode::Spectator
+        && !matches!(
+            &request.operation,
+            GameplayOperation::Command { .. } | GameplayOperation::Sleep { .. }
+        )
+    {
+        return Err(RejectReason::PermissionDenied);
+    }
+    Ok(PreflightContext {
+        dimension,
+        position: session.position,
+        operator: session.operator || session.cheats_enabled,
+    })
+}
+
+/// Single authority-side gate: bounds, session checks, then world validate_request.
+pub(crate) fn preflight(
+    session: &SessionContract,
+    request: &GameplayRequest,
+    world: &ServerWorld,
+    current_revision: u64,
+) -> Result<(), RejectReason> {
+    request.validate_bounds()?;
+    let ctx = preflight_session(session, request, current_revision)?;
+    world.validate_request(request, ctx.dimension, ctx.position, ctx.operator)
+}
 
 impl AuthorityCore {
     pub fn submit_request(&mut self, request: GameplayRequest) -> GameplayResponse {
         let request_id = request.request_id;
         let id = request.session_id;
-        let Some(session_dimension_wire) = self.sessions.get(&id).map(|session| session.dimension)
-        else {
+        if self.sessions.get(&id).is_none() {
             return self.rejected(request_id, RejectReason::Unauthorized);
-        };
+        }
         if let Some(cached) = self
             .sessions
             .get(&id)
@@ -30,42 +86,40 @@ impl AuthorityCore {
         let Some(session_dimension) = Dimension::from_wire(request.dimension) else {
             return self.reject_for_session(id, request_id, RejectReason::InvalidDimension, None);
         };
-        if let Err(reason) = request.validate_bounds() {
-            return self.reject_for_session(id, request_id, reason, None);
-        }
-        if session_dimension_wire != request.dimension {
-            return self.reject_for_session(id, request_id, RejectReason::InvalidDimension, None);
-        }
         self.ensure_dimension(session_dimension);
         self.activate_dimension(session_dimension);
-        let Some(session) = self.sessions.get(&id) else {
-            return self.rejected(request_id, RejectReason::Unauthorized);
-        };
-        if let Err(reason) = session.validate_sequence(&request) {
+        let current_revision = self.current_revision();
+        if let Err(reason) = request.validate_bounds() {
+            // Bounds failures stay non-consuming so console-only / malformed
+            // packets cannot burn the accepted-sequence watermark.
             return self.reject_for_session(id, request_id, reason, None);
         }
-        if request.client_revision > self.current_revision() {
-            return self.reject_for_session(id, request_id, RejectReason::InvalidRevision, None);
-        }
-        if request.client_revision < session.last_revision {
-            return self.reject_for_session(id, request_id, RejectReason::InvalidRevision, None);
-        }
-        if session.game_mode == crate::inventory::GameMode::Spectator
-            && !matches!(
-                &request.operation,
-                crate::network::protocol::GameplayOperation::Command { .. }
-                    | crate::network::protocol::GameplayOperation::Sleep { .. }
-            )
-        {
-            return self.reject_for_session(id, request_id, RejectReason::PermissionDenied, None);
-        }
-        let session_position = session.position;
-        let operator = session.operator || session.cheats_enabled;
+        let ctx = {
+            let Some(session) = self.sessions.get(&id) else {
+                return self.rejected(request_id, RejectReason::Unauthorized);
+            };
+            match preflight_session(session, &request, current_revision) {
+                Ok(ctx) => ctx,
+                Err(reason) => {
+                    return self.reject_for_session(
+                        id,
+                        request_id,
+                        reason,
+                        Some(request.client_sequence),
+                    );
+                }
+            }
+        };
         if let Err(reason) =
             self.world()
-                .validate_request(&request, session_dimension, session_position, operator)
+                .validate_request(&request, ctx.dimension, ctx.position, ctx.operator)
         {
-            return self.reject_for_session(id, request_id, reason, None);
+            return self.reject_for_session(
+                id,
+                request_id,
+                reason,
+                Some(request.client_sequence),
+            );
         }
 
         self.pending_session_revisions.clear();
@@ -300,7 +354,7 @@ impl AuthorityCore {
         block_wire: u32,
         look_milli: [i16; 3],
     ) -> Result<Option<WorldMutation>, RejectReason> {
-        let Some(session) = self.sessions.get(&session_id).cloned() else {
+        let Some(session) = self.sessions.get(&session_id).map(|s| s.action_view()) else {
             return Err(RejectReason::Unauthorized);
         };
         let Some(dimension) = Dimension::from_wire(session.dimension) else {
@@ -738,8 +792,7 @@ impl AuthorityCore {
                     water_surface_y_milli: None,
                     consume_durability: game_mode != GameMode::Creative,
                 };
-                fishing::cast(&mut candidate, session_id, hand, look_milli, context)
-                    .map_err(map_fishing_error)?;
+                fishing::cast(&mut candidate, session_id, hand, look_milli, context)?;
                 self.claim_entity_id(hook_id);
             }
             1 => {
@@ -749,17 +802,14 @@ impl AuthorityCore {
                 }
                 let context = self
                     .world_mut_active()
-                    .fishing_context(&candidate, position, game_mode != GameMode::Creative)
-                    .map_err(map_fishing_error)?;
-                fishing::reel(&mut candidate, session_id, hand, context)
-                    .map_err(map_fishing_error)?;
+                    .fishing_context(&candidate, position, game_mode != GameMode::Creative)?;
+                fishing::reel(&mut candidate, session_id, hand, context)?;
             }
             2 => {
                 let context = self
                     .world_mut_active()
-                    .fishing_context(&candidate, position, game_mode != GameMode::Creative)
-                    .map_err(map_fishing_error)?;
-                fishing::cancel(&mut candidate, hand, context).map_err(map_fishing_error)?;
+                    .fishing_context(&candidate, position, game_mode != GameMode::Creative)?;
+                fishing::cancel(&mut candidate, hand, context)?;
             }
             _ => return Err(RejectReason::InvalidState),
         }
@@ -912,8 +962,7 @@ impl AuthorityCore {
                     context,
                     *grid,
                     *sources,
-                )
-                .map_err(map_transaction_error)?;
+                )?;
             }
             GameplayOperation::Enchant {
                 x,
@@ -931,8 +980,7 @@ impl AuthorityCore {
                     self.world().get_block(*x, *y, *z),
                     self.world().bookshelf_power(position),
                 );
-                transactions::execute_enchant(&mut candidate, context, *source, *option)
-                    .map_err(map_transaction_error)?;
+                transactions::execute_enchant(&mut candidate, context, *source, *option)?;
                 if !preserves_brew_locks(&original, &candidate) {
                     return Err(RejectReason::InvalidState);
                 }
@@ -950,16 +998,13 @@ impl AuthorityCore {
                 match *action {
                     0 => {
                         let ingredient = ingredient.ok_or(RejectReason::InvalidState)?;
-                        transactions::start_brew(&mut candidate, context, ingredient, *bottles)
-                            .map_err(map_transaction_error)?;
+                        transactions::start_brew(&mut candidate, context, ingredient, *bottles)?;
                     }
                     1 if ingredient.is_none() && bottles.iter().all(Option::is_none) => {
-                        transactions::cancel_brew(&mut candidate, context)
-                            .map_err(map_transaction_error)?;
+                        transactions::cancel_brew(&mut candidate, context)?;
                     }
                     2 if ingredient.is_none() && bottles.iter().all(Option::is_none) => {
-                        transactions::take_brew(&mut candidate, context)
-                            .map_err(map_transaction_error)?;
+                        transactions::take_brew(&mut candidate, context)?;
                     }
                     _ => return Err(RejectReason::InvalidState),
                 }
@@ -981,8 +1026,7 @@ impl AuthorityCore {
                 }
                 let position = [*x, *y, *z];
                 let context = WorkstationContext::at(position, self.world().get_block(*x, *y, *z));
-                transactions::execute_anvil(&mut candidate, context, *left, *right, rename)
-                    .map_err(map_transaction_error)?;
+                transactions::execute_anvil(&mut candidate, context, *left, *right, rename)?;
             }
             GameplayOperation::UseState { hand, active } => {
                 if *active {
@@ -1030,7 +1074,7 @@ impl AuthorityCore {
         if action != 0 || target == 0 || target == session_id {
             return Err(RejectReason::InvalidState);
         }
-        let Some(attacker) = self.sessions.get(&session_id).cloned() else {
+        let Some(attacker) = self.sessions.get(&session_id).map(|s| s.action_view()) else {
             return Err(RejectReason::Unauthorized);
         };
         if attacker.gameplay.is_dead {
@@ -1042,7 +1086,7 @@ impl AuthorityCore {
         let cooldown_ready =
             attacker.gameplay.attack_cooldown_ticks >= super::ATTACK_COOLDOWN_TICKS;
 
-        if let Some(target_session) = self.sessions.get(&target).cloned() {
+        if let Some(target_session) = self.sessions.get(&target).map(|s| s.action_view()) {
             if !self.world().rules.pvp
                 || target_session.dimension != attacker.dimension
                 || matches!(
@@ -1071,16 +1115,14 @@ impl AuthorityCore {
                 knockback_milli: profile.knockback_milli,
                 fire_ticks: profile.fire_ticks,
                 looting_level: profile.looting_level,
-            })
-            .map_err(map_combat_error)?;
+            })?;
             let mut target_snapshot = PlayerCombatSnapshot {
                 player_id: target,
                 gameplay: target_session.gameplay,
                 velocity_milli: target_session.gameplay.velocity_milli,
                 last_applied_event: None,
             };
-            let outcome = combat::resolve_player_hit(&event, &mut target_snapshot)
-                .map_err(map_combat_error)?;
+            let outcome = combat::resolve_player_hit(&event, &mut target_snapshot)?;
             target_snapshot.gameplay.velocity_milli = target_snapshot.velocity_milli;
             let mut attacker_gameplay = attacker.gameplay;
             attacker_gameplay.attack_cooldown_ticks = 0;
@@ -1158,10 +1200,9 @@ impl AuthorityCore {
             knockback_milli: profile.knockback_milli,
             fire_ticks: profile.fire_ticks,
             looting_level: profile.looting_level,
-        })
-        .map_err(map_combat_error)?;
+        })?;
         let outcome =
-            combat::resolve_entity_hit(&event, &mut target_snapshot).map_err(map_combat_error)?;
+            combat::resolve_entity_hit(&event, &mut target_snapshot)?;
 
         let mut attacker_gameplay = attacker.gameplay;
         attacker_gameplay.attack_cooldown_ticks = 0;
@@ -1385,26 +1426,7 @@ fn preserves_brew_locks(before: &SessionGameplayState, after: &SessionGameplaySt
     })
 }
 
-fn map_fishing_error(error: fishing::FishingDomainError) -> RejectReason {
-    match error {
-        fishing::FishingDomainError::HookTooFar => RejectReason::TooFar,
-        fishing::FishingDomainError::InvalidContext
-        | fishing::FishingDomainError::InvalidHand
-        | fishing::FishingDomainError::InvalidSelectedSlot
-        | fishing::FishingDomainError::MissingRod
-        | fishing::FishingDomainError::InvalidRod
-        | fishing::FishingDomainError::HookAlreadyActive
-        | fishing::FishingDomainError::NoActiveHook
-        | fishing::FishingDomainError::StaleHook
-        | fishing::FishingDomainError::CorruptHook
-        | fishing::FishingDomainError::InventoryFull
-        | fishing::FishingDomainError::ExperienceOverflow => RejectReason::InvalidState,
-    }
-}
 
-fn map_transaction_error(_error: transactions::TransactionError) -> RejectReason {
-    RejectReason::InvalidState
-}
 
 #[derive(Debug, Clone, Copy)]
 struct CombatProfile {
@@ -1466,17 +1488,3 @@ fn quantize_health(health: f32) -> u32 {
     }
 }
 
-fn map_combat_error(error: combat::CombatReject) -> RejectReason {
-    match error {
-        combat::CombatReject::OutOfRange => RejectReason::TooFar,
-        combat::CombatReject::ReplayedEvent => RejectReason::Duplicate,
-        combat::CombatReject::InvalidEvent
-        | combat::CombatReject::IdentityMismatch
-        | combat::CombatReject::Cooldown
-        | combat::CombatReject::NoLineOfSight
-        | combat::CombatReject::NotFacingTarget
-        | combat::CombatReject::TargetDead
-        | combat::CombatReject::TargetInvulnerable
-        | combat::CombatReject::InvalidTargetState => RejectReason::InvalidState,
-    }
-}

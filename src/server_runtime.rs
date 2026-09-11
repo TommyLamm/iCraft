@@ -602,13 +602,12 @@ pub struct ServerMetrics {
     pub last_save_latency_ms: u64,
 }
 
-/// Runtime session record kept separate from authority `SessionContract`.
+/// Runtime session overlay kept beside authority `SessionContract`.
 /// Interest, the save codec, pose clocks, and teleport allowance live here.
-/// Authoritative pose / dimension / accepted sequence live on the contract.
+/// Authoritative pose / dimension / username / accepted sequence live on the
+/// contract; this record is keyed by `PlayerId` in `ServerRuntime::players`.
 #[derive(Debug, Clone)]
 pub struct PlayerSessionState {
-    pub id: u64,
-    pub username: String,
     pub storage: LocalSessionStorage,
     pub data: PlayerData,
     pub interest: InterestSet,
@@ -625,22 +624,22 @@ pub struct PlayerSessionState {
     pub(super) last_pose_sequence: u32,
     pub(super) last_pose_sender_time_millis: u64,
     pub(super) last_pose_received_at: Option<Instant>,
+    /// Last pose accepted by the speed/teleport gate. Used only for clocking;
+    /// authoritative pose lives on `SessionContract`.
+    pub last_pose_position: [f32; 3],
     pub(super) teleport_allowance: Option<[f32; 3]>,
 }
 
 impl PlayerSessionState {
     fn new(
-        id: u64,
-        username: String,
         storage: LocalSessionStorage,
         data: PlayerData,
         dimension: Dimension,
         view_distance: u8,
         simulation_distance: u8,
     ) -> Self {
+        let last_pose_position = data.position;
         Self {
-            id,
-            username,
             storage,
             data,
             interest: InterestSet::new(dimension, view_distance, simulation_distance),
@@ -652,6 +651,7 @@ impl PlayerSessionState {
             last_pose_sequence: 0,
             last_pose_sender_time_millis: 0,
             last_pose_received_at: None,
+            last_pose_position,
             teleport_allowance: None,
         }
     }
@@ -712,7 +712,7 @@ impl PlayerSessionState {
                 return false;
             }
             let target = Vec3::from_array(position);
-            let previous = Vec3::from_array(self.data.position);
+            let previous = Vec3::from_array(self.last_pose_position);
             let teleport_allowed = self.teleport_allowance.is_some_and(|allowance| {
                 target.distance_squared(Vec3::from_array(allowance))
                     <= TELEPORT_ALLOWANCE_RADIUS * TELEPORT_ALLOWANCE_RADIUS
@@ -734,11 +734,12 @@ impl PlayerSessionState {
                 }
             }
         }
-        // Pose fields are written by `ServerRuntime::write_pose` after this
-        // clock/allowance update so the speed gate stays on this type.
+        // Pose clocks stay on this overlay; authoritative pose is written by
+        // `ServerRuntime::write_pose` after this gate returns true.
         self.last_pose_sequence = sequence;
         self.last_pose_sender_time_millis = sender_time_millis;
         self.last_pose_received_at = Some(now);
+        self.last_pose_position = position;
         self.teleport_allowance = None;
         true
     }
@@ -1157,12 +1158,15 @@ impl ServerRuntime {
         let mut player_ids: Vec<_> = self.players.keys().copied().collect();
         player_ids.sort_unstable();
         for id in player_ids.iter().copied() {
-            self.sync_game_mode(id);
+            self.sync_gameplay_projection(id);
         }
-        let mut names: Vec<_> = self.players.values().collect();
-        names.sort_by_key(|session| session.id);
-        for session in names {
-            self.save_player(session)?;
+        let mut names: Vec<_> = self.players.keys().copied().collect();
+        names.sort_unstable();
+        for id in names {
+            let Some(session) = self.players.get(&id) else {
+                continue;
+            };
+            self.save_player(id, session)?;
         }
         self.metrics.saves = self.metrics.saves.saturating_add(1);
         let latency_us = started.elapsed().as_micros().min(u64::MAX as u128) as u64;
@@ -1277,7 +1281,7 @@ impl ServerRuntime {
             keep.extend(session.interest.chunks.iter().copied());
             keep.extend(session.interest.simulation_chunks.iter().copied());
             keep.extend(residency_hysteresis_chunks(
-                session.data.position,
+                session.last_pose_position,
                 session.interest.view_distance,
             ));
         }
@@ -1347,7 +1351,7 @@ impl ServerRuntime {
         }
     }
 
-    fn save_player(&self, session: &PlayerSessionState) -> io::Result<()> {
+    fn save_player(&self, id: u64, session: &PlayerSessionState) -> io::Result<()> {
         #[cfg(test)]
         if SAVE_PLAYER_FAILPOINT.with(|failpoint| failpoint.get()) {
             return Err(io::Error::new(
@@ -1355,28 +1359,43 @@ impl ServerRuntime {
                 "injected save_player failure",
             ));
         }
-        // `save_all` calls `sync_game_mode` first so `session.data.game_mode`
-        // matches the contract; still overlay gameplay from authority onto the
-        // clone, and keep game_mode from the contract as the durable source.
+        // `save_all` calls `sync_gameplay_projection` first so `session.data`
+        // matches the contract; still overlay from authority onto the clone as
+        // a safety net for single-player leave paths.
         let mut data = session.data.clone();
+        let username = self
+            .authority
+            .session(id)
+            .map(|session| session.username.clone());
         let current_dimension = self
             .authority
-            .session(session.id)
+            .session(id)
             .and_then(|authority_session| {
                 Dimension::from_wire(authority_session.dimension).map(|dimension| {
                     apply_gameplay_to_player_data(&mut data, authority_session.gameplay);
                     data.game_mode = authority_session.game_mode;
+                    data.position = authority_session.position;
+                    data.yaw = authority_session.yaw;
+                    data.pitch = authority_session.pitch;
                     dimension
                 })
             })
             .unwrap_or(session.interest.dimension);
         match session.storage {
-            LocalSessionStorage::Named => self.save_manager.save_dedicated_player(
-                &session.username,
-                current_dimension,
-                &data,
-                &session.effects,
-            ),
+            LocalSessionStorage::Named => {
+                let Some(username) = username else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "missing authority session for named player save",
+                    ));
+                };
+                self.save_manager.save_dedicated_player(
+                    &username,
+                    current_dimension,
+                    &data,
+                    &session.effects,
+                )
+            }
             LocalSessionStorage::WorldPlayer => {
                 // `player.dat` predates the dedicated effect vector. Preserve
                 // the established file format instead of inventing a silent,
@@ -1676,7 +1695,7 @@ mod tests {
     #[test]
     fn runtime_pose_validation_rejects_regression_and_speed_but_allows_server_teleport() {
         let (mut runtime, _input) = embedded_runtime("pose_validation");
-        let initial = runtime.players[&99].data.position;
+        let initial = runtime.authority.session(99).unwrap().position;
         runtime
             .handle_position(
                 99,
@@ -1689,7 +1708,7 @@ mod tests {
                 0.1,
             )
             .unwrap();
-        let accepted = runtime.players[&99].data.position;
+        let accepted = runtime.authority.session(99).unwrap().position;
 
         runtime
             .handle_position(
@@ -1703,18 +1722,18 @@ mod tests {
                 0.1,
             )
             .unwrap();
-        assert_eq!(runtime.players[&99].data.position, accepted);
+        assert_eq!(runtime.authority.session(99).unwrap().position, accepted);
         runtime
             .handle_position(99, 2, 150, 5_000.0, accepted[1], 5_000.0, 0.5, 0.1)
             .unwrap();
-        assert_eq!(runtime.players[&99].data.position, accepted);
+        assert_eq!(runtime.authority.session(99).unwrap().position, accepted);
 
         let teleport = [5_000.0, accepted[1], 5_000.0];
         runtime.players.get_mut(&99).unwrap().teleport_allowance = Some(teleport);
         runtime
             .handle_position(99, 2, 150, teleport[0], teleport[1], teleport[2], 0.5, 0.1)
             .unwrap();
-        assert_eq!(runtime.players[&99].data.position, teleport);
+        assert_eq!(runtime.authority.session(99).unwrap().position, teleport);
 
         let world_dir = runtime.world_dir.clone();
         runtime.shutdown().unwrap();
@@ -2700,7 +2719,8 @@ mod tests {
         properties.world_dir = temp_dir("reconnect");
         let mut runtime = ServerRuntime::new(properties).unwrap();
         runtime.handle_join(1, "alex".into()).unwrap();
-        runtime.players.get_mut(&1).unwrap().data.position = [12.0, 70.0, -4.0];
+        runtime.authority.session_mut(1).unwrap().position = [12.0, 70.0, -4.0];
+        runtime.players.get_mut(&1).unwrap().last_pose_position = [12.0, 70.0, -4.0];
         runtime.players.get_mut(&1).unwrap().data.health = 7.5;
         // Gameplay is authority-owned after join; keep the fixture's health
         // mutation on the authoritative session rather than the projection.
@@ -2796,7 +2816,7 @@ mod tests {
 
         runtime.login_session(1, "Alice").unwrap();
         assert!(!runtime.authority.session(1).unwrap().operator);
-        assert_eq!(runtime.players.get(&1).unwrap().username, "alice");
+        assert_eq!(runtime.authority.session(1).unwrap().username, "alice");
         runtime.logout_session(1).unwrap();
 
         runtime.execute_console_command("op Alice").unwrap();
@@ -2858,7 +2878,7 @@ mod tests {
         assert!(runtime.authority.session(1).is_none());
         assert!(!runtime.players.contains_key(&1));
         runtime.login_session(2, "ALEX").unwrap();
-        assert_eq!(runtime.players.get(&2).unwrap().username, "alex");
+        assert_eq!(runtime.authority.session(2).unwrap().username, "alex");
 
         let _ = runtime.shutdown();
         let _ = fs::remove_dir_all(&runtime.world_dir);

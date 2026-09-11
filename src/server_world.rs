@@ -8,7 +8,7 @@ use crate::authority::contract::{
     position_to_milli_opt, AuthoritySnapshot, RevisionClock, SessionFishingHookState,
     SessionGameplayState, SessionInventorySlot, WorldMutation,
 };
-use crate::authority::fishing::{FishingDomainContext, FishingDomainError};
+use crate::authority::fishing::FishingDomainContext;
 use crate::authority::interest::chunks_around;
 use crate::authority::transactions::{self, WorkstationContext};
 use crate::block_entity::{default_stub_for_block, BlockEntity, ContainerAccess};
@@ -531,10 +531,10 @@ impl ServerWorld {
         gameplay: &SessionGameplayState,
         player_position: [f32; 3],
         consume_durability: bool,
-    ) -> Result<FishingDomainContext, FishingDomainError> {
+    ) -> Result<FishingDomainContext, RejectReason> {
         let hook = gameplay
             .fishing_hook
-            .ok_or(FishingDomainError::NoActiveHook)?;
+            .ok_or(RejectReason::InvalidState)?;
         let probe = crate::authority::fishing::water_probe_position(gameplay)?;
         let block_position = [
             probe[0].div_euclid(1_000),
@@ -547,7 +547,7 @@ impl ServerWorld {
             world_seed: self.seed as u64 ^ (u64::from(self.dimension as u8) << 32),
             hook_entity_id: hook.entity_id,
             player_position_milli: position_to_milli_opt(player_position)
-                .ok_or(FishingDomainError::InvalidContext)?,
+                .ok_or(RejectReason::InvalidState)?,
             open_water,
             water_surface_y_milli: open_water
                 .then_some(block_position[1].saturating_mul(1_000).saturating_add(800)),

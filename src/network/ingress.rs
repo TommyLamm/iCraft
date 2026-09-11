@@ -71,9 +71,10 @@ pub(crate) fn prepare_gameplay_request(
     request
 }
 
-/// Apply transport/session gates once. A rejection is sent with a real server
-/// sequence and cached; accepted requests are forwarded exactly once to the
-/// authority channel.
+/// Apply transport gates once. Transport keeps rate-limit, in-flight
+/// dedupe, and a sequence watermark filter. Bounds / revision / reach gates
+/// live in authority `preflight`; duplicate request ids that are not in-flight
+/// are forwarded so the single authority response cache can answer.
 pub(crate) async fn route_gameplay_request<S: HostEventSender>(
     sessions: &Sessions,
     id: PlayerId,
@@ -91,19 +92,19 @@ pub(crate) async fn route_gameplay_request<S: HostEventSender>(
         request = prepare_gameplay_request(session, request);
         let state = &mut session.gameplay;
 
-        if let Some(cached) = state.cached_response(request.request_id) {
-            session.metrics.record_duplicate_request();
-            immediate_response = Some(cached);
-        } else if state.in_flight.contains(&request.request_id) {
+        if state.in_flight.contains(&request.request_id) {
             // The first copy is still being processed by the authority;
             // retransmission remains idempotent and needs no second event.
             session.metrics.record_duplicate_request();
             return Ok(());
-        } else if let Err(reason) = request.validate_bounds() {
-            session.metrics.record_rejected_request();
-            immediate_response = Some(state.rejection(request.request_id, reason));
+        } else if state.is_completed(request.request_id) {
+            // Retransmit of a finished request: forward so authority cache
+            // answers. Do not advance the sequence watermark again.
+            session.metrics.record_duplicate_request();
+            state.in_flight.insert(request.request_id);
+            forward = Some(request);
         } else if request.client_sequence <= state.last_client_sequence {
-            // Ingress must keep this gate: the TCP thread cannot ask
+            // Ingress must keep this watermark: the TCP thread cannot ask
             // AuthorityCore whether a sequence was accepted, and NetworkServer
             // unit tests have no host gameplay loop. Transport allocates when
             // `client_sequence == 0`; authority `SessionContract` remains the
@@ -111,10 +112,6 @@ pub(crate) async fn route_gameplay_request<S: HostEventSender>(
             session.metrics.record_rejected_request();
             immediate_response =
                 Some(state.rejection(request.request_id, RejectReason::OutOfOrder));
-        } else if request.client_revision < state.last_client_revision {
-            session.metrics.record_rejected_request();
-            immediate_response =
-                Some(state.rejection(request.request_id, RejectReason::InvalidRevision));
         } else if !request_rate.allow() {
             session.metrics.record_rejected_request();
             immediate_response =

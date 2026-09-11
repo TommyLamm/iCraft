@@ -15,7 +15,7 @@ use crate::fishing::{
     FISHING_MAX_DISTANCE_MILLI, FISHING_REPEAT_WAIT_TICKS, FISHING_ROD_MAX_DURABILITY,
 };
 use crate::inventory::{Item, ItemStack};
-use crate::network::protocol::{ItemWire, SessionSlotWire};
+use crate::network::protocol::{ItemWire, RejectReason, SessionSlotWire};
 
 const OFFHAND_SLOT: u8 = (SESSION_INVENTORY_SLOTS - 1) as u8;
 const HOTBAR_SLOTS: u8 = 9;
@@ -38,7 +38,7 @@ pub struct FishingDomainContext {
 }
 
 impl FishingDomainContext {
-    pub fn validate(self) -> Result<Self, FishingDomainError> {
+    pub fn validate(self) -> Result<Self, RejectReason> {
         if self.hook_entity_id == 0
             || self
                 .player_position_milli
@@ -49,27 +49,13 @@ impl FishingDomainContext {
                 .water_surface_y_milli
                 .is_some_and(|value| !milli_within_abs_limit(value))
         {
-            return Err(FishingDomainError::InvalidContext);
+            return Err(RejectReason::InvalidState);
         }
         Ok(self)
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FishingDomainError {
-    InvalidContext,
-    InvalidHand,
-    InvalidSelectedSlot,
-    MissingRod,
-    InvalidRod,
-    HookAlreadyActive,
-    NoActiveHook,
-    StaleHook,
-    CorruptHook,
-    HookTooFar,
-    InventoryFull,
-    ExperienceOverflow,
-}
+// Fishing domain errors collapse to RejectReason (Wave 10 Plan 10).
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FishingCastOutcome {
@@ -150,8 +136,8 @@ pub struct FishingCancelOutcome {
 /// Position the world layer must inspect for open water before calling
 /// [`tick`]. Flying hooks probe the post-physics position, matching the legacy
 /// Authority fishing domain. Floating/nibbling hooks probe their current position.
-pub fn water_probe_position(state: &SessionGameplayState) -> Result<[i32; 3], FishingDomainError> {
-    let mut hook = state.fishing_hook.ok_or(FishingDomainError::NoActiveHook)?;
+pub fn water_probe_position(state: &SessionGameplayState) -> Result<[i32; 3], RejectReason> {
+    let mut hook = state.fishing_hook.ok_or(RejectReason::InvalidState)?;
     validate_hook(hook)?;
     if FishingHookStage::from_wire(hook.stage) == Some(FishingHookStage::Flying) {
         advance_flying_hook(&mut hook)?;
@@ -167,18 +153,18 @@ pub fn cast(
     hand: u8,
     look_milli: [i16; 3],
     context: FishingDomainContext,
-) -> Result<FishingCastOutcome, FishingDomainError> {
+) -> Result<FishingCastOutcome, RejectReason> {
     let context = context.validate()?;
     if state.fishing_hook.is_some() {
-        return Err(FishingDomainError::HookAlreadyActive);
+        return Err(RejectReason::InvalidState);
     }
     let rod_slot = held_rod_slot(state, hand)?;
     let velocity_milli = authoritative_launch_velocity_milli(look_milli)
-        .ok_or(FishingDomainError::InvalidContext)?;
+        .ok_or(RejectReason::InvalidState)?;
     let mut position_milli = context.player_position_milli;
     position_milli[1] = position_milli[1]
         .checked_add(1_620)
-        .ok_or(FishingDomainError::InvalidContext)?;
+        .ok_or(RejectReason::InvalidState)?;
     validate_position(position_milli)?;
 
     let hook = SessionFishingHookState {
@@ -196,7 +182,7 @@ pub fn cast(
         // publication point. This keeps the API safe if its implementation is
         // later composed inside a larger candidate transaction.
         if held_rod_slot(candidate, hand)? != rod_slot || candidate.fishing_hook.is_some() {
-            return Err(FishingDomainError::HookAlreadyActive);
+            return Err(RejectReason::InvalidState);
         }
         candidate.fishing_hook = Some(hook);
         Ok(FishingCastOutcome {
@@ -213,15 +199,15 @@ pub fn cast(
 pub fn tick(
     state: &mut SessionGameplayState,
     context: FishingDomainContext,
-) -> Result<FishingTickOutcome, FishingDomainError> {
+) -> Result<FishingTickOutcome, RejectReason> {
     let context = context.validate()?;
-    let hook = state.fishing_hook.ok_or(FishingDomainError::NoActiveHook)?;
+    let hook = state.fishing_hook.ok_or(RejectReason::InvalidState)?;
     validate_context_hook(hook, context)?;
 
     transact(state, |candidate| {
         let mut hook = candidate
             .fishing_hook
-            .ok_or(FishingDomainError::NoActiveHook)?;
+            .ok_or(RejectReason::InvalidState)?;
         validate_context_hook(hook, context)?;
 
         if find_held_rod_slot(candidate)?.is_none() {
@@ -242,18 +228,18 @@ pub fn tick(
         }
 
         let stage =
-            FishingHookStage::from_wire(hook.stage).ok_or(FishingDomainError::CorruptHook)?;
+            FishingHookStage::from_wire(hook.stage).ok_or(RejectReason::InvalidState)?;
         let event = match stage {
             FishingHookStage::Flying => {
                 advance_flying_hook(&mut hook)?;
                 if context.open_water {
                     let surface_y = context
                         .water_surface_y_milli
-                        .ok_or(FishingDomainError::InvalidContext)?;
+                        .ok_or(RejectReason::InvalidState)?;
                     if i64::from(surface_y).abs_diff(i64::from(hook.position_milli[1]))
                         > MAX_WATER_SURFACE_DELTA_MILLI as u64
                     {
-                        return Err(FishingDomainError::InvalidContext);
+                        return Err(RejectReason::InvalidState);
                     }
                     hook.position_milli[1] = surface_y;
                     hook.velocity_milli = [0; 3];
@@ -310,29 +296,29 @@ pub fn reel(
     player_id: u64,
     hand: u8,
     context: FishingDomainContext,
-) -> Result<FishingReelOutcome, FishingDomainError> {
+) -> Result<FishingReelOutcome, RejectReason> {
     let context = context.validate()?;
-    let hook = state.fishing_hook.ok_or(FishingDomainError::NoActiveHook)?;
+    let hook = state.fishing_hook.ok_or(RejectReason::InvalidState)?;
     validate_context_hook(hook, context)?;
     if hook_too_far(hook.position_milli, context.player_position_milli) {
-        return Err(FishingDomainError::HookTooFar);
+        return Err(RejectReason::TooFar);
     }
     let rod_slot = held_rod_slot(state, hand)?;
 
     transact(state, |candidate| {
         let hook = candidate
             .fishing_hook
-            .ok_or(FishingDomainError::NoActiveHook)?;
+            .ok_or(RejectReason::InvalidState)?;
         validate_context_hook(hook, context)?;
         if hook_too_far(hook.position_milli, context.player_position_milli) {
-            return Err(FishingDomainError::HookTooFar);
+            return Err(RejectReason::TooFar);
         }
         if held_rod_slot(candidate, hand)? != rod_slot {
-            return Err(FishingDomainError::InvalidRod);
+            return Err(RejectReason::InvalidState);
         }
 
         let stage =
-            FishingHookStage::from_wire(hook.stage).ok_or(FishingDomainError::CorruptHook)?;
+            FishingHookStage::from_wire(hook.stage).ok_or(RejectReason::InvalidState)?;
         let (result, experience, loot) = if stage == FishingHookStage::Nibbling
             && hook.bite_ticks_remaining > 0
             && context.open_water
@@ -363,10 +349,10 @@ pub fn reel(
         )?;
         if let Some(loot) = loot {
             if !candidate.add_slot(loot.slot) {
-                return Err(FishingDomainError::InventoryFull);
+                return Err(RejectReason::InvalidState);
             }
             if !candidate.grant_experience(experience) {
-                return Err(FishingDomainError::ExperienceOverflow);
+                return Err(RejectReason::InvalidState);
             }
         }
         candidate.fishing_hook = None;
@@ -383,19 +369,19 @@ pub fn cancel(
     state: &mut SessionGameplayState,
     hand: u8,
     context: FishingDomainContext,
-) -> Result<FishingCancelOutcome, FishingDomainError> {
+) -> Result<FishingCancelOutcome, RejectReason> {
     let context = context.validate()?;
-    let hook = state.fishing_hook.ok_or(FishingDomainError::NoActiveHook)?;
+    let hook = state.fishing_hook.ok_or(RejectReason::InvalidState)?;
     validate_context_hook(hook, context)?;
     let rod_slot = held_rod_slot(state, hand)?;
 
     transact(state, |candidate| {
         let hook = candidate
             .fishing_hook
-            .ok_or(FishingDomainError::NoActiveHook)?;
+            .ok_or(RejectReason::InvalidState)?;
         validate_context_hook(hook, context)?;
         if held_rod_slot(candidate, hand)? != rod_slot {
-            return Err(FishingDomainError::InvalidRod);
+            return Err(RejectReason::InvalidState);
         }
         candidate.fishing_hook = None;
         Ok(FishingCancelOutcome {
@@ -407,32 +393,32 @@ pub fn cancel(
 
 fn transact<T>(
     state: &mut SessionGameplayState,
-    mutation: impl FnOnce(&mut SessionGameplayState) -> Result<T, FishingDomainError>,
-) -> Result<T, FishingDomainError> {
+    mutation: impl FnOnce(&mut SessionGameplayState) -> Result<T, RejectReason>,
+) -> Result<T, RejectReason> {
     let mut candidate = *state;
     let outcome = mutation(&mut candidate)?;
     *state = candidate;
     Ok(outcome)
 }
 
-fn held_slot_index(state: &SessionGameplayState, hand: u8) -> Result<u8, FishingDomainError> {
+fn held_slot_index(state: &SessionGameplayState, hand: u8) -> Result<u8, RejectReason> {
     match hand {
         0 if state.selected_hotbar_slot < HOTBAR_SLOTS => Ok(state.selected_hotbar_slot),
-        0 => Err(FishingDomainError::InvalidSelectedSlot),
+        0 => Err(RejectReason::InvalidState),
         1 => Ok(OFFHAND_SLOT),
-        _ => Err(FishingDomainError::InvalidHand),
+        _ => Err(RejectReason::InvalidState),
     }
 }
 
-fn held_rod_slot(state: &SessionGameplayState, hand: u8) -> Result<u8, FishingDomainError> {
+fn held_rod_slot(state: &SessionGameplayState, hand: u8) -> Result<u8, RejectReason> {
     let index = held_slot_index(state, hand)?;
     validate_rod_at(state, index)?;
     Ok(index)
 }
 
-fn find_held_rod_slot(state: &SessionGameplayState) -> Result<Option<u8>, FishingDomainError> {
+fn find_held_rod_slot(state: &SessionGameplayState) -> Result<Option<u8>, RejectReason> {
     if state.selected_hotbar_slot >= HOTBAR_SLOTS {
-        return Err(FishingDomainError::InvalidSelectedSlot);
+        return Err(RejectReason::InvalidState);
     }
     for index in [state.selected_hotbar_slot, OFFHAND_SLOT] {
         if validate_rod_at(state, index).is_ok() {
@@ -445,9 +431,9 @@ fn find_held_rod_slot(state: &SessionGameplayState) -> Result<Option<u8>, Fishin
 fn validate_rod_at(
     state: &SessionGameplayState,
     index: u8,
-) -> Result<SessionInventorySlot, FishingDomainError> {
+) -> Result<SessionInventorySlot, RejectReason> {
     let Some(Some(slot)) = state.slot(index) else {
-        return Err(FishingDomainError::MissingRod);
+        return Err(RejectReason::InvalidState);
     };
     if SessionSlotWire::from(slot).validate_bounds().is_err()
         || slot.item.item != Item::FishingRod as u32
@@ -455,7 +441,7 @@ fn validate_rod_at(
         || slot.item.durability == 0
         || slot.item.durability > FISHING_ROD_MAX_DURABILITY
     {
-        return Err(FishingDomainError::InvalidRod);
+        return Err(RejectReason::InvalidState);
     }
     Ok(slot)
 }
@@ -465,7 +451,7 @@ fn apply_rod_damage(
     index: u8,
     consume_durability: bool,
     durability_salt: u32,
-) -> Result<RodDurabilityOutcome, FishingDomainError> {
+) -> Result<RodDurabilityOutcome, RejectReason> {
     let slot = validate_rod_at(state, index)?;
     let remaining = slot.item.durability;
     let should_consume = consume_durability
@@ -517,27 +503,27 @@ fn deterministic_loot(world_seed: u64, player_id: u64, hook_entity_id: u64) -> F
 fn validate_context_hook(
     hook: SessionFishingHookState,
     context: FishingDomainContext,
-) -> Result<(), FishingDomainError> {
+) -> Result<(), RejectReason> {
     validate_hook(hook)?;
     if hook.entity_id != context.hook_entity_id {
-        return Err(FishingDomainError::StaleHook);
+        return Err(RejectReason::InvalidState);
     }
     Ok(())
 }
 
-fn advance_flying_hook(hook: &mut SessionFishingHookState) -> Result<(), FishingDomainError> {
+fn advance_flying_hook(hook: &mut SessionFishingHookState) -> Result<(), RejectReason> {
     hook.velocity_milli[1] = hook.velocity_milli[1]
         .checked_sub(12_000 / FISHING_FIXED_TICK_HZ)
-        .ok_or(FishingDomainError::CorruptHook)?;
+        .ok_or(RejectReason::InvalidState)?;
     for axis in 0..3 {
         hook.position_milli[axis] = hook.position_milli[axis]
             .checked_add(hook.velocity_milli[axis] / FISHING_FIXED_TICK_HZ)
-            .ok_or(FishingDomainError::CorruptHook)?;
+            .ok_or(RejectReason::InvalidState)?;
     }
     validate_position(hook.position_milli)
 }
 
-fn validate_hook(hook: SessionFishingHookState) -> Result<(), FishingDomainError> {
+fn validate_hook(hook: SessionFishingHookState) -> Result<(), RejectReason> {
     if hook.entity_id == 0
         || FishingHookStage::from_wire(hook.stage).is_none()
         || hook
@@ -551,17 +537,17 @@ fn validate_hook(hook: SessionFishingHookState) -> Result<(), FishingDomainError
         || hook.wait_ticks_remaining > FISHING_REPEAT_WAIT_TICKS
         || hook.bite_ticks_remaining > FISHING_BITE_WINDOW_TICKS
     {
-        return Err(FishingDomainError::CorruptHook);
+        return Err(RejectReason::InvalidState);
     }
     Ok(())
 }
 
-fn validate_position(position: [i32; 3]) -> Result<(), FishingDomainError> {
+fn validate_position(position: [i32; 3]) -> Result<(), RejectReason> {
     if position
         .into_iter()
         .any(|value| !milli_within_abs_limit(value))
     {
-        Err(FishingDomainError::InvalidContext)
+        Err(RejectReason::InvalidState)
     } else {
         Ok(())
     }
@@ -636,7 +622,7 @@ mod tests {
         let after_cast = state;
         assert_eq!(
             cast(&mut state, 7, 0, [0, 0, 1_000], context(12, false)),
-            Err(FishingDomainError::HookAlreadyActive)
+            Err(RejectReason::InvalidState)
         );
         assert_eq!(state, after_cast);
         assert_eq!(
@@ -704,7 +690,7 @@ mod tests {
         let before = state;
         assert_eq!(
             reel(&mut state, 7, 0, context(51, true)),
-            Err(FishingDomainError::InventoryFull)
+            Err(RejectReason::InvalidState)
         );
         assert_eq!(state, before);
     }
@@ -715,7 +701,7 @@ mod tests {
         let before = state;
         assert_eq!(
             cast(&mut state, 7, 0, [0, 0, 1_000], context(61, false)),
-            Err(FishingDomainError::InvalidRod)
+            Err(RejectReason::InvalidState)
         );
         assert_eq!(state, before);
 
@@ -723,7 +709,7 @@ mod tests {
         let before = state;
         assert_eq!(
             cast(&mut state, 7, 2, [0, 0, 1_000], context(61, false)),
-            Err(FishingDomainError::InvalidHand)
+            Err(RejectReason::InvalidState)
         );
         assert_eq!(state, before);
     }
@@ -748,7 +734,7 @@ mod tests {
         let before = state;
         assert_eq!(
             tick(&mut state, context(71, true)),
-            Err(FishingDomainError::CorruptHook)
+            Err(RejectReason::InvalidState)
         );
         assert_eq!(state, before);
     }

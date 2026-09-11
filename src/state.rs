@@ -8598,7 +8598,15 @@ mod debug_tests {
             .players
             .get(&u64::MAX)
             .expect("local world-player session");
-        assert_eq!(session.username, "local");
+        assert_eq!(
+            bridge
+                .runtime
+                .authority
+                .session(u64::MAX)
+                .expect("local authority session")
+                .username,
+            "local"
+        );
         assert_eq!(
             session.storage,
             crate::server_runtime::LocalSessionStorage::WorldPlayer

@@ -598,6 +598,21 @@ pub struct SessionGameplayUpdate {
     pub state: SessionGameplayState,
 }
 
+/// Compact `Copy` snapshot for block / combat handlers that must not clone the
+/// 128-deep response cache on `SessionContract`.
+#[derive(Debug, Clone, Copy)]
+pub struct SessionActionView {
+    pub position: [f32; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    pub dimension: u8,
+    pub game_mode: GameMode,
+    pub portal_contact_time: f32,
+    pub portal_cooldown: f32,
+    pub portal_requested: bool,
+    pub gameplay: SessionGameplayState,
+}
+
 /// Transport-independent authenticated session state used by AuthorityCore.
 #[derive(Debug, Clone)]
 pub struct SessionContract {
@@ -651,6 +666,20 @@ impl SessionContract {
             portal_requested: false,
             gameplay: SessionGameplayState::default(),
             response_cache: VecDeque::with_capacity(RESPONSE_CACHE_CAPACITY),
+        }
+    }
+
+    pub fn action_view(&self) -> SessionActionView {
+        SessionActionView {
+            position: self.position,
+            yaw: self.yaw,
+            pitch: self.pitch,
+            dimension: self.dimension,
+            game_mode: self.game_mode,
+            portal_contact_time: self.portal_contact_time,
+            portal_cooldown: self.portal_cooldown,
+            portal_requested: self.portal_requested,
+            gameplay: self.gameplay,
         }
     }
 

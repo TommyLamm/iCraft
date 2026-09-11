@@ -22,18 +22,17 @@ pub(crate) async fn normalize_host_response(
         return response;
     };
     let state = &mut session.gameplay;
-    if let Some(cached) = state.cached_response(response.request_id) {
-        return cached;
-    }
-    if response.server_sequence == 0 || response.server_sequence <= state.last_server_sequence {
+    state.mark_completed(response.request_id);
+    if response.server_sequence == 0 {
         response.server_sequence = state.allocate_server_sequence();
-    } else {
+    } else if response.server_sequence > state.last_server_sequence {
         state.last_server_sequence = response.server_sequence;
     }
+    // Non-zero sequences at or below the watermark are kept as-is so an
+    // authority cache replay stays byte-identical for the client.
     if let crate::network::protocol::GameplayOutcome::Accepted { revision } = response.outcome {
         state.last_client_revision = state.last_client_revision.max(revision);
     }
-    state.cache_response(response.clone());
     response
 }
 

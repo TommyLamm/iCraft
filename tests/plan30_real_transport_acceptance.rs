@@ -110,11 +110,13 @@ fn prepare_fixture(runtime: &mut ServerRuntime, owner: u64, victim: u64) {
             .players
             .get_mut(&id)
             .expect("fixture player runtime state");
-        player.data.position = if id == owner {
+        let position = if id == owner {
             POSITION
         } else {
             VICTIM_POSITION
         };
+        player.data.position = position;
+        player.last_pose_position = position;
         player.data.yaw = 0.0;
         player.data.pitch = 0.0;
         let session = runtime
@@ -558,13 +560,13 @@ fn run_topology(label: &str, listen: bool) {
             "real TCP pose accepted",
             |runtime, _| {
                 runtime
-                    .players
-                    .get(&owner_id)
-                    .is_some_and(|player| player.data.position == POSITION)
+                    .authority
+                    .session(owner_id)
+                    .is_some_and(|session| session.position == POSITION)
                     && runtime
-                        .players
-                        .get(&victim_id)
-                        .is_some_and(|player| player.data.position == VICTIM_POSITION)
+                        .authority
+                        .session(victim_id)
+                        .is_some_and(|session| session.position == VICTIM_POSITION)
             },
         );
         drain_clients(&mut refs);
@@ -597,6 +599,18 @@ fn run_topology(label: &str, listen: bool) {
         .session(owner_id)
         .and_then(|session| session.gameplay.fishing_hook)
         .is_some());
+    // Pin the hook near the owner so the duplicate-wait fixed ticks cannot
+    // fly it past FISHING_MAX_DISTANCE before the reel (transport no longer
+    // answers duplicates from a local response cache, so the wait ticks the
+    // authority once to observe the retransmit).
+    if let Some(session) = runtime.authority.session_mut(owner_id) {
+        if let Some(hook) = session.gameplay.fishing_hook.as_mut() {
+            let position_milli = icraft::authority::position_to_milli(POSITION)
+                .expect("fixture pose converts to milli");
+            hook.position_milli = position_milli;
+            hook.velocity_milli = [0; 3];
+        }
+    }
     drop(refs);
     let duplicate_count = runtime.metrics.duplicate_requests;
     clients[0].send_request(cast.clone());

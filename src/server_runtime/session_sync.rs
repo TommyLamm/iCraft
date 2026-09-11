@@ -1,17 +1,18 @@
-//! Dual-write helpers for the two live session records.
+//! Writers for the runtime session overlay beside authority `SessionContract`.
 //!
-//! Authority `SessionContract` and runtime `PlayerSessionState` stay separate
-//! types (interest / save codec cannot enter the deterministic core). These
-//! helpers are the only production writers of pose (`PlayerData` + contract),
-//! dimension (interest set + contract), game mode, and gameplay-projection
-//! fields.
+//! Authority owns pose, dimension, game mode, username, and accepted sequence.
+//! Runtime owns interest, Instant pose clocks, the save codec, and teleport
+//! allowance. These helpers are the only production writers that keep interest
+//! and the save codec aligned with the contract — they do not maintain a second
+//! live copy of pose / name / dimension on `PlayerSessionState`.
 
 use super::{apply_gameplay_to_player_data, ServerRuntime};
 use crate::dimension::Dimension;
 
 impl ServerRuntime {
-    /// Write pose to both the authority session and runtime `PlayerData`.
-    /// Does not grant teleport allowance. Rebuilds interest when requested.
+    /// Write authoritative pose on the contract and refresh interest/clocks.
+    /// Does not grant teleport allowance. Does not dual-write into `PlayerData`
+    /// (save/projection overlays pose from the contract when needed).
     pub(super) fn write_pose(
         &mut self,
         id: u64,
@@ -21,9 +22,7 @@ impl ServerRuntime {
         refresh_interest: bool,
     ) -> bool {
         let had_runtime = if let Some(session) = self.players.get_mut(&id) {
-            session.data.position = position;
-            session.data.yaw = yaw;
-            session.data.pitch = pitch;
+            session.last_pose_position = position;
             true
         } else {
             false
@@ -51,8 +50,8 @@ impl ServerRuntime {
         true
     }
 
-    /// Copy the authority pose onto runtime `PlayerData` (and back onto the
-    /// authority fields so this stays the single writer).
+    /// Copy the authority pose onto the runtime pose clock and optionally
+    /// refresh interest (still the single writer path for live pose).
     pub(super) fn sync_pose_from_authority(&mut self, id: u64, refresh_interest: bool) -> bool {
         let Some((position, yaw, pitch)) = self
             .authority
@@ -64,7 +63,8 @@ impl ServerRuntime {
         self.write_pose(id, position, yaw, pitch, refresh_interest)
     }
 
-    /// Write dimension to the authority contract and the runtime interest set.
+    /// Write dimension onto the authority contract and the runtime interest set.
+    /// Interest needs its own dimension key; this is not a third session mirror.
     pub(super) fn sync_dimension(&mut self, id: u64, dimension: Dimension) {
         if let Some(session) = self.players.get_mut(&id) {
             session.interest.dimension = dimension;
@@ -74,11 +74,10 @@ impl ServerRuntime {
         }
     }
 
-    /// Copy `SessionContract.game_mode` onto runtime `PlayerData`.
+    /// Copy `SessionContract.game_mode` onto the save-codec `PlayerData`.
     ///
     /// Authority remains the source of truth for `/gamemode`, hardcore→spectator,
-    /// and save restore. Join seeds the contract from `PlayerData`, then this
-    /// helper keeps both records aligned on every later projection/save path.
+    /// and save restore. This is a one-way overlay for persistence/projection.
     pub(super) fn sync_game_mode(&mut self, id: u64) {
         let Some(game_mode) = self.authority.session(id).map(|session| session.game_mode) else {
             return;
@@ -88,15 +87,26 @@ impl ServerRuntime {
         }
     }
 
-    /// Overlay the authority `SessionGameplayState` onto runtime `PlayerData`,
-    /// including `game_mode` so mode changes never leave the save codec behind.
+    /// Overlay authority gameplay (+ game_mode + pose) onto save-codec
+    /// `PlayerData` for projection and persistence.
     pub(super) fn sync_gameplay_projection(&mut self, id: u64) {
         self.sync_game_mode(id);
-        let Some(gameplay) = self.authority.session(id).map(|session| session.gameplay) else {
+        let Some((gameplay, position, yaw, pitch)) = self.authority.session(id).map(|session| {
+            (
+                session.gameplay,
+                session.position,
+                session.yaw,
+                session.pitch,
+            )
+        }) else {
             return;
         };
         if let Some(session) = self.players.get_mut(&id) {
             apply_gameplay_to_player_data(&mut session.data, gameplay);
+            session.data.position = position;
+            session.data.yaw = yaw;
+            session.data.pitch = pitch;
+            session.last_pose_position = position;
         }
     }
 }

@@ -640,9 +640,9 @@ impl ServerRuntime {
             }
             InterestKind::Entity(_) | InterestKind::EntityState(_) => self
                 .players
-                .values()
-                .filter(|session| session.interest.wants(dimension, kind))
-                .map(|session| session.id)
+                .iter()
+                .filter(|(_, session)| session.interest.wants(dimension, kind))
+                .map(|(id, _)| *id)
                 .collect(),
         };
         targets.sort_unstable();
@@ -698,11 +698,12 @@ impl ServerRuntime {
         let mut session_ids: Vec<_> = self.players.keys().copied().collect();
         session_ids.sort_unstable();
         for id in session_ids {
-            if let Some((dimension, position)) = self
-                .players
-                .get(&id)
-                .map(|session| (session.interest.dimension, session.data.position))
-            {
+            if let Some((dimension, position)) = self.players.get(&id).and_then(|session| {
+                self.authority
+                    .session(id)
+                    .map(|authority| (session.interest.dimension, authority.position))
+                    .or(Some((session.interest.dimension, session.last_pose_position)))
+            }) {
                 self.update_interest_for_at(id, dimension, position, snapshot.tick);
             }
         }
@@ -892,7 +893,7 @@ impl ServerRuntime {
             .interest
             .set_distances(view_distance, simulation_distance);
         let dimension = session.interest.dimension;
-        let position = session.data.position;
+        let position = session.last_pose_position;
         let chunk_delta = session.interest.update_position(dimension, position);
         let spatial_revision = self
             .authority
