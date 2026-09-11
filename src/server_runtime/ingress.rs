@@ -201,6 +201,10 @@ impl ServerRuntime {
         // Registering first ensures a saved non-active dimension exists in the
         // authority map before interest queries read its entities/chunks.
         self.update_interest(&mut session);
+        let join_dimension = session.interest.dimension;
+        let join_chunks: Vec<_> = session.interest.chunks.iter().copied().collect();
+        session.chunk_index_dimension = Some(join_dimension);
+        self.interest_index_seed_session(id, join_dimension, join_chunks.iter().copied());
         self.players.insert(id, session);
         let (mut chunks, mut entities) = self
             .players
@@ -317,6 +321,11 @@ impl ServerRuntime {
     pub(super) fn handle_leave(&mut self, id: u64) -> io::Result<()> {
         if let Some(session) = self.players.remove(&id) {
             let dimension = session.interest.dimension;
+            self.interest_index_clear_session(
+                id,
+                session.chunk_index_dimension,
+                session.interest.chunks.iter().copied(),
+            );
             for &position in &session.interest.open_containers {
                 let _ = self.authority.with_world(dimension, |world| {
                     world.close_container_viewer_forced(id, position)

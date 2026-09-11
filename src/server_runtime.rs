@@ -11,7 +11,7 @@ use crate::authority::contract::{
     SESSION_INVENTORY_SLOTS,
 };
 use crate::authority::interest::{
-    capped_spawn_residency, residency_hysteresis_chunks, InterestKind, InterestSet,
+    capped_spawn_residency, residency_hysteresis_chunks, ChunkCoord, InterestKind, InterestSet,
     RoutedInterestUpdate,
 };
 use crate::authority::{AuthorityConfig, AuthorityCore};
@@ -766,6 +766,10 @@ pub struct PlayerSessionState {
     /// Last pose/health/anim fingerprint sent as `EntityState` to this session.
     /// Cleared when an entity leaves the simulation set so re-entry is full.
     pub(super) last_projected_entity_states: HashMap<u64, projection::EntityBroadcastFingerprint>,
+    /// Dimension under which `interest.chunks` are registered in
+    /// `ServerRuntime::chunk_interest_index`. Survives `sync_dimension` so
+    /// mutation fanout can remap `(dimension, chunk)` keys correctly.
+    pub(super) chunk_index_dimension: Option<Dimension>,
     pub(super) last_pose_sequence: u32,
     pub(super) last_pose_sender_time_millis: u64,
     pub(super) last_pose_received_at: Option<Instant>,
@@ -792,6 +796,7 @@ impl PlayerSessionState {
             pending_initial_chunks: VecDeque::new(),
             last_projected_session_revision: None,
             last_projected_entity_states: HashMap::new(),
+            chunk_index_dimension: None,
             last_pose_sequence: 0,
             last_pose_sender_time_millis: 0,
             last_pose_received_at: None,
@@ -907,6 +912,10 @@ pub struct ServerRuntime {
     /// Immediate-ACK deduplication is dimension-scoped; two worlds may both
     /// legitimately emit revision 1 in the same fixed tick.
     pub(super) routed_mutations: BTreeSet<(Dimension, u64)>,
+    /// Reverse interest map: which sessions currently want each column.
+    /// Updated from chunk enter/depart (and join/leave); mutation fanout
+    /// looks up targets here instead of scanning every player.
+    pub(super) chunk_interest_index: HashMap<(Dimension, ChunkCoord), BTreeSet<u64>>,
     pub(super) world_dir: PathBuf,
     pub(super) save_manager: SaveManager,
     pub(super) default_game_mode: GameMode,
@@ -1038,6 +1047,7 @@ impl ServerRuntime {
             observed_transport_duplicates: 0,
             routed_updates: Vec::new(),
             routed_mutations: BTreeSet::new(),
+            chunk_interest_index: HashMap::new(),
             stopped: false,
             save_flushed: false,
         };
@@ -3048,6 +3058,52 @@ mod tests {
         );
         assert_eq!(session.interest.chunks, chunks_before);
         assert_eq!(session.interest.simulation_chunks, sim_before);
+
+        let _ = runtime.shutdown();
+        let _ = fs::remove_dir_all(&runtime.world_dir);
+    }
+
+    #[test]
+    fn chunk_interest_index_tracks_join_move_and_leave() {
+        let (mut runtime, _input) = embedded_runtime("chunk_interest_index");
+        runtime.run_for_ticks(2).unwrap();
+
+        let origin = (0i32, 0i32);
+        assert!(
+            runtime
+                .chunk_interest_index
+                .get(&(Dimension::Overworld, origin))
+                .is_some_and(|set| set.contains(&99)),
+            "join must register the local session in the reverse index"
+        );
+        let indexed_before = runtime.chunk_interest_index.len();
+        assert!(indexed_before > 0);
+
+        assert!(runtime.teleport_session(99, [32.0 * 16.0 + 8.0, 80.0, 8.0]));
+        runtime.tick().unwrap();
+        assert!(
+            runtime
+                .chunk_interest_index
+                .get(&(Dimension::Overworld, origin))
+                .map_or(true, |set| !set.contains(&99)),
+            "departed origin column must drop the session from the reverse index"
+        );
+        assert!(
+            runtime
+                .chunk_interest_index
+                .get(&(Dimension::Overworld, (32, 0)))
+                .is_some_and(|set| set.contains(&99)),
+            "entered column after teleport must list the session"
+        );
+
+        runtime.logout_session(99).unwrap();
+        assert!(
+            runtime
+                .chunk_interest_index
+                .values()
+                .all(|set| !set.contains(&99)),
+            "leave must clear every reverse-index membership"
+        );
 
         let _ = runtime.shutdown();
         let _ = fs::remove_dir_all(&runtime.world_dir);

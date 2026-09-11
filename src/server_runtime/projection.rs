@@ -6,7 +6,7 @@
 use super::*;
 use crate::authority::contract::{AuthoritySnapshot, SessionGameplayState};
 use crate::authority::interest::{
-    InterestKind, InterestSet, RoutedInterestUpdate, MAX_INTEREST_UPDATES_PER_TICK,
+    ChunkCoord, InterestKind, InterestSet, RoutedInterestUpdate, MAX_INTEREST_UPDATES_PER_TICK,
 };
 use crate::dimension::Dimension;
 use crate::network::protocol::{
@@ -16,7 +16,7 @@ use crate::network::protocol::{
 use crate::network::server::HostToServer;
 use crate::save::ChunkSaveData;
 use glam::Vec3;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Pose / health / anim signature used to skip unchanged entity state fanout.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -43,6 +43,136 @@ impl EntityBroadcastFingerprint {
 }
 
 impl ServerRuntime {
+    /// Sessions whose view interest currently covers `(dimension, chunk)`.
+    pub(super) fn sessions_interested_in_chunk(
+        &self,
+        dimension: Dimension,
+        chunk: ChunkCoord,
+    ) -> Vec<u64> {
+        let mut targets: Vec<u64> = self
+            .chunk_interest_index
+            .get(&(dimension, chunk))
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default();
+        targets.sort_unstable();
+        targets
+    }
+
+    fn interest_index_remove_session_chunks(
+        &mut self,
+        session_id: u64,
+        dimension: Dimension,
+        chunks: impl IntoIterator<Item = ChunkCoord>,
+    ) {
+        for chunk in chunks {
+            let key = (dimension, chunk);
+            let empty = if let Some(set) = self.chunk_interest_index.get_mut(&key) {
+                set.remove(&session_id);
+                set.is_empty()
+            } else {
+                false
+            };
+            if empty {
+                self.chunk_interest_index.remove(&key);
+            }
+        }
+    }
+
+    fn interest_index_add_session_chunks(
+        &mut self,
+        session_id: u64,
+        dimension: Dimension,
+        chunks: impl IntoIterator<Item = ChunkCoord>,
+    ) {
+        for chunk in chunks {
+            self.chunk_interest_index
+                .entry((dimension, chunk))
+                .or_default()
+                .insert(session_id);
+        }
+    }
+
+    /// Replace a session's reverse-index membership after a chunk interest rebuild.
+    /// Uses `chunk_index_dimension` (not `interest.dimension`) so a prior
+    /// `sync_dimension` cannot leave stale `(old_dim, coord)` entries when the
+    /// geometric enter/depart set is empty for shared column coords.
+    pub(super) fn interest_index_replace_session_chunks(
+        &mut self,
+        session_id: u64,
+        previous_dimension: Option<Dimension>,
+        previous_chunks: &HashSet<ChunkCoord>,
+        next_dimension: Dimension,
+        next_chunks: &HashSet<ChunkCoord>,
+    ) {
+        match previous_dimension {
+            Some(prev_dim) if prev_dim == next_dimension => {
+                for chunk in previous_chunks.difference(next_chunks) {
+                    let key = (prev_dim, *chunk);
+                    let empty = if let Some(set) = self.chunk_interest_index.get_mut(&key) {
+                        set.remove(&session_id);
+                        set.is_empty()
+                    } else {
+                        false
+                    };
+                    if empty {
+                        self.chunk_interest_index.remove(&key);
+                    }
+                }
+                for chunk in next_chunks.difference(previous_chunks) {
+                    self.chunk_interest_index
+                        .entry((next_dimension, *chunk))
+                        .or_default()
+                        .insert(session_id);
+                }
+            }
+            Some(prev_dim) => {
+                self.interest_index_remove_session_chunks(
+                    session_id,
+                    prev_dim,
+                    previous_chunks.iter().copied(),
+                );
+                self.interest_index_add_session_chunks(
+                    session_id,
+                    next_dimension,
+                    next_chunks.iter().copied(),
+                );
+            }
+            None => {
+                self.interest_index_add_session_chunks(
+                    session_id,
+                    next_dimension,
+                    next_chunks.iter().copied(),
+                );
+            }
+        }
+        if let Some(session) = self.players.get_mut(&session_id) {
+            session.chunk_index_dimension = Some(next_dimension);
+        }
+    }
+
+    /// Seed the reverse index for a session that is not yet in `players`
+    /// (join path). Caller must set `chunk_index_dimension` on the session.
+    pub(super) fn interest_index_seed_session(
+        &mut self,
+        session_id: u64,
+        dimension: Dimension,
+        chunks: impl IntoIterator<Item = ChunkCoord>,
+    ) {
+        self.interest_index_add_session_chunks(session_id, dimension, chunks);
+    }
+
+    /// Drop every reverse-index entry for a leaving session.
+    pub(super) fn interest_index_clear_session(
+        &mut self,
+        session_id: u64,
+        dimension: Option<Dimension>,
+        chunks: impl IntoIterator<Item = ChunkCoord>,
+    ) {
+        if let Some(dimension) = dimension {
+            self.interest_index_remove_session_chunks(session_id, dimension, chunks);
+        }
+    }
+
     pub(super) fn route_container_result(
         &mut self,
         id: u64,
@@ -599,17 +729,43 @@ impl ServerRuntime {
         revision: u64,
         kind: InterestKind,
     ) -> Vec<u64> {
-        let mut targets: Vec<_> = self
-            .players
-            .values()
-            .filter(|session| match kind {
-                InterestKind::Container(position) => {
-                    session.interest.wants_container(dimension, position)
-                }
-                _ => session.interest.wants(dimension, kind),
-            })
-            .map(|session| session.id)
-            .collect();
+        let mut targets: Vec<u64> = match kind {
+            InterestKind::Block(position) | InterestKind::BlockEntity(position) => {
+                let chunk = (position.0.div_euclid(16), position.2.div_euclid(16));
+                let mut ids = self.sessions_interested_in_chunk(dimension, chunk);
+                ids.retain(|id| {
+                    self.players
+                        .get(id)
+                        .is_some_and(|session| session.interest.wants(dimension, kind))
+                });
+                ids
+            }
+            InterestKind::Container(position) => {
+                let chunk = (position.0.div_euclid(16), position.2.div_euclid(16));
+                let mut ids = self.sessions_interested_in_chunk(dimension, chunk);
+                ids.retain(|id| {
+                    self.players
+                        .get(id)
+                        .is_some_and(|session| session.interest.wants_container(dimension, position))
+                });
+                ids
+            }
+            InterestKind::Chunk(coord) => {
+                let mut ids = self.sessions_interested_in_chunk(dimension, coord);
+                ids.retain(|id| {
+                    self.players
+                        .get(id)
+                        .is_some_and(|session| session.interest.wants(dimension, kind))
+                });
+                ids
+            }
+            InterestKind::Entity(_) | InterestKind::EntityState(_) => self
+                .players
+                .values()
+                .filter(|session| session.interest.wants(dimension, kind))
+                .map(|session| session.id)
+                .collect(),
+        };
         targets.sort_unstable();
         for target in &targets {
             if self.routed_updates.len() >= MAX_INTEREST_UPDATES_PER_TICK {
@@ -705,23 +861,27 @@ impl ServerRuntime {
                 mutation.raw_fluid,
             );
 
-            let entity = self
-                .authority
-                .world_ref(dimension)
-                .and_then(|world| world.get_block_entity(x, y, z).cloned());
+            // Resolve interest targets before cloning block-entity / slot
+            // payloads so idle columns with no viewers pay only the index lookup.
             let block_entity_targets = self.queue_interest_update(
                 dimension,
                 mutation.revision,
                 InterestKind::BlockEntity(mutation.position),
             );
-            for target in block_entity_targets {
-                self.send_block_entity_delta(
-                    target,
-                    dimension,
-                    mutation.revision,
-                    mutation.position,
-                    entity.clone(),
-                );
+            if !block_entity_targets.is_empty() {
+                let entity = self
+                    .authority
+                    .world_ref(dimension)
+                    .and_then(|world| world.get_block_entity(x, y, z).cloned());
+                for target in block_entity_targets {
+                    self.send_block_entity_delta(
+                        target,
+                        dimension,
+                        mutation.revision,
+                        mutation.position,
+                        entity.clone(),
+                    );
+                }
             }
 
             // Container viewers receive concrete slot deltas, not merely an
@@ -970,7 +1130,7 @@ impl ServerRuntime {
             })
             .unwrap_or_else(|| (Vec::new(), Vec::new()));
 
-        let (entity_delta, old_dimension, departed_containers) = {
+        let (entity_delta, old_dimension, departed_containers, index_refresh) = {
             let Some(session) = self.players.get_mut(&id) else {
                 return;
             };
@@ -978,6 +1138,8 @@ impl ServerRuntime {
                 .interest
                 .set_distances(view_distance, simulation_distance);
             let old_dimension = session.interest.dimension;
+            let previous_index_dimension = session.chunk_index_dimension;
+            let previous_chunks = session.interest.chunks.clone();
             let old_entities = session.interest.entities.clone();
             let old_open_containers = session.interest.open_containers.clone();
             let mut chunk_delta = session.interest.update_position(dimension, position);
@@ -1014,8 +1176,28 @@ impl ServerRuntime {
                     *queued_dimension == dimension && session.interest.chunks.contains(&(*cx, *cz))
                 });
             session.queue_initial_chunks(dimension, chunk_delta.entered.iter().copied());
-            (entity_delta, old_dimension, departed_containers)
+            let next_chunks = session.interest.chunks.clone();
+            (
+                entity_delta,
+                old_dimension,
+                departed_containers,
+                (
+                    previous_index_dimension,
+                    previous_chunks,
+                    dimension,
+                    next_chunks,
+                ),
+            )
         };
+        let (previous_index_dimension, previous_chunks, next_dimension, next_chunks) =
+            index_refresh;
+        self.interest_index_replace_session_chunks(
+            id,
+            previous_index_dimension,
+            &previous_chunks,
+            next_dimension,
+            &next_chunks,
+        );
         for position in departed_containers {
             let _ = self.authority.with_world(old_dimension, |world| {
                 world.close_container_viewer_forced(id, position)

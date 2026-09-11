@@ -14,12 +14,12 @@
 
 ## 精確 acceptance
 
-- [ ] 維護 `(dimension, ChunkCoord) → session_ids` 反向索引，隨 interest enter／depart 更新。
-- [ ] mutation fanout 用該索引，不再對每個 mutation 掃全部 `players`。
-- [ ] 同一 block entity 每 tick 最多編碼一次，再按 session 發送。
-- [ ] 無 viewer 的 BE 不 clone、不送 slot 更新。
-- [ ] 非 viewer 仍不洩漏私有庫存；container revision 閘門不變。
-- [ ] `tests/plan34_container_break_inventory_conservation.rs`、`tests/review_hardening_container_click.rs` 通過。
+- [x] 維護 `(dimension, ChunkCoord) → session_ids` 反向索引，隨 interest enter／depart 更新。
+- [x] mutation fanout 用該索引，不再對每個 mutation 掃全部 `players`。
+- [x] 同一 block entity 每 tick 最多編碼一次，再按 session 發送。
+- [x] 無 viewer 的 BE 不 clone、不送 slot 更新。
+- [x] 非 viewer 仍不洩漏私有庫存；container revision 閘門不變。
+- [x] `tests/plan34_container_break_inventory_conservation.rs`、`tests/review_hardening_container_click.rs` 通過。
 
 ## 預計檔案與測試
 
@@ -37,3 +37,35 @@
 - 把 container open／click／slot 合併進 `PlayerSessionUpdate`。
 - 改 `flatten_column_voxels`／ChunkData 壓縮。
 - 改 embedded 雙 block 投影路徑。
+
+## 實作與證據
+
+### 改了什麼
+
+- `ServerRuntime::chunk_interest_index`：`(Dimension, ChunkCoord) → BTreeSet<session_id>`。
+- `PlayerSessionState::chunk_index_dimension`：記錄索引實際登記的維度，避免
+  `sync_dimension` 先改 `interest.dimension` 時几何 enter／depart 為空卻留下
+  舊維度鍵。
+- Join／leave／`update_interest_for_at` 重建時維護索引；靜止 early-out 不碰索引。
+- `queue_interest_update`（Block／BlockEntity／Chunk／Container）改查反向索引；
+  Container 再以 `wants_container` 過濾 viewer。
+- `route_authority_snapshot`：先查 BE／container 目標；無目標不 `cloned()` BE、
+  不拉 slots；有目標時 BE 只從 world clone 一次再 fanout。
+- `ARCHITECTURE.md` 補上 reverse-index fanout 契約。
+
+### 測了什麼
+
+- `cargo test --lib interest` — 14 passed（含
+  `chunk_interest_index_tracks_join_move_and_leave`、stationary skip、
+  dimension／fanout isolation）。
+- `cargo test --test review_hardening_chunk_residency` — 4 passed。
+- `cargo test --test plan34_container_break_inventory_conservation` — 4 passed。
+- `cargo test --test review_hardening_container_click` — 9 passed。
+
+### 留下的缺口
+
+- Container 全槽 fanout 仍無 per-slot／fingerprint diff（計劃「能 diff 就」；
+  目前只做到無 viewer 不取 slots、有 viewer 才送）。
+- `handle_position` 的遠端玩家 pose fanout 仍掃全部 `players`（非本計劃）。
+- Entity／EntityState 的 `queue_interest_update` 路徑仍全表 filter（mutation
+  熱路徑不走該分支）。

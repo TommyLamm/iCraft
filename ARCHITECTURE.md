@@ -153,6 +153,13 @@ input
   otherwise it diffs ids into the live sets without `mem::take`. Teleport
   (`write_pose` with refresh), dimension change, and view/simulation distance
   changes invalidate the anchor and force a full refresh.
+- `ServerRuntime` keeps a reverse map
+  `(dimension, ChunkCoord) → session_ids`, updated on chunk enter/depart and
+  join/leave. Mutation / block-entity / container fanout looks up that map
+  instead of scanning every player. Block-entity payloads are cloned only when
+  at least one interested session exists (encode once per mutation, then
+  fan out). Container slot updates still require an open viewer; non-viewers
+  with only chunk interest never receive private inventory slots.
 - `AuthorityCore` keeps a `BTreeMap<u8, Vec<PlayerId>>` session index, updated
   on register / remove / `set_session_dimension`. The four per-dimension tick
   phases look it up instead of filtering the full session table. Snapshot
