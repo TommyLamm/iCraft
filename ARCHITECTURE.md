@@ -8,7 +8,7 @@ Tokio TCP. Source and tests are the contract; `plans/` is history.
 
 | Target | Entrypoint | Owns |
 | --- | --- | --- |
-| `icraft` | `src/main.rs` | winit/wgpu/rodio loop, menu, input, presentation. `--microbench` calls this crate's `mod microbench`. |
+| `icraft` | `src/main.rs` | winit/wgpu/rodio loop, menu, input, presentation. `--microbench` is feature-gated (`microbench`). |
 | `icraft-server` | `src/bin/icraft-server.rs` | Headless `ServerRuntime`, TCP, console, autosave/shutdown. |
 | `icraft` lib | `src/lib.rs` | Shared authority, world, network, persistence. |
 
@@ -26,12 +26,14 @@ network, save, `presentation_inventory_policy`, …) and extra `pub` modules so
 the desktop crate can re-export them. `loot`, `voxel_shape`, `worldgen`,
 `fluid`, `mob`, `rail`, and `world_tick` are `pub(crate)`. `recipes` stays
 `pub` because desktop `State` and `ServerWorld` expose `RecipeManager`.
-`sim_harness` / `final_acceptance` / `microbench` compile only under
-`cfg(test)` or feature `harness`. Desktop `--microbench` is `src/main.rs`'s
-own `mod`. Settings keys `dynamic_resolution` and `render_scale` were
-removed; leftover lines in old `settings.txt` are ignored on load.
-Leftover renderer-owned world simulation (`legacy_sim` /
-`legacy_interaction` / `legacy_systems`) and feature `legacy_owner` are gone.
+Desktop `--microbench` is `src/main.rs`'s `mod microbench` behind feature
+`microbench` (`cargo run --features microbench -- --microbench`); it is not
+compiled into the library or `icraft-server`. Settings keys
+`dynamic_resolution` and `render_scale` were removed; leftover lines in old
+`settings.txt` are ignored on load. Leftover renderer-owned world simulation
+(`legacy_sim` / `legacy_interaction` / `legacy_systems`) and feature
+`legacy_owner` are gone. The old empty `harness` feature and recipe/physics
+smoke modules `sim_harness` / `final_acceptance` are gone.
 
 New gameplay belongs in `AuthorityCore` / `ServerWorld`. Start in the narrow
 domain module, then check projection, save, and protocol. Do not add
@@ -370,7 +372,7 @@ symlink escape from `saves/`).
 | Area | Files |
 | --- | --- |
 | Desktop loop | `src/main.rs`, `src/app.rs`, `src/menu.rs`, `src/state.rs`, `src/audio.rs` |
-| Presentation (desktop-only) | `src/presentation/` — `embedded_runtime.rs`, `network_event.rs`, `frame.rs` are `#[path]` children of `state`. `gpu_frame_resources` / `presentation_click` / `microbench` are `mod` in `main.rs`. |
+| Presentation (desktop-only) | `src/presentation/` — `embedded_runtime.rs`, `network_event.rs`, `frame.rs` are `#[path]` children of `state`. `gpu_frame_resources` / `presentation_click` are `mod` in `main.rs`; `microbench` is the same behind feature `microbench`. |
 | Authority | `src/authority/` (`tick.rs`, `portals.rs`, `dispatch.rs`, `combat.rs`, `contract.rs`, `fishing.rs`, `interest.rs`, `mining.rs`, `transactions.rs`) |
 | Runtime | `src/server_runtime.rs` plus `ingress.rs`, `projection.rs`, `session_sync.rs`; `src/server_world.rs`; `src/bin/icraft-server.rs` |
 | World | `src/world/` (`block.rs`, `section.rs`, `chunk.rs`, `mesh.rs`), `src/chunk_manager.rs`, `src/dimension.rs`, `src/worldgen/`, `src/structure/` |
@@ -378,4 +380,4 @@ symlink escape from `saves/`).
 | Render | `src/chunk_schedule.rs`, `src/chunk_render.rs`, `src/culling/`, `src/block_model.rs`, `src/shader.wgsl` |
 | Network | `src/network/` (`protocol.rs`, `transport.rs`, `server.rs`, `client.rs`, `ingress.rs`, `egress.rs`; `loopback_test.rs` is `cfg(test)` only) |
 | Save / assets | `src/save/` (`format.rs`, `region.rs`, `player.rs`, `index.rs`), `src/resources.rs` |
-| Tests | inline `#[cfg(test)]`, `tests/` (`tests/common/tcp_harness.rs`, `authority_harness.rs`), `src/sim_harness.rs` / `src/final_acceptance.rs` (harness/`cfg(test)` only) |
+| Tests | inline `#[cfg(test)]`, `tests/` (`tests/common/tcp_harness.rs`, `authority_harness.rs`) |

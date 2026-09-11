@@ -15,12 +15,12 @@
 //!
 //! Additional modules are `pub` so the desktop binary crate can re-export
 //! them. They are not a dedicated-server or integration-test API.
-//! `sim_harness`, `final_acceptance`, and `microbench` compile only under
-//! `cfg(test)` or feature `harness`.
 //!
 //! GPU frame pooling (`gpu_frame_resources`) and presentation click policy
 //! (`presentation_click`) are desktop binary modules in `main.rs`. Do not
 //! add them here — that would compile them into `icraft-server`.
+//! Desktop `--microbench` is `src/main.rs`'s own `mod` behind feature
+//! `microbench`; it is not compiled into this library.
 //!
 //! `src/presentation/` is the Plan 10 desktop fence and **must not** be
 //! added to this library. GPU menu, terrain arenas, and frame encode stay
@@ -79,14 +79,8 @@ pub(crate) mod rail;
 pub(crate) mod world_tick;
 
 // Still crate-internal. Desktop-only files do not `use crate::` these.
-#[cfg(any(test, feature = "harness"))]
-pub(crate) mod final_acceptance;
 pub(crate) mod loot;
 // `pub` because desktop `State` and `ServerWorld` expose `RecipeManager`.
 pub mod recipes;
-#[cfg(any(test, feature = "harness"))]
-pub(crate) mod microbench;
-#[cfg(any(test, feature = "harness"))]
-pub(crate) mod sim_harness;
 pub(crate) mod voxel_shape;
 pub(crate) mod worldgen;

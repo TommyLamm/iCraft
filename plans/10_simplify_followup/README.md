@@ -56,7 +56,7 @@
 
 | # | 單獨執行文件 | 優先級 | 預估淨收益 | 前置依賴 | 狀態 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| 01 | [刪 `SimHarness`／`final_acceptance`／`harness` feature，gate 桌面 microbench](01_delete_sim_harness_and_harness_feature.md) | P0 | ~-2,400 行；每次 `cargo test --lib` 少編第二套世界 | 無 | 未開始 |
+| 01 | [刪 `SimHarness`／`final_acceptance`／`harness` feature，gate 桌面 microbench](01_delete_sim_harness_and_harness_feature.md) | P0 | ~-2,400 行；每次 `cargo test --lib` 少編第二套世界 | 無 | 已完成 |
 | 02 | [刪桌面 `State` 上無權威的玩法殼](02_presentation_gameplay_shells.md) | P0 | ~-1,800 行 lib+State；lib 契約少 `container_sessions` | 無 | 未開始 |
 | 03 | [刪 `State` leftover 本地突變與 join 端本地模擬](03_state_leftover_mutation_and_join_local_sim.md) | P0 | ~-450 行；每 tick 少一次仙人掌 AABB；join 不再 split-brain | 09 波 03 | 未開始 |
 | 04 | [權威／世界／玩法死 API 掃除](04_dead_api_authority_world_gameplay.md) | P0 | ~-900 行；修 `/sleep` 一次性閂鎖 bug | 09 波 02、14 | 未開始 |

@@ -21,12 +21,12 @@ Live 覆蓋已由 Plan30–34 + `review_hardening_*` 承擔（全部走 `ServerR
 
 ## 精確 acceptance
 
-- [ ] `src/sim_harness.rs`、`src/final_acceptance.rs` 刪除；`lib.rs` 82–90 與 `main.rs` 22 的對應 `cfg` 掛載消失。
-- [ ] `Cargo.toml` 刪 `harness` feature，或僅保留給 `main.rs` `mod microbench` 用（擇一，README 註明）。
-- [ ] `main.rs` 的 `mod microbench` 不再無條件編譜：`#[cfg(feature = "microbench")]`（或沿用 `harness`），`--microbench` 在未開 feature 時印出提示退出。
-- [ ] lib `microbench.rs` 與 `main.rs` 版本二選一；另一份刪除或改 `#[path]` 共用。
-- [ ] `cargo test --lib` 不再編任何 `sim_harness::`／`final_acceptance::` 符號；`cargo check --all-targets` 通過。
-- [ ] `ARCHITECTURE.md` 刪 `sim_harness` / `final_acceptance` / `harness` 段落與「Tests」列的引用。
+- [x] `src/sim_harness.rs`、`src/final_acceptance.rs` 刪除；`lib.rs` 82–90 與 `main.rs` 22 的對應 `cfg` 掛載消失。
+- [x] `Cargo.toml` 刪 `harness` feature，或僅保留給 `main.rs` `mod microbench` 用（擇一，README 註明）。
+- [x] `main.rs` 的 `mod microbench` 不再無條件編譜：`#[cfg(feature = "microbench")]`（或沿用 `harness`），`--microbench` 在未開 feature 時印出提示退出。
+- [x] lib `microbench.rs` 與 `main.rs` 版本二選一；另一份刪除或改 `#[path]` 共用。
+- [x] `cargo test --lib` 不再編任何 `sim_harness::`／`final_acceptance::` 符號；`cargo check --all-targets` 通過。
+- [x] `ARCHITECTURE.md` 刪 `sim_harness` / `final_acceptance` / `harness` 段落與「Tests」列的引用。
 
 ## 預計檔案與測試
 
@@ -46,3 +46,36 @@ Live 覆蓋已由 Plan30–34 + `review_hardening_*` 承擔（全部走 `ServerR
 - 刪 `tick_all_loaded_*` wrapper 本體與 `world_tick`／`fluid` 單元測試改寫（Plan 04）。
 - 刪 `MinecartState`／`MountManager`（Plan 02）。
 - 測試瘦身（Plan 28）。
+
+## 實作與證據
+
+### 改了什麼
+
+- 刪除 `src/sim_harness.rs`、`src/final_acceptance.rs`；`lib.rs` 拿掉對應 `cfg(any(test, feature = "harness"))` 掛載與 rustdoc。
+- `Cargo.toml`：刪空 feature `harness`，新增 `microbench = []`（僅桌面 `--microbench`）。
+- `main.rs`：`mod microbench` 改 `#[cfg(feature = "microbench")]`；未開 feature 時 `--microbench` 印提示並 `exit(2)`。
+- 保留單一 `src/microbench.rs`（只掛在 desktop `main.rs`）；lib 不再編 microbench。
+- `ARCHITECTURE.md` 去掉 sim_harness／final_acceptance／harness 敘述與 Tests 列引用；註明 microbench feature gate。
+- Wave 10 README 本列改「已完成」。
+
+### 死路徑 grep 證據（刪前）
+
+- `SimHarness` 外部 caller：僅 `final_acceptance.rs`（codegraph + ripgrep）；無 `tests/`／production 引用。
+- `final_acceptance::`：僅自身與 `sim_harness` 測試；無 live producer。
+- `harness` feature：`Cargo.toml`／`lib.rs` cfg 以外，全 repo 無 `--features harness` 使用者。
+- 刪後 `tick_all_loaded_fluids`／`tick_all_loaded_hoppers*`／`MinecartState` 變 unused（dead_code 警告）——留給 Plan 04／02，本計劃不刪本體。
+
+### 測了什麼
+
+- `cargo check --lib`：通過（刪檔後首次）。
+- `cargo check --all-targets`：通過。
+- `cargo check --bin icraft-server`：通過。
+- `cargo test --lib`：740 個可發現測試（較基線 749 少 9＝sim_harness／final_acceptance／lib microbench）；`sim_harness` 過濾結果為 0 tests。736 passed；2 failed／2 ignored。兩個失敗（`block_model::…waterlogged_slab…`、`server_runtime::…complete_session_health…`）在未改動的 `ee05cc8` 上同樣失敗，非本計劃引入。
+- `cargo run --features microbench -- --microbench`：輸出 JSON bench 行，exit 0。
+- `cargo run -- --microbench`：印 feature 提示，exit 2。
+
+### 留下的缺口
+
+- `tick_all_loaded_*`、`MinecartState`／`RailShape` 等現為 unused，刻意留給 Plan 02／04。
+- microbench 單元測試只在 `cargo test --features microbench --bin icraft` 時編進；預設 `cargo test --lib` 不再跑它們（與「lib 不再掛 microbench」一致）。
+- 上述兩個基線失敗不在本計劃範圍。

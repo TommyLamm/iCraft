@@ -4,8 +4,8 @@
 //! `pub use` so desktop files can keep `crate::world` (and friends) without
 //! compiling those sources a second time. Desktop-only GPU/menu modules
 //! stay declared here and must not be added to `lib.rs`.
-//! `--microbench` uses this crate's `mod microbench`, not the library
-//! `harness` / `cfg(test)` copy.
+//! `--microbench` uses this crate's `mod microbench` behind feature
+//! `microbench` (`cargo run --features microbench -- --microbench`).
 
 pub use icraft::{
     accessibility, advancements, authority, block_entity, block_model, boss, brewing,
@@ -22,6 +22,7 @@ mod camera;
 mod gpu_frame_resources;
 mod hand_renderer;
 mod menu;
+#[cfg(feature = "microbench")]
 mod microbench;
 mod mob_renderer;
 mod particles;
@@ -46,8 +47,18 @@ where
 
 fn main() {
     if wants_microbench(std::env::args()) {
-        let _ = microbench::run();
-        return;
+        #[cfg(feature = "microbench")]
+        {
+            let _ = microbench::run();
+            return;
+        }
+        #[cfg(not(feature = "microbench"))]
+        {
+            eprintln!(
+                "--microbench requires feature `microbench`: cargo run --features microbench -- --microbench"
+            );
+            std::process::exit(2);
+        }
     }
 
     let event_loop = EventLoop::new().unwrap();

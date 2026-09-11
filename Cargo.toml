@@ -5,9 +5,10 @@ edition = "2021"
 default-run = "icraft"
 
 [features]
-# Recipe/physics smoke and desktop microbench modules. Not a default library
-# surface; `cargo test --lib` still compiles them via `cfg(test)`.
-harness = []
+# Desktop-only storage/engine microbenchmarks (`src/microbench.rs` via
+# `main.rs`). Opt-in: `cargo run --features microbench -- --microbench`.
+# The old empty `harness` feature (sim_harness / final_acceptance) is gone.
+microbench = []
 
 [dependencies]
 winit = "0.30"
