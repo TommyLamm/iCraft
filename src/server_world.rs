@@ -1599,7 +1599,7 @@ impl ServerWorld {
         // renderer never performs a second random-tick pass for a boundary.
         let (mut random_ticks, _) = crate::world_tick::sample_random_ticks_in_columns(
             &self.chunks,
-            Some(&simulation_chunks),
+            &simulation_chunks,
             self.seed as u64,
             self.time,
             self.dimension as u8,
@@ -3414,5 +3414,25 @@ mod tests {
         assert_eq!(flushed.len(), 1);
         assert_eq!(flushed[0].0, 8);
         assert_eq!(flushed[0].1, 0);
+    }
+
+    #[test]
+    fn do_fire_tick_false_filters_fire_random_ticks() {
+        let mut rules = WorldRules::default();
+        rules.do_fire_tick = false;
+        let mut world = ServerWorld::new(
+            11,
+            Dimension::Overworld,
+            WorldType::Superflat,
+            false,
+            rules,
+            2,
+        );
+        world.set_block(4, 65, 4, BlockType::Fire, 0).unwrap();
+        let players = [(1u64, [4.0_f32, 65.0, 4.0])];
+        for _ in 0..400 {
+            let _ = world.tick(&players);
+        }
+        assert_eq!(world.get_block(4, 65, 4), BlockType::Fire);
     }
 }

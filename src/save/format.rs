@@ -1024,6 +1024,7 @@ fn apply_decoded_column(
     chunk.rebuild_torch_index();
     chunk.rebuild_redstone_index();
     chunk.rebuild_furnace_index();
+    chunk.rebuild_random_tick_index();
 
     for x in 0..16 {
         for z in 0..16 {

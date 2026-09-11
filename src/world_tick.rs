@@ -302,33 +302,13 @@ where
     }
 }
 
-/// 測試／leftover renderer；權威禁止。
-///
-/// Walks every loaded column (`columns == None`). Authority must call
-/// [`sample_random_ticks_in_columns`] with the simulation union instead.
-pub fn sample_all_loaded_random_ticks(
-    chunk_manager: &ChunkManager,
-    world_seed: u64,
-    game_tick: u64,
-    dimension: u8,
-    max_sections_per_tick: usize,
-) -> (Vec<BlockMutationRequest>, RandomTickStats) {
-    sample_random_ticks_in_columns(
-        chunk_manager,
-        None,
-        world_seed,
-        game_tick,
-        dimension,
-        max_sections_per_tick,
-    )
-}
-
 /// Authority random-tick sampler. `columns` is the simulation-union residency
-/// set. Do not pass `None` from authority; that path is leftover-only via
-/// [`sample_all_loaded_random_ticks`].
+/// set. Eligible sections come from each column's maintained
+/// [`crate::world::Chunk::random_tick_sections`] index — this path never
+/// rescans every section or sorts a freshly built list.
 pub fn sample_random_ticks_in_columns(
     chunk_manager: &ChunkManager,
-    columns: Option<&BTreeSet<(i32, i32)>>,
+    columns: &BTreeSet<(i32, i32)>,
     world_seed: u64,
     game_tick: u64,
     dimension: u8,
@@ -337,32 +317,17 @@ pub fn sample_random_ticks_in_columns(
     let mut requests = Vec::new();
     let mut stats = RandomTickStats::default();
 
+    // Columns are a BTreeSet and each chunk keeps ascending section_y values,
+    // so the collected list is already ordered by (cx, cz, sec_y).
     let mut eligible_sections = Vec::new();
-    let collect_section = |cx: i32, cz: i32, chunk: &crate::world::Chunk, eligible: &mut Vec<_>| {
-        for (sec_idx, section_opt) in chunk.sections.iter().enumerate() {
-            let Some(section) = section_opt else {
-                continue;
-            };
-            if section.random_tick_count() > 0 {
-                let sec_y = chunk.section_y_at_index(sec_idx);
-                eligible.push((cx, cz, sec_y));
-            }
-        }
-    };
-    if let Some(columns) = columns {
-        for &(cx, cz) in columns {
-            if let Some(chunk) = chunk_manager.chunks.get(&(cx, cz)) {
-                collect_section(cx, cz, chunk, &mut eligible_sections);
-            }
-        }
-    } else {
-        for (&(cx, cz), chunk) in &chunk_manager.chunks {
-            collect_section(cx, cz, chunk, &mut eligible_sections);
+    for &(cx, cz) in columns {
+        let Some(chunk) = chunk_manager.chunks.get(&(cx, cz)) else {
+            continue;
+        };
+        for &sec_y in chunk.random_tick_sections() {
+            eligible_sections.push((cx, cz, sec_y));
         }
     }
-
-    // Sort deterministically to avoid HashMap order non-determinism
-    eligible_sections.sort_unstable();
 
     let total_eligible = eligible_sections.len();
     let process_count = total_eligible.min(max_sections_per_tick);
@@ -808,6 +773,63 @@ mod tests {
         let r = req.unwrap();
         assert_eq!(r.pos, (0, 64, 0));
         assert_eq!(r.new_block, BlockType::Air);
+    }
+
+    #[test]
+    fn sample_random_ticks_uses_chunk_eligible_index() {
+        let mut manager = ChunkManager::new(4);
+        manager
+            .chunks
+            .insert((0, 0), crate::world::Chunk::empty(0, 0));
+        manager
+            .chunks
+            .insert((1, 0), crate::world::Chunk::empty(1, 0));
+        manager.set_block(2, 20, 2, BlockType::WheatCrop);
+        manager.set_block(18, 20, 2, BlockType::WheatCrop);
+        assert_eq!(
+            manager.chunks.get(&(0, 0)).unwrap().random_tick_sections(),
+            &[1]
+        );
+        assert_eq!(
+            manager.chunks.get(&(1, 0)).unwrap().random_tick_sections(),
+            &[1]
+        );
+
+        let columns = BTreeSet::from([(0, 0), (1, 0)]);
+        let (_, stats) = sample_random_ticks_in_columns(&manager, &columns, 99, 7, 0, 128);
+        assert_eq!(stats.sampled_sections, 2);
+        assert_eq!(stats.total_ticks, 6);
+        assert_eq!(stats.backlog_sections, 0);
+
+        manager.chunks.remove(&(1, 0));
+        let (_, stats) = sample_random_ticks_in_columns(&manager, &columns, 99, 7, 0, 128);
+        assert_eq!(stats.sampled_sections, 1);
+        assert_eq!(stats.total_ticks, 3);
+
+        let only_unloaded = BTreeSet::from([(1, 0)]);
+        let (_, stats) = sample_random_ticks_in_columns(&manager, &only_unloaded, 99, 7, 0, 128);
+        assert_eq!(stats.sampled_sections, 0);
+        assert_eq!(stats.total_ticks, 0);
+    }
+
+    #[test]
+    fn sample_random_ticks_preserves_ordered_section_budget() {
+        let mut manager = ChunkManager::new(4);
+        for cz in 0..3 {
+            manager
+                .chunks
+                .insert((0, cz), crate::world::Chunk::empty(0, cz));
+            manager.set_block(1, 20, cz * 16 + 1, BlockType::Fire);
+        }
+        let columns = BTreeSet::from([(0, 0), (0, 1), (0, 2)]);
+        let (_, stats) = sample_random_ticks_in_columns(&manager, &columns, 1, 2, 0, 2);
+        assert_eq!(stats.sampled_sections, 2);
+        assert_eq!(stats.backlog_sections, 1);
+        assert_eq!(stats.total_ticks, 6);
+
+        let (first, _) = sample_random_ticks_in_columns(&manager, &columns, 1, 2, 0, 2);
+        let (second, _) = sample_random_ticks_in_columns(&manager, &columns, 1, 2, 0, 2);
+        assert_eq!(first, second);
     }
 
     #[test]

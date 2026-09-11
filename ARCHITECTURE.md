@@ -185,7 +185,11 @@ input
   only when hopper slots change or cooldown is armed `0→N` after a transfer.
   Reload restores the last persisted cooldown (typically 8 after a transfer),
   so a hopper may wait up to 8 extra ticks. Furnaces are ticked from a compact
-  per-chunk index with the same encoding as torches. Sleeping redstone skips
+  per-chunk index with the same encoding as torches. Random ticks sample from a
+  per-chunk ascending `section_y` index (`random_tick_sections`) maintained on
+  load / `set_block_local` / unload; authority walks the simulation-union
+  columns and takes at most 128 already-ordered eligible sections without
+  rescanning empty sections or sorting each tick. Sleeping redstone skips
   comparator/observer refresh until a container mutation, plate occupancy
   change, scheduled/dirty work, or loaded-chunk set change wakes it. Grounded
   dropped items with near-zero velocity skip XYZ physics until the support

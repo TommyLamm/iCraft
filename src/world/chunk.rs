@@ -44,6 +44,10 @@ pub struct Chunk {
     pub(crate) redstone_positions: Vec<u32>,
     /// Compact local coordinates of furnace / lit-furnace blocks.
     pub(crate) furnace_positions: Vec<u32>,
+    /// Ascending `section_y` values whose `random_tick_count() > 0`.
+    /// Maintained on load / `set_block_local` so authority sampling never
+    /// rescans empty sections each tick.
+    pub(crate) random_tick_sections: Vec<i8>,
     /// Block entities keyed by Chunk-local coordinates (x: u8, y: i16, z: u8).
     pub(crate) block_entities:
         std::collections::HashMap<(u8, i16, u8), crate::block_entity::BlockEntity>,
@@ -72,6 +76,7 @@ impl Chunk {
             torch_positions: Vec::new(),
             redstone_positions: Vec::new(),
             furnace_positions: Vec::new(),
+            random_tick_sections: Vec::new(),
             block_entities: std::collections::HashMap::new(),
         }
     }
@@ -213,6 +218,8 @@ impl Chunk {
             Self::build_redstone_index_from_sections(height.min_section_y(), &sections);
         let furnace_positions =
             Self::build_furnace_index_from_sections(height.min_section_y(), &sections);
+        let random_tick_sections =
+            Self::build_random_tick_index_from_sections(height.min_section_y(), &sections);
 
         Self {
             chunk_x,
@@ -223,6 +230,7 @@ impl Chunk {
             torch_positions,
             redstone_positions,
             furnace_positions,
+            random_tick_sections,
             block_entities: std::collections::HashMap::new(),
         }
     }
@@ -324,6 +332,22 @@ impl Chunk {
         positions
     }
 
+    fn build_random_tick_index_from_sections(
+        min_sec_y: i8,
+        sections: &[Option<ChunkSection>],
+    ) -> Vec<i8> {
+        let mut section_ys = Vec::new();
+        for (sec_idx, sec_opt) in sections.iter().enumerate() {
+            let Some(sec) = sec_opt else {
+                continue;
+            };
+            if sec.random_tick_count() > 0 {
+                section_ys.push(min_sec_y + sec_idx as i8);
+            }
+        }
+        section_ys
+    }
+
     /// Returns the indexed local positions of ordinary torches.
     pub fn torch_positions(&self) -> &[u32] {
         &self.torch_positions
@@ -337,6 +361,11 @@ impl Chunk {
     /// Returns the indexed local positions of furnace blocks.
     pub fn furnace_positions(&self) -> &[u32] {
         &self.furnace_positions
+    }
+
+    /// Returns ascending section Y values that still have random-tickable blocks.
+    pub fn random_tick_sections(&self) -> &[i8] {
+        &self.random_tick_sections
     }
 
     /// Bytes owned by this chunk, including representation-specific section
@@ -358,6 +387,7 @@ impl Chunk {
             + self.torch_positions.capacity() * size_of::<u32>()
             + self.redstone_positions.capacity() * size_of::<u32>()
             + self.furnace_positions.capacity() * size_of::<u32>()
+            + self.random_tick_sections.capacity() * size_of::<i8>()
             + self.block_entities.capacity()
                 * (size_of::<(u8, i16, u8)>() + size_of::<crate::block_entity::BlockEntity>())
             + self
@@ -478,6 +508,12 @@ impl Chunk {
             Self::build_furnace_index_from_sections(self.min_section_y, &self.sections);
     }
 
+    /// Rebuilds the random-tick section index after bulk block mutations.
+    pub fn rebuild_random_tick_index(&mut self) {
+        self.random_tick_sections =
+            Self::build_random_tick_index_from_sections(self.min_section_y, &self.sections);
+    }
+
     /// Sets a local block and keeps the torch and redstone indices synchronized.
     pub fn set_block_local(&mut self, x: usize, wy: i32, z: usize, block: BlockType) {
         let sec_y = world_y_to_section_y(wy);
@@ -493,6 +529,7 @@ impl Chunk {
         if old == block {
             return;
         }
+        let random_tick_count = sec.random_tick_count();
 
         if let Some(entity) = self.block_entities.get(&(x as u8, wy as i16, z as u8)) {
             if !entity.matches_block_type(block) {
@@ -530,6 +567,16 @@ impl Chunk {
         }
         if new_is_furnace && !old_is_furnace {
             self.furnace_positions.push(encoded);
+        }
+
+        match self.random_tick_sections.binary_search(&sec_y_val) {
+            Ok(index) if random_tick_count == 0 => {
+                self.random_tick_sections.remove(index);
+            }
+            Err(index) if random_tick_count > 0 => {
+                self.random_tick_sections.insert(index, sec_y_val);
+            }
+            _ => {}
         }
     }
 
@@ -893,6 +940,24 @@ mod tests {
     }
 
     #[test]
+    fn random_tick_index_tracks_section_eligibility() {
+        let mut chunk = Chunk::empty(0, 0);
+        assert!(chunk.random_tick_sections().is_empty());
+        chunk.set_block_local(1, 20, 2, BlockType::WheatCrop);
+        assert_eq!(chunk.random_tick_sections(), &[1]);
+        chunk.set_block_local(2, 20, 2, BlockType::WheatCrop);
+        assert_eq!(chunk.random_tick_sections(), &[1]);
+        chunk.set_block_local(1, 20, 2, BlockType::Stone);
+        assert_eq!(chunk.random_tick_sections(), &[1]);
+        chunk.set_block_local(2, 20, 2, BlockType::Stone);
+        assert!(chunk.random_tick_sections().is_empty());
+        chunk.set_block_local(0, -10, 0, BlockType::Fire);
+        assert_eq!(chunk.random_tick_sections(), &[-1]);
+        chunk.rebuild_random_tick_index();
+        assert_eq!(chunk.random_tick_sections(), &[-1]);
+    }
+
+    #[test]
     fn chunk_memory_usage_tracks_section_promotion_and_demotion() {
         let mut chunk = Chunk {
             chunk_x: 0,
@@ -903,6 +968,7 @@ mod tests {
             torch_positions: Vec::new(),
             redstone_positions: Vec::new(),
             furnace_positions: Vec::new(),
+            random_tick_sections: Vec::new(),
             block_entities: std::collections::HashMap::new(),
         };
         let empty_bytes = chunk.memory_usage();
