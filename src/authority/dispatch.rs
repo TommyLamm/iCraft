@@ -96,14 +96,13 @@ impl AuthorityCore {
                 y,
                 z,
                 slot,
-            } => match ContainerAction::from_wire(*action) {
-                Some(ContainerAction::Open) => self
+            } => match action {
+                ContainerAction::Open => self
                     .world_mut_active()
                     .open_container(*x, *y, *z, *slot, id),
-                Some(ContainerAction::Close) => self
+                ContainerAction::Close => self
                     .world_mut_active()
                     .close_container(*x, *y, *z, *slot, id),
-                None => Err(RejectReason::InvalidState),
             },
             GameplayOperation::ContainerClick {
                 x,

@@ -1729,7 +1729,6 @@ mod tests {
             runtime.push_presentation_event(ProjectionEvent::session(
                 99,
                 Packet::GameplayResponse {
-                    protocol_version: PROTOCOL_VERSION,
                     response: GameplayResponse {
                         request_id: 700,
                         server_sequence: 1,
@@ -1744,7 +1743,6 @@ mod tests {
             runtime.push_presentation_event(ProjectionEvent::session(
                 99,
                 Packet::PlayerSessionUpdate {
-                    protocol_version: PROTOCOL_VERSION,
                     sequence: 1,
                     player_id: 99,
                     dimension: Dimension::Overworld as u8,
@@ -1758,7 +1756,6 @@ mod tests {
                 runtime.push_presentation_event(ProjectionEvent::session(
                     99,
                     Packet::PlayerPosition {
-                        protocol_version: PROTOCOL_VERSION,
                         id: 10_000 + index as u64,
                         sequence: index as u32 + 1,
                         sender_time_millis: index as u64 + 1,
@@ -1793,7 +1790,6 @@ mod tests {
                 runtime.push_presentation_event(ProjectionEvent::session(
                     99,
                     Packet::GameplayResponse {
-                        protocol_version: PROTOCOL_VERSION,
                         response: GameplayResponse {
                             request_id: index as u128,
                             server_sequence: index as u64 + 1,
@@ -2077,7 +2073,7 @@ mod tests {
                 dimension: Dimension::Overworld as u8,
                 client_revision: revision,
                 operation: GameplayOperation::Container {
-                    action: ContainerAction::Open.to_wire(),
+                    action: ContainerAction::Open,
                     x: position.0,
                     y: position.1,
                     z: position.2,

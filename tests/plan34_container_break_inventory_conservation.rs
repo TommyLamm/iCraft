@@ -444,13 +444,13 @@ fn run_tcp_container_vector(label: &str, listen: bool) {
     assert!(!clients[1]
         .events()
         .iter()
-        .any(|event| { matches!(event, ClientToGame::Packet(Packet::GameplayResponse { .. }) }));
+        .any(|event| { matches!(event, ClientToGame::Packet(Packet::GameplayResponse { .. })) }));
     assert!(!clients[1].events().iter().any(|event| {
         matches!(
             event,
             ClientToGame::Packet(Packet::ContainerOpenResult { .. })
                 | ClientToGame::Packet(Packet::ContainerClickResult { .. })
-                | ClientToGame::Packet(Packet::ContainerSlotUpdate { .. }
+                | ClientToGame::Packet(Packet::ContainerSlotUpdate { .. })
         )
     }));
     // Entity ids must agree for owner and observer during one authoritative

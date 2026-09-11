@@ -119,7 +119,6 @@ fn pose_and_oversized_chat_flood_does_not_block_peer_gameplay() {
         write_packet(
             &mut flooder,
             &Packet::PlayerPosition {
-                protocol_version: PROTOCOL_VERSION,
                 id: flooder_id,
                 sequence,
                 sender_time_millis: u64::from(sequence),
@@ -134,7 +133,6 @@ fn pose_and_oversized_chat_flood_does_not_block_peer_gameplay() {
     write_packet(
         &mut flooder,
         &Packet::ChatMessage {
-            protocol_version: PROTOCOL_VERSION,
             sender: "flooder".into(),
             message: "x".repeat(257),
         },

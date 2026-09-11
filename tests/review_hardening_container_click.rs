@@ -89,7 +89,7 @@ fn open_chest(core: &mut AuthorityCore, request_id: u128, sequence: u64) {
         request_id,
         sequence,
         GameplayOperation::Container {
-            action: ContainerAction::Open.to_wire(),
+            action: ContainerAction::Open,
             x: CHEST.0,
             y: CHEST.1,
             z: CHEST.2,
@@ -485,27 +485,24 @@ fn metadata_mismatch_on_same_item_is_forged_and_rejected() {
 }
 
 #[test]
-fn leftover_container_click_envelope_is_rejected() {
+fn open_and_close_container_actions_are_typed() {
     let mut core = new_core();
     seed_chest(&mut core, &[(2, ItemStack::new(Item::Coal, 3))]);
     open_chest(&mut core, 1, 1);
     let before = conserved_totals(&core);
 
-    rejected(
-        &submit(
-            &mut core,
-            2,
-            2,
-            GameplayOperation::Container {
-                action: 1,
-                x: CHEST.0,
-                y: CHEST.1,
-                z: CHEST.2,
-                slot: 2,
-            },
-        ),
-        RejectReason::InvalidState,
-    );
+    accepted(&submit(
+        &mut core,
+        2,
+        2,
+        GameplayOperation::Container {
+            action: ContainerAction::Close,
+            x: CHEST.0,
+            y: CHEST.1,
+            z: CHEST.2,
+            slot: 2,
+        },
+    ));
 
     assert_eq!(conserved_totals(&core), before);
     assert_eq!(chest_slot(&core, 2), Some(ItemStack::new(Item::Coal, 3)));

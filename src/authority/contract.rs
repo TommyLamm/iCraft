@@ -7,9 +7,9 @@
 
 use crate::inventory::{GameMode, ItemStack};
 use crate::network::protocol::{
-    BlockActionKind, GameplayOperation, GameplayRequest, GameplayResponse, ItemWire,
-    MiningProgressWire, PlayerId, RejectReason, SessionBrewWire, SessionFishingHookWire,
-    SessionGameplayWire, SessionSlotWire, SlotRefWire,
+    BlockActionKind, ContainerAction, GameplayOperation, GameplayRequest, GameplayResponse,
+    ItemWire, MiningProgressWire, PlayerId, RejectReason, SessionBrewWire,
+    SessionFishingHookWire, SessionGameplayWire, SessionSlotWire, SlotRefWire,
 };
 use std::collections::VecDeque;
 
@@ -745,7 +745,7 @@ pub fn common_gameplay_vectors() -> Vec<GameplayRequest> {
             dimension: 0,
             client_revision: 1,
             operation: GameplayOperation::Container {
-                action: 0,
+                action: ContainerAction::Open,
                 x: 8,
                 y: 80,
                 z: 8,

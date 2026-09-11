@@ -127,7 +127,6 @@ impl ClientToGame {
 
     pub fn disconnect(reason: impl Into<String>) -> Self {
         Self::Packet(Packet::Disconnect {
-            protocol_version: PROTOCOL_VERSION,
             reason: reason.into(),
         })
     }
@@ -348,7 +347,6 @@ impl RevisionGate {
             }
             *current = revision;
             return vec![Packet::BlockChange {
-                protocol_version: PROTOCOL_VERSION,
                 dimension,
                 revision,
                 x,
@@ -399,7 +397,6 @@ impl RevisionGate {
             changes.retain(|buffered_revision, _| *buffered_revision > revision);
         }
         let mut events = vec![Packet::ChunkData {
-            protocol_version: PROTOCOL_VERSION,
             dimension,
             cx,
             cz,
@@ -425,7 +422,6 @@ impl RevisionGate {
             }
             self.applied.insert(key, revision);
             events.push(Packet::BlockChange {
-                protocol_version: PROTOCOL_VERSION,
                 dimension: key.0,
                 revision,
                 x: change.x,
@@ -636,11 +632,6 @@ async fn run_client(
         tokio::select! {
             incoming = reader.recv() => {
                 match incoming {
-                    Ok(packet) if packet.protocol_version() != PROTOCOL_VERSION => {
-                        eprintln!("[NetworkClient] Disconnecting: protocol version mismatch");
-                        let _ = client_to_game.send(ClientToGame::disconnect("protocol version mismatch"));
-                        break;
-                    }
                     Ok(packet @ Packet::PlayerJoin { .. })
                     | Ok(packet @ Packet::PlayerLeave { .. })
                     | Ok(packet @ Packet::PlayerPosition { .. })
@@ -652,6 +643,8 @@ async fn run_client(
                     | Ok(packet @ Packet::ChatMessage { .. })
                     | Ok(packet @ Packet::TimeSync { .. })
                     | Ok(packet @ Packet::LightningStrike { .. }) => {
+                        // Protocol version is negotiated at handshake; post-auth
+                        // packets no longer carry protocol_version.
                         if matches!(
                             &packet,
                             Packet::PlayerRespawnResult { dimension, .. }
@@ -713,7 +706,6 @@ async fn run_client(
                             if active_container == Some(key) {
                                 active_container = None;
                                 let _ = client_to_game.send(ClientToGame::packet(Packet::ContainerClose {
-                                    protocol_version: PROTOCOL_VERSION,
                                     dimension,
                                     x,
                                     y,
@@ -889,13 +881,12 @@ async fn run_client(
                         }
                         if gameplay_response_gate.accept(&response) {
                             let _ = client_to_game.send(ClientToGame::packet(Packet::GameplayResponse {
-                                protocol_version: PROTOCOL_VERSION,
                                 response,
                             }));
                         }
                     }
                     Ok(Packet::Keepalive { .. }) => {
-                        if writer.send(&Packet::Keepalive { protocol_version: PROTOCOL_VERSION }).await.is_err() {
+                        if writer.send(&Packet::Keepalive).await.is_err() {
                             eprintln!("[NetworkClient] Disconnecting: failed to reply to keepalive");
                             let _ = client_to_game.send(ClientToGame::disconnect("connection lost"));
                             break;
@@ -949,7 +940,7 @@ async fn run_client(
                         Ok(GameToClient::SendAction { action }) => {
                             if send_or_die(
                                 &mut writer,
-                                &Packet::PlayerAction { protocol_version: PROTOCOL_VERSION, id: player_id, action },
+                                &Packet::PlayerAction { id: player_id, action },
                                 &client_to_game,
                                 "PlayerAction",
                             ).await.is_err() {
@@ -959,7 +950,7 @@ async fn run_client(
                         Ok(GameToClient::SendChat { message }) => {
                             if send_or_die(
                                 &mut writer,
-                                &Packet::ChatMessage { protocol_version: PROTOCOL_VERSION, sender: username.clone(), message },
+                                &Packet::ChatMessage { sender: username.clone(), message },
                                 &client_to_game,
                                 "ChatMessage",
                             ).await.is_err() {
@@ -969,7 +960,7 @@ async fn run_client(
                         Ok(GameToClient::PlayerRespawnRequest) => {
                             if send_or_die(
                                 &mut writer,
-                                &Packet::PlayerRespawnRequest { protocol_version: PROTOCOL_VERSION },
+                                &Packet::PlayerRespawnRequest,
                                 &client_to_game,
                                 "PlayerRespawnRequest",
                             ).await.is_err() {
@@ -987,7 +978,6 @@ async fn run_client(
                             if send_or_die(
                                 &mut writer,
                                 &Packet::GameplayRequest {
-                                    protocol_version: PROTOCOL_VERSION,
                                     request,
                                 },
                                 &client_to_game,
@@ -998,7 +988,7 @@ async fn run_client(
                         }
                         Ok(GameToClient::Disconnect) => {
                             eprintln!("[NetworkClient] Disconnecting: game thread requested disconnect");
-                            let _ = writer.send(&Packet::Disconnect { protocol_version: PROTOCOL_VERSION, reason: "client disconnect".into() }).await;
+                            let _ = writer.send(&Packet::Disconnect { reason: "client disconnect".into() }).await;
                             return;
                         }
                         Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -1022,7 +1012,6 @@ async fn run_client(
                     if send_or_die(
                         &mut writer,
                         &Packet::PlayerPosition {
-                            protocol_version: PROTOCOL_VERSION,
                             id: player_id,
                             sequence,
                             sender_time_millis,
@@ -1202,7 +1191,6 @@ mod tests {
         };
         host_tx
             .try_send(HostToServer::project_broadcast(Packet::PlayerJoin {
-                protocol_version: PROTOCOL_VERSION,
                     id: second_id,
                     username: username,
             }))
@@ -1245,7 +1233,6 @@ mod tests {
 
         host_tx
             .try_send(HostToServer::project_broadcast(Packet::BlockChange {
-                protocol_version: PROTOCOL_VERSION,
                     dimension: 0,
                     revision: 100,
                     x: 7,
@@ -1260,7 +1247,6 @@ mod tests {
             .try_send(HostToServer::project_session(
                 player_id,
                 Packet::ChunkData {
-                    protocol_version: PROTOCOL_VERSION,
                     dimension: 0,
                     cx: 0,
                     cz: -1,
@@ -1276,7 +1262,6 @@ mod tests {
             .unwrap();
         host_tx
             .try_send(HostToServer::project_broadcast(Packet::TimeSync {
-                protocol_version: PROTOCOL_VERSION,
                     ticks: 19_000,
                     weather: 2,
                     weather_remaining_ticks: 8_000.5,
@@ -1290,7 +1275,6 @@ mod tests {
         };
         host_tx
             .try_send(HostToServer::project_broadcast(Packet::LightningStrike {
-                protocol_version: PROTOCOL_VERSION,
                     strike: strike,
             }))
             .unwrap();
@@ -1485,7 +1469,6 @@ mod tests {
 
         host_tx
             .try_send(HostToServer::project_broadcast(Packet::BlockChange {
-                protocol_version: PROTOCOL_VERSION,
                     dimension: 0,
                     revision: 2,
                     x: 2,
@@ -1499,7 +1482,6 @@ mod tests {
         let snapshot = |to, cx, blocks, block_states| HostToServer::project_session(
                 to,
                 Packet::ChunkData {
-                    protocol_version: PROTOCOL_VERSION,
                     dimension: 0,
                     cx: cx,
                     cz: 0,
@@ -1587,7 +1569,6 @@ mod tests {
 
         host_tx
             .try_send(HostToServer::project_broadcast(Packet::BlockChange {
-                protocol_version: PROTOCOL_VERSION,
                     dimension: 0,
                     revision: 2,
                     x: 1,
@@ -1600,14 +1581,12 @@ mod tests {
             .unwrap();
         host_tx
             .try_send(HostToServer::project_broadcast(Packet::ChatMessage {
-                protocol_version: PROTOCOL_VERSION,
                     sender: "host".into(),
                     message: "first".into(),
             }))
             .unwrap();
         host_tx
             .try_send(HostToServer::project_broadcast(Packet::TimeSync {
-                protocol_version: PROTOCOL_VERSION,
                     ticks: 42,
                     weather: 1,
                     weather_remaining_ticks: 99.0,
@@ -1615,7 +1594,6 @@ mod tests {
             .unwrap();
         host_tx
             .try_send(HostToServer::project_broadcast(Packet::ChatMessage {
-                protocol_version: PROTOCOL_VERSION,
                     sender: "host".into(),
                     message: "second".into(),
             }))
@@ -1624,7 +1602,6 @@ mod tests {
             .try_send(HostToServer::project_session(
                 player_id,
                 Packet::ChunkData {
-                    protocol_version: PROTOCOL_VERSION,
                     dimension: 0,
                     cx: 0,
                     cz: 0,
@@ -1669,7 +1646,6 @@ mod tests {
     #[test]
     fn authoritative_weather_packets_map_to_pure_client_events() {
         let sync = Packet::TimeSync {
-            protocol_version: PROTOCOL_VERSION,
             ticks: 12_345,
             weather: 1,
             weather_remaining_ticks: 6_789.5,
@@ -1692,7 +1668,6 @@ mod tests {
         };
         assert!(matches!(
             authoritative_weather_event(&Packet::LightningStrike {
-                protocol_version: PROTOCOL_VERSION,
                 strike,
             }),
             Some(ClientToGame::Packet(Packet::LightningStrike { strike: received, .. })) if received == strike
@@ -1735,7 +1710,6 @@ mod tests {
 
         host_tx
             .try_send(HostToServer::project_broadcast(Packet::ChatMessage {
-                protocol_version: PROTOCOL_VERSION,
                     sender: "steve".into(),
                     message: "hello".into(),
             }))
@@ -2154,7 +2128,6 @@ mod tests {
             .try_send(HostToServer::project_session(
                 player_id,
                 Packet::ContainerOpenResult {
-                    protocol_version: PROTOCOL_VERSION,
                     dimension: 0,
                     success: true,
                     x: position.0,
@@ -2182,7 +2155,6 @@ mod tests {
             .try_send(HostToServer::project_session(
                 player_id,
                 Packet::ContainerSlotUpdate {
-                    protocol_version: PROTOCOL_VERSION,
                     dimension: 0,
                     revision: 100,
                     x: position.0,
@@ -2202,7 +2174,6 @@ mod tests {
             .try_send(HostToServer::project_session(
                 player_id,
                 Packet::ContainerClose {
-                    protocol_version: PROTOCOL_VERSION,
                     dimension: 0,
                     x: position.0 + 1,
                     y: position.1,
@@ -2219,7 +2190,6 @@ mod tests {
             .try_send(HostToServer::project_session(
                 player_id,
                 Packet::ContainerClose {
-                    protocol_version: PROTOCOL_VERSION,
                     dimension: 0,
                     x: position.0,
                     y: position.1,
@@ -2274,7 +2244,6 @@ mod tests {
         };
         host_tx
             .try_send(HostToServer::project_broadcast(Packet::EntitySpawn {
-                protocol_version: PROTOCOL_VERSION,
                     dimension: 0,
                     sequence: 1,
                     state: state(0.0),
@@ -2282,7 +2251,6 @@ mod tests {
             .unwrap();
         host_tx
             .try_send(HostToServer::project_broadcast(Packet::EntityState {
-                protocol_version: PROTOCOL_VERSION,
                     dimension: 0,
                     sequence: 2,
                     state: state(2.0),
@@ -2290,7 +2258,6 @@ mod tests {
             .unwrap();
         host_tx
             .try_send(HostToServer::project_broadcast(Packet::EntityState {
-                protocol_version: PROTOCOL_VERSION,
                     dimension: 0,
                     sequence: 3,
                     state: state(3.0),
@@ -2298,7 +2265,6 @@ mod tests {
             .unwrap();
         host_tx
             .try_send(HostToServer::project_broadcast(Packet::PlayerEffect {
-                protocol_version: PROTOCOL_VERSION,
                     sequence: 3,
                     player_id: player_id,
                     effects: vec![PlayerEffectWire {
@@ -2344,7 +2310,6 @@ mod tests {
 
         host_tx
             .try_send(HostToServer::project_broadcast(Packet::EntityDespawn {
-                protocol_version: PROTOCOL_VERSION,
                     dimension: 0,
                     sequence: 4,
                     entity_id: 77,
@@ -2459,7 +2424,6 @@ mod tests {
                 foreign.revision = 3;
                 connection
                     .send(&Packet::PlayerSessionUpdate {
-                        protocol_version: PROTOCOL_VERSION,
                         sequence: 1,
                         player_id: 99,
                         dimension: 0,
@@ -2471,7 +2435,6 @@ mod tests {
                 local.revision = 4;
                 connection
                     .send(&Packet::PlayerSessionUpdate {
-                        protocol_version: PROTOCOL_VERSION,
                         sequence: 2,
                         player_id: 1,
                         dimension: 0,

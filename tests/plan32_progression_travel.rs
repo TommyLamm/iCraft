@@ -315,7 +315,7 @@ fn run_tcp_travel(label: &str, listen: bool) {
     assert!(!clients[1]
         .events()
         .iter()
-        .any(|event| matches!(event, ClientToGame::Packet(Packet::DimensionTransfer { .. })));
+        .any(|event| matches!(event, ClientToGame::Packet(Packet::DimensionTransfer { .. }))));
     assert!(!clients[1].events().iter().any(|event| matches!(
         event,
         ClientToGame::Packet(Packet::PlayerSessionUpdate { player_id, .. }) if *player_id == owner

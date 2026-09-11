@@ -33,7 +33,6 @@ pub(crate) async fn queue_initial_roster(
 ) -> Result<(), ()> {
     for (id, username) in roster {
         let packet = Packet::PlayerJoin {
-            protocol_version: PROTOCOL_VERSION,
             id,
             username,
         };
@@ -133,7 +132,6 @@ pub(crate) async fn route_gameplay_request<S: HostEventSender>(
             sessions,
             id,
             Packet::GameplayResponse {
-                protocol_version: PROTOCOL_VERSION,
                 response,
             },
         )
@@ -155,7 +153,6 @@ pub(crate) async fn route_gameplay_request<S: HostEventSender>(
                     sessions,
                     id,
                     Packet::GameplayResponse {
-                        protocol_version: PROTOCOL_VERSION,
                         response: {
                             let mut sessions_guard = sessions.lock().await;
                             let Some(session) = sessions_guard.get_mut(&id) else {
@@ -207,11 +204,9 @@ pub(crate) async fn run_client<S: HostEventSender>(
                 let _ = send_connection_packet(
                     &mut connection,
                     Packet::Disconnect {
-                        protocol_version: PROTOCOL_VERSION,
                         reason: format!(
                             "protocol version mismatch: server {PROTOCOL_VERSION}, client {protocol_version}"
-                        ),
-                    },
+                        ) },
                     &metrics,
                 )
                 .await;
@@ -247,7 +242,6 @@ pub(crate) async fn run_client<S: HostEventSender>(
             let _ = send_connection_packet(
                 &mut connection,
                 Packet::Disconnect {
-                    protocol_version: PROTOCOL_VERSION,
                     reason: "expected handshake".into(),
                 },
                 &metrics,
@@ -271,7 +265,6 @@ pub(crate) async fn run_client<S: HostEventSender>(
             let _ = send_connection_packet(
                 &mut connection,
                 Packet::Disconnect {
-                    protocol_version: PROTOCOL_VERSION,
                     reason: reason.into(),
                 },
                 &metrics,
@@ -286,7 +279,6 @@ pub(crate) async fn run_client<S: HostEventSender>(
             let _ = send_connection_packet(
                 &mut connection,
                 Packet::Disconnect {
-                    protocol_version: PROTOCOL_VERSION,
                     reason: "server is full".into(),
                 },
                 &metrics,
@@ -298,7 +290,6 @@ pub(crate) async fn run_client<S: HostEventSender>(
             let _ = send_connection_packet(
                 &mut connection,
                 Packet::Disconnect {
-                    protocol_version: PROTOCOL_VERSION,
                     reason: "not whitelisted".into(),
                 },
                 &metrics,
@@ -313,7 +304,6 @@ pub(crate) async fn run_client<S: HostEventSender>(
             let _ = send_connection_packet(
                 &mut connection,
                 Packet::Disconnect {
-                    protocol_version: PROTOCOL_VERSION,
                     reason: "duplicate login".into(),
                 },
                 &metrics,
@@ -414,9 +404,7 @@ pub(crate) async fn run_client<S: HostEventSender>(
                     }
                 }
                 _ = keepalive.tick() => {
-                    let packet = Packet::Keepalive {
-                        protocol_version: PROTOCOL_VERSION,
-                    };
+                    let packet = Packet::Keepalive;
                     if send_writer_packet(&mut writer, &packet, &writer_metrics)
                         .await
                         .is_err()
@@ -468,7 +456,6 @@ pub(crate) async fn run_client<S: HostEventSender>(
         let _ = reliable_send_and_wait(
             &roster_tx,
             Packet::Disconnect {
-                protocol_version: PROTOCOL_VERSION,
                 reason: reason.into(),
             },
             &metrics,
@@ -543,10 +530,6 @@ pub(crate) async fn run_client<S: HostEventSender>(
                     })
                 });
                 match incoming {
-                    Ok(Ok(packet)) if packet.protocol_version() != PROTOCOL_VERSION => {
-                        disconnect_reason = format!("protocol version mismatch (got {}, expected {})", packet.protocol_version(), PROTOCOL_VERSION);
-                        break;
-                    }
                     Ok(Ok(Packet::PlayerPosition {
                         sequence,
                         sender_time_millis,
@@ -684,7 +667,6 @@ pub(crate) async fn remove_client<S: HostEventSender>(
     let failed = broadcast_reliably(
         sessions,
         Packet::PlayerLeave {
-            protocol_version: PROTOCOL_VERSION,
             id,
         },
     )

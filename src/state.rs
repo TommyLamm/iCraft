@@ -348,7 +348,6 @@ mod remote_sync_tests {
         let mut staging = NetworkStaging::default();
         for (id, sequence, x) in [(7_u64, 2_u32, 2.0_f32), (7, 1, 1.0), (8, 4, 4.0)] {
             staging.stage(NetworkInbound::Packet(Packet::PlayerPosition {
-                protocol_version: PROTOCOL_VERSION,
                 id,
                 sequence,
                 sender_time_millis: sequence as u64,
@@ -361,7 +360,6 @@ mod remote_sync_tests {
         }
         for sequence in [9, 8, 10] {
             staging.stage(NetworkInbound::Packet(Packet::PlayerHealth {
-                protocol_version: PROTOCOL_VERSION,
                 sequence,
                 player_id: 3,
                 health: sequence as f32,
@@ -373,7 +371,6 @@ mod remote_sync_tests {
                 death_reason: 0,
             }));
             staging.stage(NetworkInbound::Packet(Packet::PlayerEffect {
-                protocol_version: PROTOCOL_VERSION,
                 sequence,
                 player_id: 3,
                 effects: Vec::new(),
@@ -381,7 +378,6 @@ mod remote_sync_tests {
         }
         for ticks in [40, 30, 50] {
             staging.stage(NetworkInbound::Packet(Packet::TimeSync {
-                protocol_version: PROTOCOL_VERSION,
                 ticks,
                 weather: 0,
                 weather_remaining_ticks: 0.0,
@@ -389,7 +385,6 @@ mod remote_sync_tests {
         }
         for sequence in [4, 3, 5] {
             staging.stage(NetworkInbound::Packet(Packet::EntityState {
-                protocol_version: PROTOCOL_VERSION,
                 dimension: 0,
                 sequence,
                 state: crate::network::protocol::EntityStateWire {
@@ -459,7 +454,6 @@ mod remote_sync_tests {
 
         // Insert at revision 5
         let req1 = crate::network::protocol::Packet::BlockEntityDelta {
-            protocol_version: crate::network::protocol::PROTOCOL_VERSION,
             dimension: 0,
             revision: 5,
             x: 4,
@@ -470,7 +464,6 @@ mod remote_sync_tests {
 
         // Out of order/stale packet at revision 3
         let req_stale = crate::network::protocol::Packet::BlockEntityDelta {
-            protocol_version: crate::network::protocol::PROTOCOL_VERSION,
             dimension: 0,
             revision: 3,
             x: 4,
@@ -4073,7 +4066,7 @@ impl State {
         slot: u16,
     ) -> bool {
         let operation = crate::network::protocol::GameplayOperation::Container {
-            action: action.to_wire(),
+            action,
             x: position.0,
             y: position.1,
             z: position.2,
@@ -7038,7 +7031,7 @@ impl State {
                 } else {
                     let _ = self.submit_local_authority_operation(
                         crate::network::protocol::GameplayOperation::Container {
-                            action: crate::network::protocol::ContainerAction::Open.to_wire(),
+                            action: crate::network::protocol::ContainerAction::Open,
                             x,
                             y,
                             z,
@@ -7489,7 +7482,7 @@ impl State {
         }
         let _ = self.submit_local_authority_operation(
             crate::network::protocol::GameplayOperation::Container {
-                action: crate::network::protocol::ContainerAction::Open.to_wire(),
+                action: crate::network::protocol::ContainerAction::Open,
                 x: pos.0,
                 y: pos.1,
                 z: pos.2,
@@ -7628,7 +7621,7 @@ impl State {
             if let Some(pos) = self.container_target {
                 let _ = self.submit_local_authority_operation(
                     crate::network::protocol::GameplayOperation::Container {
-                        action: crate::network::protocol::ContainerAction::Close.to_wire(),
+                        action: crate::network::protocol::ContainerAction::Close,
                         x: pos.0,
                         y: pos.1,
                         z: pos.2,
@@ -9050,7 +9043,6 @@ mod debug_tests {
         };
         inbound_tx
             .send(crate::network::client::ClientToGame::packet(Packet::ChatMessage {
-                protocol_version: PROTOCOL_VERSION,
                 sender: "Alex".to_string(),
                 message: "hello".to_string(),
             }))
@@ -9089,7 +9081,6 @@ mod debug_tests {
         };
         inbound_tx
             .send(crate::network::client::ClientToGame::packet(Packet::BlockChange {
-                protocol_version: PROTOCOL_VERSION,
                 dimension: 0,
                 revision: 1,
                 x: 3,

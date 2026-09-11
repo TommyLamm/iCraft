@@ -171,14 +171,9 @@ pub(crate) struct EncodedPacket {
 
 impl EncodedPacket {
     pub(crate) fn new(packet: Packet) -> Result<Self, &'static str> {
-        let protocol_version = packet.protocol_version();
-        // Live sessions speak one protocol after handshake; stored so a future
-        // multi-version fanout can refuse to share bytes across dialects.
-        debug_assert_eq!(
-            protocol_version,
-            crate::network::protocol::PROTOCOL_VERSION,
-            "outbound EncodedPacket assumes single live PROTOCOL_VERSION"
-        );
+        // Live sessions speak one protocol after handshake; the connection
+        // holds the negotiated version, so payloads no longer embed it.
+        let protocol_version = crate::network::protocol::PROTOCOL_VERSION;
         let payload = packet.encode_payload()?;
         Ok(Self {
             packet,
@@ -909,9 +904,7 @@ mod tests {
 
         let client_metrics = NetworkMetrics::default();
         let server_metrics = NetworkMetrics::default();
-        let packet = Packet::Keepalive {
-            protocol_version: PROTOCOL_VERSION,
-        };
+        let packet = Packet::Keepalive;
 
         send_connection_packet(&mut client_conn, packet.clone(), &client_metrics)
             .await
@@ -930,9 +923,7 @@ mod tests {
     #[tokio::test]
     async fn outbound_metrics_publish_before_write_and_rollback_on_failure() {
         let metrics = NetworkMetrics::default();
-        let packet = Packet::Keepalive {
-            protocol_version: PROTOCOL_VERSION,
-        };
+        let packet = Packet::Keepalive;
         let expected_bytes = packet_bytes(&packet);
 
         let reservation = metrics.reserve_outbound(&packet);
@@ -960,7 +951,6 @@ mod tests {
         pose.replace(
             1,
             Packet::PlayerPosition {
-                protocol_version: PROTOCOL_VERSION,
                 id: 1,
                 sequence: 1,
                 sender_time_millis: 1,
@@ -977,7 +967,6 @@ mod tests {
         pose.replace(
             1,
             Packet::PlayerPosition {
-                protocol_version: PROTOCOL_VERSION,
                 id: 1,
                 sequence: 2,
                 sender_time_millis: 2,
@@ -996,7 +985,6 @@ mod tests {
         assert_eq!(metrics.snapshot().queue_depth, 0);
 
         let chunk_a = Packet::ChunkData {
-            protocol_version: PROTOCOL_VERSION,
             dimension: 0,
             cx: 0,
             cz: 0,
@@ -1009,7 +997,6 @@ mod tests {
             block_entities: Vec::new(),
         };
         let chunk_b = Packet::ChunkData {
-            protocol_version: PROTOCOL_VERSION,
             dimension: 0,
             cx: 1,
             cz: 0,
@@ -1035,7 +1022,6 @@ mod tests {
     async fn catchup_mailbox_is_latest_wins_and_bounded() {
         let mailbox = CatchupMailbox::with_capacity(1);
         let p1 = Packet::ChunkData {
-            protocol_version: PROTOCOL_VERSION,
             dimension: 0,
             cx: 1,
             cz: 2,
@@ -1048,7 +1034,6 @@ mod tests {
             block_entities: vec![],
         };
         let p2 = Packet::ChunkData {
-            protocol_version: PROTOCOL_VERSION,
             dimension: 0,
             cx: 1,
             cz: 2,
@@ -1061,7 +1046,6 @@ mod tests {
             block_entities: vec![],
         };
         let p3 = Packet::ChunkData {
-            protocol_version: PROTOCOL_VERSION,
             dimension: 0,
             cx: 2,
             cz: 2,
@@ -1088,7 +1072,6 @@ mod tests {
     async fn catchup_mailbox_preserves_distance_priority_insertion_order() {
         let mailbox = CatchupMailbox::with_capacity(2);
         let near = Packet::ChunkData {
-            protocol_version: PROTOCOL_VERSION,
             dimension: 0,
             cx: 10,
             cz: 10,
@@ -1101,7 +1084,6 @@ mod tests {
             block_entities: vec![],
         };
         let farther = Packet::ChunkData {
-            protocol_version: PROTOCOL_VERSION,
             dimension: 0,
             cx: -10,
             cz: -10,
@@ -1128,7 +1110,6 @@ mod tests {
         let slow = CatchupMailbox::with_capacity_and_metrics(1, metrics.clone());
         let fast = CatchupMailbox::with_capacity_and_metrics(1, metrics.clone());
         let packet = |cx, value| Packet::ChunkData {
-            protocol_version: PROTOCOL_VERSION,
             dimension: 0,
             cx,
             cz: 0,
@@ -1170,7 +1151,6 @@ mod tests {
         };
         mailbox
             .replace(Packet::EntityState {
-                protocol_version: PROTOCOL_VERSION,
                 dimension: 0,
                 sequence: 1,
                 state: state(7, 1.0),
@@ -1178,7 +1158,6 @@ mod tests {
             .await;
         mailbox
             .replace(Packet::EntityState {
-                protocol_version: PROTOCOL_VERSION,
                 dimension: 0,
                 sequence: 2,
                 state: state(7, 2.0),
@@ -1186,7 +1165,6 @@ mod tests {
             .await;
         mailbox
             .replace(Packet::EntityState {
-                protocol_version: PROTOCOL_VERSION,
                 dimension: 0,
                 sequence: 1,
                 state: state(7, -1.0),
@@ -1194,7 +1172,6 @@ mod tests {
             .await;
         mailbox
             .replace(Packet::EntityState {
-                protocol_version: PROTOCOL_VERSION,
                 dimension: 0,
                 sequence: 2,
                 state: state(8, 8.0),
@@ -1220,7 +1197,6 @@ mod tests {
     #[test]
     fn encoded_packet_fanout_shares_one_payload_arc() {
         let packet = Packet::EntityState {
-            protocol_version: PROTOCOL_VERSION,
             dimension: 0,
             sequence: 1,
             state: EntityStateWire {

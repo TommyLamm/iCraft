@@ -235,7 +235,6 @@ fn bench_network() -> u64 {
     for _ in 0..ITERS {
         let payload = ChunkSaveData::network_terrain_payload(&chunk).expect("flatten chunk");
         let packet = Packet::ChunkData {
-            protocol_version: crate::network::protocol::PROTOCOL_VERSION,
             dimension: 0,
             cx: chunk.chunk_x,
             cz: chunk.chunk_z,

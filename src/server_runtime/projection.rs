@@ -227,7 +227,6 @@ impl ServerRuntime {
             self.send_targeted(
                 id,
                 Packet::ContainerOpenResult {
-                    protocol_version: PROTOCOL_VERSION,
                     dimension: dimension as u8,
                     success: true,
                     x,
@@ -279,7 +278,6 @@ impl ServerRuntime {
         self.send_targeted(
             id,
             Packet::ContainerClickResult {
-                protocol_version: PROTOCOL_VERSION,
                 dimension: dimension as u8,
                 success: true,
                 slot_index: slot,
@@ -309,7 +307,6 @@ impl ServerRuntime {
         self.send_targeted(
             to,
             Packet::GameplayResponse {
-                protocol_version: PROTOCOL_VERSION,
                 response,
             },
         );
@@ -324,7 +321,6 @@ impl ServerRuntime {
         self.send_targeted(
             to,
             Packet::PlayerRespawnResult {
-                protocol_version: PROTOCOL_VERSION,
                 position,
                 dimension: dimension as u8,
             },
@@ -343,7 +339,6 @@ impl ServerRuntime {
         self.send_targeted(
             to,
             Packet::BlockEntityDelta {
-                protocol_version: PROTOCOL_VERSION,
                 dimension: dimension as u8,
                 revision,
                 x,
@@ -364,7 +359,6 @@ impl ServerRuntime {
         self.send_targeted(
             to,
             Packet::EntitySpawn {
-                protocol_version: PROTOCOL_VERSION,
                 dimension: dimension as u8,
                 sequence,
                 state,
@@ -382,7 +376,6 @@ impl ServerRuntime {
         self.send_targeted(
             to,
             Packet::EntityState {
-                protocol_version: PROTOCOL_VERSION,
                 dimension: dimension as u8,
                 sequence,
                 state,
@@ -400,7 +393,6 @@ impl ServerRuntime {
         self.send_targeted(
             to,
             Packet::EntityDespawn {
-                protocol_version: PROTOCOL_VERSION,
                 dimension: dimension as u8,
                 sequence,
                 entity_id,
@@ -419,7 +411,6 @@ impl ServerRuntime {
         self.send_targeted(
             to,
             Packet::PlayerSessionUpdate {
-                protocol_version: PROTOCOL_VERSION,
                 sequence,
                 player_id: to,
                 dimension: dimension as u8,
@@ -437,7 +428,6 @@ impl ServerRuntime {
         self.send_targeted(
             to,
             Packet::PlayerEffect {
-                protocol_version: PROTOCOL_VERSION,
                 sequence,
                 player_id: to,
                 effects,
@@ -458,7 +448,6 @@ impl ServerRuntime {
         self.send_targeted(
             to,
             Packet::ContainerSlotUpdate {
-                protocol_version: PROTOCOL_VERSION,
                 dimension: dimension as u8,
                 revision,
                 x,
@@ -480,7 +469,6 @@ impl ServerRuntime {
         self.send_targeted(
             to,
             Packet::ContainerClose {
-                protocol_version: PROTOCOL_VERSION,
                 dimension: dimension as u8,
                 x,
                 y,
@@ -548,7 +536,6 @@ impl ServerRuntime {
         self.send_targeted(
             to,
             Packet::ChunkData {
-                protocol_version: PROTOCOL_VERSION,
                 dimension: dimension as u8,
                 cx,
                 cz,
@@ -690,7 +677,6 @@ impl ServerRuntime {
             self.send_targeted(
                 target,
                 Packet::BlockChange {
-                    protocol_version: PROTOCOL_VERSION,
                     dimension: dimension as u8,
                     revision,
                     x,

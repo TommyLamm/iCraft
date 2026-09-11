@@ -75,7 +75,6 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
                 sessions,
                 to,
                 Packet::Disconnect {
-                    protocol_version: PROTOCOL_VERSION,
                     reason,
                 },
             )
@@ -252,7 +251,6 @@ pub(crate) async fn evict_slow_clients<S: HostEventSender>(
         let failed = broadcast_reliably(
             sessions,
             Packet::PlayerLeave {
-                protocol_version: PROTOCOL_VERSION,
                 id,
             },
         )

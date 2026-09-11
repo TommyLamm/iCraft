@@ -394,7 +394,6 @@ mod tests {
         };
         client
             .send(&Packet::GameplayRequest {
-                protocol_version: PROTOCOL_VERSION,
                 request,
             })
             .await
@@ -424,7 +423,6 @@ mod tests {
         };
         client
             .send(&Packet::GameplayRequest {
-                protocol_version: PROTOCOL_VERSION,
                 request: request.clone(),
             })
             .await
@@ -451,7 +449,6 @@ mod tests {
             .send(HostToServer::project_session(
                 id,
                 Packet::GameplayResponse {
-                    protocol_version: PROTOCOL_VERSION,
                     response: accepted.clone(),
                 },
             ))
@@ -470,7 +467,6 @@ mod tests {
         // to the authority a second time.
         client
             .send(&Packet::GameplayRequest {
-                protocol_version: PROTOCOL_VERSION,
                 request: request.clone(),
             })
             .await
@@ -502,7 +498,6 @@ mod tests {
 
         client
             .send(&Packet::GameplayRequest {
-                protocol_version: PROTOCOL_VERSION,
                 request: GameplayRequest {
                     request_id: 701,
                     client_sequence: 1,
@@ -529,7 +524,6 @@ mod tests {
 
         client
             .send(&Packet::GameplayRequest {
-                protocol_version: PROTOCOL_VERSION,
                 request: GameplayRequest {
                     request_id: 702,
                     client_sequence: 2,
@@ -557,7 +551,6 @@ mod tests {
 
         client
             .send(&Packet::GameplayRequest {
-                protocol_version: PROTOCOL_VERSION,
                 request: GameplayRequest {
                     request_id: 703,
                     client_sequence: 3,
@@ -612,7 +605,6 @@ mod tests {
         };
         client
             .send(&Packet::GameplayRequest {
-                protocol_version: PROTOCOL_VERSION,
                 request: request.clone(),
             })
             .await
@@ -626,7 +618,6 @@ mod tests {
 
         client
             .send(&Packet::GameplayRequest {
-                protocol_version: PROTOCOL_VERSION,
                 request: GameplayRequest {
                     request_id: 901,
                     client_sequence: 2,
@@ -749,7 +740,6 @@ mod tests {
 
         client
             .send(&Packet::ContainerClose {
-                protocol_version: PROTOCOL_VERSION,
                 dimension: 1,
                 x: 12,
                 y: 65,
@@ -798,7 +788,6 @@ mod tests {
 
         client
             .send(&Packet::BlockChange {
-                protocol_version: PROTOCOL_VERSION,
                 dimension: 0,
                 revision: 0,
                 x: 3,
@@ -837,11 +826,8 @@ mod tests {
             .expect("server closed without a disconnect packet");
         assert!(matches!(
             packet,
-            Packet::Disconnect {
-                protocol_version,
-                reason,
-            } if protocol_version == PROTOCOL_VERSION
-                && reason.contains("protocol version mismatch")
+            Packet::Disconnect { reason }
+                if reason.contains("protocol version mismatch")
         ));
 
         server.stop().await;
@@ -855,7 +841,6 @@ mod tests {
 
         client_a
             .send(&Packet::PlayerPosition {
-                protocol_version: PROTOCOL_VERSION,
                 id: 999,
                 sequence: 12,
                 sender_time_millis: 600,
@@ -895,7 +880,6 @@ mod tests {
         server
             .host_tx
             .send(HostToServer::project_broadcast(Packet::PlayerPosition {
-                protocol_version: PROTOCOL_VERSION,
                     id: id_a,
                     sequence: 12,
                     sender_time_millis: 600,
@@ -962,7 +946,6 @@ mod tests {
             NetworkServer::broadcast_pose(
                 &sessions,
                 Packet::PlayerPosition {
-                    protocol_version: PROTOCOL_VERSION,
                     id: player_id,
                     sequence,
                     sender_time_millis: u64::from(sequence) * 50,
@@ -1008,9 +991,7 @@ mod tests {
         observer_out_tx
             .try_send(QueuedPacket::Outbound(
                 TrackedPacket::try_from_packet(
-                    Packet::Keepalive {
-                        protocol_version: PROTOCOL_VERSION,
-                    },
+                    Packet::Keepalive,
                     &metrics,
                 )
                 .expect("keepalive encodes"),
@@ -1079,7 +1060,6 @@ mod tests {
         time::timeout(
             Duration::from_secs(1),
             server.handle_host_command(HostToServer::project_broadcast(Packet::PlayerJoin {
-                protocol_version: PROTOCOL_VERSION,
                     id: 3,
                     username: "joining".into(),
             })),
@@ -1115,9 +1095,7 @@ mod tests {
         out_tx
             .try_send(QueuedPacket::Outbound(
                 TrackedPacket::try_from_packet(
-                    Packet::Keepalive {
-                        protocol_version: PROTOCOL_VERSION,
-                    },
+                    Packet::Keepalive,
                     &metrics,
                 )
                 .expect("keepalive encodes"),
@@ -1154,7 +1132,6 @@ mod tests {
         time::timeout(
             Duration::from_secs(1),
             server.handle_host_command(HostToServer::project_broadcast(Packet::PlayerJoin {
-                protocol_version: PROTOCOL_VERSION,
                     id: 2,
                     username: "joining".into(),
             })),
@@ -1240,7 +1217,6 @@ mod tests {
         let _ = time::timeout(
             Duration::from_millis(250),
             client.send(&Packet::BlockChange {
-                protocol_version: PROTOCOL_VERSION,
                 dimension: 0,
                 revision: 0,
                 x: 7,
@@ -1303,7 +1279,6 @@ mod tests {
             .send(HostToServer::project_session(
                 joining_id,
                 Packet::TimeSync {
-                    protocol_version: PROTOCOL_VERSION,
                     ticks: 21_000,
                     weather: 2,
                     weather_remaining_ticks: 3_500.25,
@@ -1356,7 +1331,6 @@ mod tests {
         server
             .host_tx
             .send(HostToServer::project_broadcast(Packet::TimeSync {
-                protocol_version: PROTOCOL_VERSION,
                     ticks: 22_000,
                     weather: 2,
                     weather_remaining_ticks: 4_500.0,
@@ -1366,7 +1340,6 @@ mod tests {
         server
             .host_tx
             .send(HostToServer::project_broadcast(Packet::LightningStrike {
-                protocol_version: PROTOCOL_VERSION,
                     strike: strike,
             }))
             .await
@@ -1416,7 +1389,6 @@ mod tests {
 
         attacker
             .send(&Packet::LightningStrike {
-                protocol_version: PROTOCOL_VERSION,
                 strike: LightningStrike {
                     x: 0,
                     y: 255,
@@ -1454,7 +1426,6 @@ mod tests {
         server
             .host_tx
             .send(HostToServer::project_broadcast(Packet::PlayerAction {
-                protocol_version: PROTOCOL_VERSION,
                     id: id_a,
                     action: Action::Break,
             }))
@@ -1476,7 +1447,6 @@ mod tests {
 
         client_a
             .send(&Packet::ChatMessage {
-                protocol_version: PROTOCOL_VERSION,
                 sender: "spoofed".into(),
                 message: "hello".into(),
             })
@@ -1495,7 +1465,6 @@ mod tests {
         server
             .host_tx
             .send(HostToServer::project_broadcast(Packet::ChatMessage {
-                protocol_version: PROTOCOL_VERSION,
                     sender: "steve".into(),
                     message: "hello".into(),
             }))
@@ -1568,7 +1537,6 @@ mod tests {
         );
         client_a
             .send(&Packet::GameplayRequest {
-                protocol_version: PROTOCOL_VERSION,
                 request: GameplayRequest {
                     request_id: 0,
                     client_sequence: 0,
@@ -1633,7 +1601,6 @@ mod tests {
             .send(HostToServer::project_session(
                 id_a,
                 Packet::PlayerSessionUpdate {
-                    protocol_version: PROTOCOL_VERSION,
                     sequence: 7,
                     player_id: id_a,
                     dimension: 0,
@@ -1670,7 +1637,6 @@ mod tests {
             .send(HostToServer::project_session(
                 id_a,
                 Packet::PlayerSessionUpdate {
-                    protocol_version: PROTOCOL_VERSION,
                     sequence: 8,
                     player_id: id_b,
                     dimension: 0,
@@ -1756,7 +1722,6 @@ mod tests {
 
     fn pose_packet(id: PlayerId, sequence: u32) -> Packet {
         Packet::PlayerPosition {
-            protocol_version: PROTOCOL_VERSION,
             id,
             sequence,
             sender_time_millis: u64::from(sequence),
@@ -1784,7 +1749,6 @@ mod tests {
 
         flooder
             .send(&Packet::ChatMessage {
-                protocol_version: PROTOCOL_VERSION,
                 sender: "flood".into(),
                 message: "x".repeat(257),
             })
@@ -1799,7 +1763,6 @@ mod tests {
         }
 
         peer.send(&Packet::GameplayRequest {
-            protocol_version: PROTOCOL_VERSION,
             request: item_use_request(42, 1),
         })
         .await
@@ -1832,7 +1795,6 @@ mod tests {
             .send(HostToServer::project_session(
                 peer_id,
                 Packet::GameplayResponse {
-                    protocol_version: PROTOCOL_VERSION,
                     response: GameplayResponse {
                     request_id: 42,
                     server_sequence: 1,
@@ -1873,7 +1835,6 @@ mod tests {
         client.send(&pose_packet(id, 2)).await.unwrap();
         client
             .send(&Packet::ChatMessage {
-                protocol_version: PROTOCOL_VERSION,
                 sender: "limiter".into(),
                 message: "after-pose".into(),
             })
@@ -1966,7 +1927,6 @@ mod tests {
                 .unwrap();
         }
         peer.send(&Packet::GameplayRequest {
-            protocol_version: PROTOCOL_VERSION,
             request: item_use_request(7, 1),
         })
         .await
@@ -1988,7 +1948,6 @@ mod tests {
         assert!(!peer_left, "host-queue Full must not kick the peer");
         if !saw_peer_request {
             peer.send(&Packet::GameplayRequest {
-                protocol_version: PROTOCOL_VERSION,
                 request: item_use_request(8, 2),
             })
             .await
@@ -2023,7 +1982,6 @@ mod tests {
             server
                 .host_tx
                 .send(HostToServer::project_broadcast(Packet::ChatMessage {
-                protocol_version: PROTOCOL_VERSION,
                     sender: "pad".into(),
                     message: format!("pad-{index}"),
             }))
@@ -2041,7 +1999,6 @@ mod tests {
         server
             .host_tx
             .send(HostToServer::project_broadcast(Packet::ContainerSlotUpdate {
-                protocol_version: PROTOCOL_VERSION,
                     dimension: 0,
                     revision: 11,
                     x: 8,

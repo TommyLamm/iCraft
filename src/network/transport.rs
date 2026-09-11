@@ -160,7 +160,6 @@ mod tests {
             let first = conn.recv().await.unwrap();
             let second = conn.recv().await.unwrap();
             let echo = Packet::ChatMessage {
-                protocol_version: crate::network::protocol::PROTOCOL_VERSION,
                 sender: "server".into(),
                 message: "pong".into(),
             };
@@ -172,7 +171,6 @@ mod tests {
         let mut client = Connection::new(client_stream);
 
         let pos = Packet::PlayerPosition {
-            protocol_version: crate::network::protocol::PROTOCOL_VERSION,
             id: 1,
             sequence: 3,
             sender_time_millis: 150,
@@ -183,7 +181,6 @@ mod tests {
             pitch: 30.0,
         };
         let act = Packet::PlayerAction {
-            protocol_version: crate::network::protocol::PROTOCOL_VERSION,
             id: 1,
             action: Action::Break,
         };

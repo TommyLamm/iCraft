@@ -271,7 +271,6 @@ fn raw_fluid_survives_v3_save_and_packet_roundtrip() {
     });
 
     let packet = Packet::BlockChange {
-        protocol_version: PROTOCOL_VERSION,
         dimension: 0,
         revision: 1,
         x: 8,

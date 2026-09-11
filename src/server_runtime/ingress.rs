@@ -46,7 +46,6 @@ impl ServerRuntime {
             } => self.handle_position(id, sequence, sender_time_millis, x, y, z, yaw, pitch),
             ServerToHost::ClientAction { id, action } => {
                 self.enqueue_host(HostToServer::project_broadcast(Packet::PlayerAction {
-                    protocol_version: PROTOCOL_VERSION,
                     id,
                     action,
                 }));
@@ -59,7 +58,6 @@ impl ServerRuntime {
                     .map(|session| session.username.clone())
                 {
                     self.enqueue_host(HostToServer::project_broadcast(Packet::ChatMessage {
-                        protocol_version: PROTOCOL_VERSION,
                         sender,
                         message: message.chars().take(256).collect(),
                     }));
@@ -274,14 +272,12 @@ impl ServerRuntime {
             self.push_presentation_event(ProjectionEvent::session(
                 id,
                 Packet::WorldRulesSync {
-                    protocol_version: PROTOCOL_VERSION,
                     rules,
                 },
             ));
             self.push_presentation_event(ProjectionEvent::session(
                 id,
                 Packet::TimeSync {
-                    protocol_version: PROTOCOL_VERSION,
                     ticks: self.level.time,
                     weather: 0,
                     weather_remaining_ticks: 0.0,
@@ -291,14 +287,12 @@ impl ServerRuntime {
             self.enqueue_host(HostToServer::project_session(
                 id,
                 Packet::WorldRulesSync {
-                    protocol_version: PROTOCOL_VERSION,
                     rules,
                 },
             ));
             self.enqueue_host(HostToServer::project_session(
                 id,
                 Packet::TimeSync {
-                    protocol_version: PROTOCOL_VERSION,
                     ticks: self.level.time,
                     weather: 0,
                     weather_remaining_ticks: 0.0,
@@ -414,7 +408,6 @@ impl ServerRuntime {
                 self.push_presentation_event(ProjectionEvent::session(
                     target,
                     Packet::PlayerPosition {
-                        protocol_version: PROTOCOL_VERSION,
                         id,
                         sequence,
                         sender_time_millis,
@@ -429,7 +422,6 @@ impl ServerRuntime {
                 self.enqueue_host(HostToServer::project_session(
                     target,
                     Packet::PlayerPosition {
-                        protocol_version: PROTOCOL_VERSION,
                         id,
                         sequence,
                         sender_time_millis,
@@ -522,8 +514,6 @@ impl ServerRuntime {
                         action,
                         slot: _,
                     } => {
-                        let action = ContainerAction::from_wire(action)
-                            .expect("authority accepted only a typed container action");
                         self.route_container_result(id, *revision, x, y, z, action);
                         // Container open/close changes the authoritative chest
                         // block state.  It is published by the next snapshot
@@ -647,7 +637,6 @@ impl ServerRuntime {
             self.push_presentation_event(ProjectionEvent::session(
                 id,
                 Packet::DimensionTransfer {
-                    protocol_version: PROTOCOL_VERSION,
                     player_id: id,
                     dimension: transfer.to as u8,
                     position: transfer.position,
@@ -657,7 +646,6 @@ impl ServerRuntime {
             self.enqueue_host(HostToServer::project_session(
                 id,
                 Packet::DimensionTransfer {
-                    protocol_version: PROTOCOL_VERSION,
                     player_id: id,
                     dimension: transfer.to as u8,
                     position: transfer.position,

@@ -158,8 +158,8 @@ input
 - Reject before mutating. A rejection must not consume inventory, spawn
   drops, or partially write the world.
 - Place/break is `GameplayOperation::BlockAction`.
-- Container open/close is `GameplayOperation::Container`. Clicks are
-  `ContainerClick` only; leftover `Container { action: 1 }` is rejected.
+- Container open/close is `GameplayOperation::Container` with typed
+  `ContainerAction` (Open / Close). Clicks are `ContainerClick` only.
   Clicks are conserving session transactions: clone player +
   container, verify the claimed cursor, apply brew/viewer locks, commit both
   sides or roll back. Client-supplied item data is never echoed as truth.
@@ -313,7 +313,7 @@ Join `ChunkData` that omits light streams zeros them then
 
 ## Network
 
-Protocol v20: bincode over TCP, 4-byte big-endian length, 2 MiB cap.
+Protocol v21: bincode over TCP, 4-byte big-endian length, 2 MiB cap.
 `Packet::encode_payload` / `encode_frame` build the wire body. Outbound
 queues hold `EncodedPacket` (`Arc<[u8]>` payload plus the logical `Packet`):
 metering, mailbox replace, and `ConnectionWriter::send_payload` share one
@@ -323,6 +323,9 @@ re-serialize. Authenticated sessions speak a single `PROTOCOL_VERSION`
 protocol versions. Older versions fail handshake. Malformed pre-auth frames
 close that connection only. Unknown or wrong-direction post-auth packets
 close that connection; there is no decode-then-drop leftover path.
+`protocol_version` is carried only on `Handshake`, `LoginSuccess`, and
+`ServerListPing*`; after handshake the connection holds the negotiated
+version and other packets omit the field.
 
 Server→client projection is one schema end-to-end: `ServerRuntime` builds a
 wire `Packet` once inside `ProjectionEvent { dest, packet }`
@@ -346,13 +349,13 @@ operator.
 `GameplayRequest` carries request id, client sequence, session, dimension,
 revision, and a typed operation. The bounded response cache makes retries
 idempotent. Live egress for sleep / container click / close is a
-`GameplayRequest`. `Container` wire values are Open=`0` and Close=`2`;
-leftover Click=`1` fails bounds validation. Live desktop send uses pose /
+`GameplayRequest`. `Container` uses typed `ContainerAction` (Open=`0`,
+Close=`1`); unknown discriminants fail decode. Live desktop send uses pose /
 chat / disconnect / `GameplayRequest` / respawn. Server→client `BlockChange`
 projection and server→client `ContainerClose` remain. Clients do not ACK
 chunks; the join-client inbound queue is 1024 events so one presentation
 tick can enqueue without ACK pacing. Deleting leftover inbound `Packet`
-variants shifts later discriminants; handshake is protocol v20.
+variants shifts later discriminants; handshake is protocol v21.
 
 `NetworkServer` / `NetworkClient` run Tokio on a background thread with
 bounded/metered channels. Reliable gameplay/lifecycle output is never

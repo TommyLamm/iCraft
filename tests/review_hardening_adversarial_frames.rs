@@ -140,7 +140,6 @@ fn handshake(username: &str) -> Packet {
 
 fn crafted_chunk_data_blocks_len(claimed: u64) -> Vec<u8> {
     let packet = Packet::ChunkData {
-        protocol_version: PROTOCOL_VERSION,
         dimension: 0,
         cx: 0,
         cz: 0,

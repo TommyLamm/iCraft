@@ -392,7 +392,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
             OPEN_REQUEST,
             3,
             GameplayOperation::Container {
-                action: ContainerAction::Open.to_wire(),
+                action: ContainerAction::Open,
                 x: CHEST_POSITION.0,
                 y: CHEST_POSITION.1,
                 z: CHEST_POSITION.2,
@@ -507,7 +507,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
             alice.events().iter().any(|event| {
                 matches!(
                     event,
-                    ClientToGame::Packet(Packet::ContainerClickResult { slot_index: 0, .. }
+                    ClientToGame::Packet(Packet::ContainerClickResult { slot_index: 0, .. })
                 )
             })
         },

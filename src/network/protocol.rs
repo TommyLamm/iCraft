@@ -10,10 +10,10 @@ use std::marker::PhantomData;
 
 pub type PlayerId = u64;
 
-/// Protocol v20 removes leftover inbound request packets and the dead
-/// ChunkAck / BlockActionResult variants. Older clients are rejected
-/// during handshake.
-pub const PROTOCOL_VERSION: u32 = 20;
+/// Protocol v21 embeds `ContainerAction` in `GameplayOperation::Container`
+/// (Open=0, Close=1) and keeps `protocol_version` only on handshake /
+/// login / server-list packets. Older clients are rejected during handshake.
+pub const PROTOCOL_VERSION: u32 = 21;
 
 /// Transport frame cap and decode budget. `ConnectionReader` rejects a
 /// length header above this before allocating a body; `Packet::decode`
@@ -160,29 +160,12 @@ pub const MAX_BLOCK_Y: i32 = 319;
 pub const MAX_SESSION_VELOCITY_MILLI: i32 = 1_000_000;
 
 /// Stable wire mapping for container open/close. Click uses
-/// `GameplayOperation::ContainerClick`. Wire value `1` is leftover Click and
-/// is rejected by `from_wire`.
+/// `GameplayOperation::ContainerClick`. Unknown discriminants fail decode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
 pub enum ContainerAction {
-    Open,
-    Close,
-}
-
-impl ContainerAction {
-    pub const fn from_wire(value: u8) -> Option<Self> {
-        match value {
-            0 => Some(Self::Open),
-            2 => Some(Self::Close),
-            _ => None,
-        }
-    }
-
-    pub const fn to_wire(self) -> u8 {
-        match self {
-            Self::Open => 0,
-            Self::Close => 2,
-        }
-    }
+    Open = 0,
+    Close = 1,
 }
 
 /// Metadata-preserving authority inventory value. The fixed-width Adventure
@@ -435,14 +418,13 @@ pub enum GameplayOperation {
         look_milli: [i16; 3],
     },
     Container {
-        action: u8,
+        action: ContainerAction,
         x: i32,
         y: i32,
         z: i32,
         slot: u16,
     },
-    /// Canonical container click. Open/close stay on `Container`; leftover
-    /// `Container { action: 1 }` is rejected at bounds validation.
+    /// Canonical container click. Open/close stay on `Container`.
     ContainerClick {
         x: i32,
         y: i32,
@@ -694,8 +676,8 @@ impl GameplayRequest {
                     held.validate_bounds()?;
                 }
             }
-            GameplayOperation::Container { action, slot, .. } => {
-                if ContainerAction::from_wire(*action).is_none() || *slot >= MAX_CONTAINER_SLOTS {
+            GameplayOperation::Container { slot, .. } => {
+                if *slot >= MAX_CONTAINER_SLOTS {
                     return Err(RejectReason::InvalidState);
                 }
             }
@@ -1212,11 +1194,9 @@ pub enum Packet {
         gamemode: u8,
     },
     Disconnect {
-        protocol_version: u32,
         reason: String,
     },
     PlayerPosition {
-        protocol_version: u32,
         id: PlayerId,
         sequence: u32,
         sender_time_millis: u64,
@@ -1227,21 +1207,17 @@ pub enum Packet {
         pitch: f32,
     },
     PlayerAction {
-        protocol_version: u32,
         id: PlayerId,
         action: Action,
     },
     PlayerJoin {
-        protocol_version: u32,
         id: PlayerId,
         username: String,
     },
     PlayerLeave {
-        protocol_version: u32,
         id: PlayerId,
     },
     BlockChange {
-        protocol_version: u32,
         dimension: u8,
         revision: u64,
         x: i32,
@@ -1254,7 +1230,6 @@ pub enum Packet {
         raw_fluid: u8,
     },
     ChunkData {
-        protocol_version: u32,
         dimension: u8,
         cx: i32,
         cz: i32,
@@ -1272,7 +1247,6 @@ pub enum Packet {
         block_entities: Vec<u8>,
     },
     BlockEntityDelta {
-        protocol_version: u32,
         dimension: u8,
         revision: u64,
         x: i32,
@@ -1281,25 +1255,21 @@ pub enum Packet {
         entity: Option<crate::block_entity::BlockEntity>,
     },
     EntitySpawn {
-        protocol_version: u32,
         dimension: u8,
         sequence: u64,
         state: EntityStateWire,
     },
     EntityState {
-        protocol_version: u32,
         dimension: u8,
         sequence: u64,
         state: EntityStateWire,
     },
     EntityDespawn {
-        protocol_version: u32,
         dimension: u8,
         sequence: u64,
         entity_id: u64,
     },
     PlayerHealth {
-        protocol_version: u32,
         sequence: u64,
         player_id: PlayerId,
         health: f32,
@@ -1311,7 +1281,6 @@ pub enum Packet {
         death_reason: u8,
     },
     PlayerEffect {
-        protocol_version: u32,
         sequence: u64,
         player_id: PlayerId,
         #[serde(deserialize_with = "deserialize_bounded_vec")]
@@ -1320,40 +1289,30 @@ pub enum Packet {
     /// Private, owner-targeted projection of the complete authoritative
     /// gameplay session. Servers must never broadcast this packet.
     PlayerSessionUpdate {
-        protocol_version: u32,
         sequence: u64,
         player_id: PlayerId,
         dimension: u8,
         state: SessionGameplayWire,
     },
     TimeSync {
-        protocol_version: u32,
         ticks: u64,
         weather: u8,
         weather_remaining_ticks: f32,
     },
     LightningStrike {
-        protocol_version: u32,
         strike: LightningStrike,
     },
     ChatMessage {
-        protocol_version: u32,
         sender: String,
         message: String,
     },
-    Keepalive {
-        protocol_version: u32,
-    },
-    PlayerRespawnRequest {
-        protocol_version: u32,
-    },
+    Keepalive,
+    PlayerRespawnRequest,
     PlayerRespawnResult {
-        protocol_version: u32,
         position: [f32; 3],
         dimension: u8,
     },
     ContainerOpenResult {
-        protocol_version: u32,
         dimension: u8,
         success: bool,
         x: i32,
@@ -1364,7 +1323,6 @@ pub enum Packet {
         revision: u64,
     },
     ContainerClickResult {
-        protocol_version: u32,
         dimension: u8,
         success: bool,
         slot_index: u16,
@@ -1372,14 +1330,12 @@ pub enum Packet {
         dragged: Option<ItemWire>,
     },
     ContainerClose {
-        protocol_version: u32,
         dimension: u8,
         x: i32,
         y: i32,
         z: i32,
     },
     ContainerSlotUpdate {
-        protocol_version: u32,
         dimension: u8,
         revision: u64,
         x: i32,
@@ -1389,23 +1345,19 @@ pub enum Packet {
         slot: Option<ItemWire>,
     },
     SleepStateSync {
-        protocol_version: u32,
         player_id: PlayerId,
         is_sleeping: bool,
     },
     WorldRulesSync {
-        protocol_version: u32,
         rules: crate::game_rules::WorldRules,
     },
     /// One envelope is used for block/container/item/combat/sleep/trade/mount
     /// and command operations.  The server rewrites `session_id` from the
     /// authenticated connection before forwarding it to the authority.
     GameplayRequest {
-        protocol_version: u32,
         request: GameplayRequest,
     },
     GameplayResponse {
-        protocol_version: u32,
         response: GameplayResponse,
     },
     ServerListPingRequest {
@@ -1419,7 +1371,6 @@ pub enum Packet {
         max_players: u16,
     },
     DimensionTransfer {
-        protocol_version: u32,
         player_id: PlayerId,
         dimension: u8,
         position: [f32; 3],
@@ -1427,103 +1378,6 @@ pub enum Packet {
 }
 
 impl Packet {
-    pub fn protocol_version(&self) -> u32 {
-        match self {
-            Packet::DimensionTransfer {
-                protocol_version, ..
-            }
-            | Packet::Handshake {
-                protocol_version, ..
-            }
-            | Packet::LoginSuccess {
-                protocol_version, ..
-            }
-            | Packet::Disconnect {
-                protocol_version, ..
-            }
-            | Packet::PlayerPosition {
-                protocol_version, ..
-            }
-            | Packet::PlayerAction {
-                protocol_version, ..
-            }
-            | Packet::PlayerJoin {
-                protocol_version, ..
-            }
-            | Packet::PlayerLeave {
-                protocol_version, ..
-            }
-            | Packet::BlockChange {
-                protocol_version, ..
-            }
-            | Packet::ChunkData {
-                protocol_version, ..
-            }
-            | Packet::BlockEntityDelta {
-                protocol_version, ..
-            }
-            | Packet::EntitySpawn {
-                protocol_version, ..
-            }
-            | Packet::EntityState {
-                protocol_version, ..
-            }
-            | Packet::EntityDespawn {
-                protocol_version, ..
-            }
-            | Packet::PlayerHealth {
-                protocol_version, ..
-            }
-            | Packet::PlayerEffect {
-                protocol_version, ..
-            }
-            | Packet::PlayerSessionUpdate {
-                protocol_version, ..
-            }
-            | Packet::TimeSync {
-                protocol_version, ..
-            }
-            | Packet::LightningStrike {
-                protocol_version, ..
-            }
-            | Packet::ChatMessage {
-                protocol_version, ..
-            }
-            | Packet::Keepalive { protocol_version }
-            | Packet::PlayerRespawnRequest { protocol_version }
-            | Packet::PlayerRespawnResult {
-                protocol_version, ..
-            }
-            | Packet::SleepStateSync {
-                protocol_version, ..
-            } => *protocol_version,
-            Packet::WorldRulesSync {
-                protocol_version, ..
-            } => *protocol_version,
-            Packet::GameplayRequest {
-                protocol_version, ..
-            }
-            | Packet::GameplayResponse {
-                protocol_version, ..
-            }
-            | Packet::ServerListPingRequest { protocol_version }
-            | Packet::ServerListPingResponse {
-                protocol_version, ..
-            } => *protocol_version,
-            Packet::ContainerOpenResult {
-                protocol_version, ..
-            }
-            | Packet::ContainerClickResult {
-                protocol_version, ..
-            }
-            | Packet::ContainerClose {
-                protocol_version, ..
-            }
-            | Packet::ContainerSlotUpdate {
-                protocol_version, ..
-            } => *protocol_version,
-        }
-    }
 
     pub fn encode(&self) -> Vec<u8> {
         bincode::serialize(self).expect("packet serialization is infallible")
@@ -1574,8 +1428,8 @@ mod tests {
     }
 
     #[test]
-    fn current_protocol_version_is_20() {
-        assert_eq!(PROTOCOL_VERSION, 20);
+    fn current_protocol_version_is_21() {
+        assert_eq!(PROTOCOL_VERSION, 21);
     }
 
     #[test]
@@ -1603,20 +1457,17 @@ mod tests {
     #[test]
     fn container_close_roundtrip_keeps_v16_shape() {
         let packet = Packet::ContainerClose {
-            protocol_version: v(),
             dimension: 2,
             x: -11,
             y: 64,
             z: 19,
         };
-        assert_eq!(packet.protocol_version(), PROTOCOL_VERSION);
         assert_eq!(Packet::decode(&packet.encode()).unwrap(), packet);
     }
 
     #[test]
     fn disconnect_roundtrip() {
         let p = Packet::Disconnect {
-            protocol_version: v(),
             reason: "kicked".into(),
         };
         let decoded = Packet::decode(&p.encode()).unwrap();
@@ -1626,7 +1477,6 @@ mod tests {
     #[test]
     fn player_position_roundtrip() {
         let p = Packet::PlayerPosition {
-            protocol_version: v(),
             id: 7,
             sequence: 42,
             sender_time_millis: 12_345,
@@ -1643,7 +1493,6 @@ mod tests {
     #[test]
     fn player_action_roundtrip() {
         let p = Packet::PlayerAction {
-            protocol_version: v(),
             id: 7,
             action: Action::Place,
         };
@@ -1654,7 +1503,6 @@ mod tests {
     #[test]
     fn player_join_roundtrip() {
         let p = Packet::PlayerJoin {
-            protocol_version: v(),
             id: 99,
             username: "alex".into(),
         };
@@ -1665,7 +1513,6 @@ mod tests {
     #[test]
     fn player_leave_roundtrip() {
         let p = Packet::PlayerLeave {
-            protocol_version: v(),
             id: 99,
         };
         let decoded = Packet::decode(&p.encode()).unwrap();
@@ -1675,7 +1522,6 @@ mod tests {
     #[test]
     fn block_change_roundtrip() {
         let p = Packet::BlockChange {
-            protocol_version: v(),
             dimension: 0,
             revision: 1,
             x: -10,
@@ -1692,7 +1538,6 @@ mod tests {
     #[test]
     fn chunk_data_roundtrip() {
         let p = Packet::ChunkData {
-            protocol_version: v(),
             dimension: 0,
             cx: -3,
             cz: 4,
@@ -1836,19 +1681,24 @@ mod tests {
             username: "old".into(),
         };
         let decoded = Packet::decode(&p.encode()).unwrap();
-        assert_ne!(decoded.protocol_version(), PROTOCOL_VERSION);
+        match decoded {
+            Packet::Handshake {
+                protocol_version, ..
+            } => assert_ne!(protocol_version, PROTOCOL_VERSION),
+            other => panic!("expected Handshake, got {other:?}"),
+        }
     }
 
     #[test]
-    fn old_weather_packet_version_is_rejected_by_version_check() {
-        let p = Packet::TimeSync {
-            protocol_version: PROTOCOL_VERSION - 1,
+    fn post_auth_packets_omit_protocol_version() {
+        // TimeSync (and other live gameplay packets) no longer embed a
+        // protocol_version field; version is held by the authenticated session.
+        let packet = Packet::TimeSync {
             ticks: 20_000,
             weather: 1,
             weather_remaining_ticks: 4_000.0,
         };
-        let decoded = Packet::decode(&p.encode()).unwrap();
-        assert_ne!(decoded.protocol_version(), PROTOCOL_VERSION);
+        assert_eq!(Packet::decode(&packet.encode()).unwrap(), packet);
     }
 
     #[test]
@@ -1858,14 +1708,20 @@ mod tests {
             username: "legacy".into(),
         };
         let decoded = Packet::decode(&packet.encode()).unwrap();
-        assert_eq!(decoded.protocol_version(), PROTOCOL_VERSION - 1);
-        assert_ne!(decoded.protocol_version(), PROTOCOL_VERSION);
+        match decoded {
+            Packet::Handshake {
+                protocol_version, ..
+            } => {
+                assert_eq!(protocol_version, PROTOCOL_VERSION - 1);
+                assert_ne!(protocol_version, PROTOCOL_VERSION);
+            }
+            other => panic!("expected Handshake, got {other:?}"),
+        }
     }
 
     #[test]
     fn world_rules_sync_roundtrip() {
         let packet = Packet::WorldRulesSync {
-            protocol_version: PROTOCOL_VERSION,
             rules: crate::game_rules::WorldRules {
                 keep_inventory: true,
                 pvp: false,
@@ -1884,7 +1740,7 @@ mod tests {
             dimension: 0,
             client_revision: 12,
             operation: GameplayOperation::Container {
-                action: ContainerAction::Open.to_wire(),
+                action: ContainerAction::Open,
                 x: 4,
                 y: 64,
                 z: -2,
@@ -1893,13 +1749,11 @@ mod tests {
         };
         request.validate_bounds().unwrap();
         let packet = Packet::GameplayRequest {
-            protocol_version: v(),
             request: request.clone(),
         };
         assert_eq!(Packet::decode(&packet.encode()).unwrap(), packet);
 
         let response = Packet::GameplayResponse {
-            protocol_version: v(),
             response: GameplayResponse {
                 request_id: request.request_id,
                 server_sequence: 13,
@@ -1936,7 +1790,6 @@ mod tests {
         };
         request.validate_bounds().unwrap();
         let packet = Packet::GameplayRequest {
-            protocol_version: v(),
             request: request.clone(),
         };
         assert_eq!(Packet::decode(&packet.encode()).unwrap(), packet);
@@ -2003,54 +1856,109 @@ mod tests {
     }
 
     #[test]
-    fn leftover_container_click_wire_is_rejected() {
-        let request = |operation| GameplayRequest {
+    fn unknown_container_action_discriminant_fails_decode() {
+        let base = GameplayRequest {
             request_id: 1,
             client_sequence: 1,
             session_id: 1,
             dimension: 0,
             client_revision: 0,
-            operation,
-        };
-        assert_eq!(
-            request(GameplayOperation::Container {
-                action: 1,
+            operation: GameplayOperation::Container {
+                action: ContainerAction::Open,
                 x: 0,
                 y: 64,
                 z: 0,
                 slot: MAX_CONTAINER_SLOTS - 1,
-            })
-            .validate_bounds(),
-            Err(RejectReason::InvalidState)
-        );
-        request(GameplayOperation::Container {
-            action: ContainerAction::Close.to_wire(),
-            x: 0,
-            y: 64,
-            z: 0,
-            slot: MAX_CONTAINER_SLOTS - 1,
-        })
-        .validate_bounds()
-        .unwrap();
-        assert_eq!(
-            request(GameplayOperation::ContainerClick {
+            },
+        };
+        base.validate_bounds().unwrap();
+        GameplayRequest {
+            operation: GameplayOperation::Container {
+                action: ContainerAction::Close,
                 x: 0,
                 y: 64,
                 z: 0,
-                slot: MAX_CONTAINER_SLOTS,
-                is_left: true,
-                dragged: None,
-            })
+                slot: MAX_CONTAINER_SLOTS - 1,
+            },
+            ..base.clone()
+        }
+        .validate_bounds()
+        .unwrap();
+
+        let open_bytes = Packet::GameplayRequest {
+            request: base.clone(),
+        }
+        .encode();
+        let close_bytes = Packet::GameplayRequest {
+            request: GameplayRequest {
+                operation: GameplayOperation::Container {
+                    action: ContainerAction::Close,
+                    x: 0,
+                    y: 64,
+                    z: 0,
+                    slot: MAX_CONTAINER_SLOTS - 1,
+                },
+                ..base.clone()
+            },
+        }
+        .encode();
+        assert_eq!(
+            open_bytes.len(),
+            close_bytes.len(),
+            "Open/Close container frames must share layout"
+        );
+        let diff_indexes: Vec<usize> = open_bytes
+            .iter()
+            .zip(close_bytes.iter())
+            .enumerate()
+            .filter_map(|(index, (a, b))| (a != b).then_some(index))
+            .collect();
+        assert!(
+            !diff_indexes.is_empty(),
+            "Open and Close must differ by ContainerAction discriminant"
+        );
+        let mut unknown = open_bytes;
+        for index in diff_indexes {
+            unknown[index] = 99;
+        }
+        assert!(
+            Packet::decode(&unknown).is_err(),
+            "unknown ContainerAction discriminant must fail decode"
+        );
+
+        assert_eq!(
+            GameplayRequest {
+                request_id: 1,
+                client_sequence: 1,
+                session_id: 1,
+                dimension: 0,
+                client_revision: 0,
+                operation: GameplayOperation::ContainerClick {
+                    x: 0,
+                    y: 64,
+                    z: 0,
+                    slot: MAX_CONTAINER_SLOTS,
+                    is_left: true,
+                    dragged: None,
+                },
+            }
             .validate_bounds(),
             Err(RejectReason::InvalidState)
         );
 
         // The pre-v15 self-damage adapter reserves the high bit and quantizes
         // damage into the remaining seven bits. B0 keeps that wire contract.
-        request(GameplayOperation::Combat {
-            target: 1,
-            action: 0x80 | 127,
-        })
+        GameplayRequest {
+            request_id: 1,
+            client_sequence: 1,
+            session_id: 1,
+            dimension: 0,
+            client_revision: 0,
+            operation: GameplayOperation::Combat {
+                target: 1,
+                action: 0x80 | 127,
+            },
+        }
         .validate_bounds()
         .unwrap();
     }
@@ -2065,7 +1973,6 @@ mod tests {
     /// bytes, matching the pre-handshake OOM frame from the review.
     fn crafted_chunk_data_blocks_len(claimed: u64) -> Vec<u8> {
         let packet = Packet::ChunkData {
-            protocol_version: v(),
             dimension: 0,
             cx: 0,
             cz: 0,
@@ -2090,7 +1997,6 @@ mod tests {
 
     fn crafted_player_effect_len(claimed: u64) -> Vec<u8> {
         let packet = Packet::PlayerEffect {
-            protocol_version: v(),
             sequence: 0,
             player_id: 1,
             effects: Vec::new(),
@@ -2114,7 +2020,6 @@ mod tests {
 
     fn crafted_chat_message_len(claimed: u64) -> Vec<u8> {
         let packet = Packet::ChatMessage {
-            protocol_version: v(),
             sender: "s".into(),
             message: String::new(),
         };
@@ -2173,7 +2078,6 @@ mod tests {
     fn honest_chunk_data_bytes_keep_seq_wire_layout() {
         let blocks = vec![1u8, 2, 3, 4];
         let packet = Packet::ChunkData {
-            protocol_version: v(),
             dimension: 0,
             cx: 1,
             cz: -2,
@@ -2189,7 +2093,6 @@ mod tests {
         assert_eq!(Packet::decode(&encoded).unwrap(), packet);
 
         let prefix = Packet::ChunkData {
-            protocol_version: v(),
             dimension: 0,
             cx: 1,
             cz: -2,
@@ -2216,7 +2119,6 @@ mod tests {
     #[test]
     fn block_change_and_chunk_data_state_roundtrip() {
         let bc = Packet::BlockChange {
-            protocol_version: v(),
             dimension: 0,
             revision: 7,
             x: 10,
@@ -2230,7 +2132,6 @@ mod tests {
         assert_eq!(bc, decoded_bc);
 
         let cd = Packet::ChunkData {
-            protocol_version: v(),
             dimension: 0,
             cx: 2,
             cz: -3,
@@ -2246,7 +2147,6 @@ mod tests {
         assert_eq!(cd, decoded_cd);
 
         let delta = Packet::BlockEntityDelta {
-            protocol_version: v(),
             dimension: 0,
             revision: 8,
             x: 2,
@@ -2298,19 +2198,16 @@ mod tests {
         };
         for packet in [
             Packet::EntitySpawn {
-                protocol_version: v(),
                 dimension: 0,
                 sequence: 8,
                 state,
             },
             Packet::EntityState {
-                protocol_version: v(),
                 dimension: 0,
                 sequence: 9,
                 state,
             },
             Packet::EntityDespawn {
-                protocol_version: v(),
                 dimension: 0,
                 sequence: 10,
                 entity_id: state.entity_id,
@@ -2320,7 +2217,6 @@ mod tests {
         }
 
         let health = Packet::PlayerHealth {
-            protocol_version: v(),
             sequence: 11,
             player_id: 7,
             health: 12.0,
@@ -2334,7 +2230,6 @@ mod tests {
         assert_eq!(health, Packet::decode(&health.encode()).unwrap());
 
         let effects = Packet::PlayerEffect {
-            protocol_version: v(),
             sequence: 11,
             player_id: 7,
             effects: vec![PlayerEffectWire {
@@ -2355,7 +2250,6 @@ mod tests {
         hopper.revision = 11;
         hopper.slots[0] = Some(ItemStack::new(Item::SplashPotion, 2));
         let delta = Packet::BlockEntityDelta {
-            protocol_version: v(),
             dimension: 1,
             revision: 99,
             x: -2,
@@ -2430,7 +2324,6 @@ mod tests {
         ));
         state.validate_bounds().unwrap();
         let packet = Packet::PlayerSessionUpdate {
-            protocol_version: v(),
             sequence: 19,
             player_id: 4,
             dimension: 1,
@@ -2506,7 +2399,6 @@ mod tests {
             let request = domain_request(operation);
             request.validate_bounds().unwrap();
             let packet = Packet::GameplayRequest {
-                protocol_version: v(),
                 request,
             };
             assert_eq!(Packet::decode(&packet.encode()).unwrap(), packet);
