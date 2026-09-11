@@ -7,7 +7,7 @@ use icraft::network::protocol::{
 };
 use icraft::server_runtime::{ServerProperties, ServerRuntime};
 use std::collections::VecDeque;
-use std::net::{SocketAddr, TcpListener};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -46,6 +46,28 @@ impl HeldLoopback {
     pub fn release(mut self) -> u16 {
         drop(self.listener.take());
         self.addr.port()
+    }
+}
+
+/// Connect to a freshly spawned loopback server, retrying Windows self-connect.
+///
+/// On Windows, connecting before the server has bound can transiently
+/// self-connect when the reserved server port is selected as the client's
+/// ephemeral port. Reject those sockets and retry until a real peer appears.
+pub fn connect_loopback_std(addr: &str) -> TcpStream {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match TcpStream::connect(addr) {
+            Ok(stream) if stream.local_addr().ok() != stream.peer_addr().ok() => {
+                stream.set_nodelay(true).ok();
+                return stream;
+            }
+            Ok(_) | Err(_) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Ok(_) => panic!("server did not start before the connection deadline"),
+            Err(error) => panic!("server did not start: {error}"),
+        }
     }
 }
 

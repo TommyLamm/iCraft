@@ -7,6 +7,7 @@
 
 mod common;
 
+use common::authority_harness::authority_request;
 use common::tcp_harness::{session_slot, source};
 use glam::Vec3;
 use icraft::authority::contract::SessionContract;
@@ -38,29 +39,13 @@ fn new_core() -> AuthorityCore {
     core
 }
 
-fn request(
-    core: &AuthorityCore,
-    request_id: u128,
-    client_sequence: u64,
-    operation: GameplayOperation,
-) -> GameplayRequest {
-    GameplayRequest {
-        request_id,
-        client_sequence,
-        session_id: SESSION_ID,
-        dimension: Dimension::Overworld as u8,
-        client_revision: core.revision_for_dimension(Dimension::Overworld),
-        operation,
-    }
-}
-
 fn submit(
     core: &mut AuthorityCore,
     request_id: u128,
     client_sequence: u64,
     operation: GameplayOperation,
 ) -> GameplayResponse {
-    let request = request(core, request_id, client_sequence, operation);
+    let request = authority_request(core, SESSION_ID, request_id, client_sequence, operation);
     core.submit_request(request)
 }
 

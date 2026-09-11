@@ -3,11 +3,9 @@
 
 mod common;
 
-use common::tcp_harness::{temp_world, HeldLoopback};
+use common::tcp_harness::{gameplay_request, temp_world, HeldLoopback};
 use icraft::dimension::Dimension;
-use icraft::network::protocol::{
-    BlockActionKind, GameplayOperation, GameplayOutcome, GameplayRequest,
-};
+use icraft::network::protocol::{BlockActionKind, GameplayOperation, GameplayOutcome};
 use icraft::save::SaveManager;
 use icraft::server_runtime::{
     EmbeddedRuntimeOptions, LocalSessionProfile, ServerProperties, ServerRuntime, TransportMode,
@@ -43,27 +41,6 @@ fn embedded(label: &str) -> ServerRuntime {
     .0
 }
 
-fn request(
-    runtime: &ServerRuntime,
-    request_id: u128,
-    sequence: u64,
-    operation: GameplayOperation,
-) -> GameplayRequest {
-    let dimension = runtime
-        .authority
-        .session(LOCAL_ID)
-        .and_then(|session| Dimension::from_wire(session.dimension))
-        .expect("plan11 session dimension");
-    GameplayRequest {
-        request_id,
-        client_sequence: sequence,
-        session_id: LOCAL_ID,
-        dimension: dimension as u8,
-        client_revision: runtime.authority.revision_for_dimension(dimension),
-        operation,
-    }
-}
-
 fn loaded_len(runtime: &ServerRuntime) -> usize {
     runtime
         .authority
@@ -94,8 +71,9 @@ fn out_of_view_chunk_is_not_materialized_and_block_action_does_not_ensure() {
     let response = runtime
         .submit_request(
             LOCAL_ID,
-            request(
+            gameplay_request(
                 &runtime,
+                LOCAL_ID,
                 1,
                 1,
                 GameplayOperation::BlockAction {
@@ -178,8 +156,9 @@ fn portal_linked_columns_are_evict_candidates_when_nobody_is_present() {
         }
     });
     assert!(runtime.teleport_session(LOCAL_ID, [11.5, 66.0, 10.5]));
-    let enter = request(
+    let enter = gameplay_request(
         &runtime,
+        LOCAL_ID,
         1,
         1,
         GameplayOperation::BlockAction {

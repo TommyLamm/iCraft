@@ -6,4 +6,6 @@
 //! socket.
 
 #[allow(dead_code)]
+pub mod authority_harness;
+#[allow(dead_code)]
 pub mod tcp_harness;

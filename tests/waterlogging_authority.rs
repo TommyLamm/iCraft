@@ -1,3 +1,6 @@
+mod common;
+
+use common::authority_harness::authority_request;
 use icraft::authority::contract::SessionContract;
 use icraft::authority::{AuthorityConfig, AuthorityCore};
 use icraft::dimension::Dimension;
@@ -24,19 +27,18 @@ fn item_wire(item: Item) -> ItemWire {
     }
 }
 
-fn request(
+fn fluid_request(
     core: &AuthorityCore,
     request_id: u128,
     sequence: u64,
     source: SlotRefWire,
 ) -> GameplayRequest {
-    GameplayRequest {
+    authority_request(
+        core,
+        SESSION_ID,
         request_id,
-        client_sequence: sequence,
-        session_id: SESSION_ID,
-        dimension: Dimension::Overworld as u8,
-        client_revision: core.revision_for_dimension(Dimension::Overworld),
-        operation: GameplayOperation::FluidUse {
+        sequence,
+        GameplayOperation::FluidUse {
             x: 8,
             y: 80,
             z: 8,
@@ -44,7 +46,7 @@ fn request(
             hand: 0,
             source,
         },
-    }
+    )
 }
 
 fn setup_core() -> AuthorityCore {
@@ -100,7 +102,7 @@ fn bucket_place_pickup_is_atomic_and_duplicate_idempotent() {
         slot.item.custom_name[..2].copy_from_slice(b"wb");
         slot.item
     };
-    let place = request(&core, 1, 1, source(&core));
+    let place = fluid_request(&core, 1, 1, source(&core));
     let place_response = core.submit_request(place.clone());
     assert!(matches!(
         place_response.outcome,
@@ -123,7 +125,7 @@ fn bucket_place_pickup_is_atomic_and_duplicate_idempotent() {
     assert_eq!(duplicate, place_response);
     assert_eq!(core.revision_for_dimension(Dimension::Overworld), 2);
 
-    let pickup = request(&core, 2, 2, source(&core));
+    let pickup = fluid_request(&core, 2, 2, source(&core));
     let pickup_response = core.submit_request(pickup.clone());
     assert!(matches!(
         pickup_response.outcome,
@@ -157,7 +159,7 @@ fn bucket_place_pickup_is_atomic_and_duplicate_idempotent() {
 #[test]
 fn fluid_mutation_projection_is_stale_noop() {
     let mut core = setup_core();
-    let place = request(&core, 1, 1, source(&core));
+    let place = fluid_request(&core, 1, 1, source(&core));
     let response = core.submit_request(place.clone());
     assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
     let snapshot = core.tick();
@@ -169,7 +171,7 @@ fn fluid_mutation_projection_is_stale_noop() {
     assert_eq!(mutation.block, BlockType::OakSlab.to_wire());
     assert_eq!(mutation.raw_fluid, FLUID_WATERLOGGED_BIT);
 
-    let stale = request(&core, 2, 0, source(&core));
+    let stale = fluid_request(&core, 2, 0, source(&core));
     let stale_response = core.submit_request(stale);
     assert!(matches!(
         stale_response.outcome,
@@ -194,7 +196,7 @@ fn fluid_mutation_projection_is_stale_noop() {
 #[test]
 fn malformed_face_is_rejected_before_world_or_inventory_mutation() {
     let mut core = setup_core();
-    let mut malformed = request(&core, 9, 1, source(&core));
+    let mut malformed = fluid_request(&core, 9, 1, source(&core));
     if let GameplayOperation::FluidUse { face, .. } = &mut malformed.operation {
         *face = [i8::MIN, 0, 0];
     }
@@ -226,7 +228,7 @@ fn bucket_does_not_replace_passable_plant_at_adjacent_face() {
         world.set_block(8, 80, 8, BlockType::Stone, 0).unwrap();
         world.set_block(9, 80, 8, BlockType::Dandelion, 0).unwrap();
     });
-    let mut request = request(&core, 10, 1, source(&core));
+    let mut request = fluid_request(&core, 10, 1, source(&core));
     if let GameplayOperation::FluidUse { face, .. } = &mut request.operation {
         *face = [1, 0, 0];
     }

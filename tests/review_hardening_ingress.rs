@@ -5,11 +5,12 @@
 
 mod common;
 
-use common::tcp_harness::{drive_until, temp_world, wait_for_response, HeldLoopback, TcpClient};
-use icraft::dimension::Dimension;
+use common::tcp_harness::{
+    drive_until, gameplay_request, temp_world, wait_for_response, HeldLoopback, TcpClient,
+};
 use icraft::inventory::Item;
 use icraft::network::client::ClientToGame;
-use icraft::network::protocol::{GameplayOperation, GameplayRequest, Packet, PROTOCOL_VERSION};
+use icraft::network::protocol::{GameplayOperation, Packet, PROTOCOL_VERSION};
 use icraft::server_runtime::{ServerProperties, ServerRuntime};
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -79,28 +80,6 @@ fn handshake(address: &str, username: &str) -> (TcpStream, u64) {
     }
 }
 
-fn request(
-    runtime: &ServerRuntime,
-    player_id: u64,
-    request_id: u128,
-    sequence: u64,
-) -> GameplayRequest {
-    GameplayRequest {
-        request_id,
-        client_sequence: sequence,
-        session_id: player_id,
-        dimension: runtime
-            .authority
-            .session(player_id)
-            .map(|session| session.dimension)
-            .unwrap_or(0),
-        client_revision: runtime
-            .authority
-            .revision_for_dimension(Dimension::Overworld),
-        operation: GameplayOperation::ItemUse { item: Item::Bread as u32, count: 1 },
-    }
-}
-
 #[test]
 fn pose_and_oversized_chat_flood_does_not_block_peer_gameplay() {
     let reserved = HeldLoopback::bind();
@@ -119,7 +98,12 @@ fn pose_and_oversized_chat_flood_does_not_block_peer_gameplay() {
             &mut refs,
             "Plan12 peer authenticated while flooder is connected",
             |runtime, views| {
-                views[0].player_id().is_some() && runtime.players.contains_key(&flooder_id)
+                let Some(peer_id) = views[0].player_id() else {
+                    return false;
+                };
+                runtime.players.contains_key(&flooder_id)
+                    && runtime.players.contains_key(&peer_id)
+                    && runtime.authority.session(peer_id).is_some()
             },
         );
     }
@@ -156,7 +140,16 @@ fn pose_and_oversized_chat_flood_does_not_block_peer_gameplay() {
         },
     );
 
-    let gameplay = request(&runtime, peer_id, 12, 1);
+    let gameplay = gameplay_request(
+        &runtime,
+        peer_id,
+        12,
+        1,
+        GameplayOperation::ItemUse {
+            item: Item::Bread as u32,
+            count: 1,
+        },
+    );
     peer.send_request(gameplay);
     let _response = {
         let mut refs: Vec<&mut TcpClient> = vec![&mut peer];

@@ -376,6 +376,6 @@ symlink escape from `saves/`).
 | World | `src/world/` (`block.rs`, `section.rs`, `chunk.rs`, `mesh.rs`), `src/chunk_manager.rs`, `src/dimension.rs`, `src/worldgen/`, `src/structure/` |
 | Gameplay | `src/player.rs`, `src/physics.rs`, `src/inventory/`, `src/block_entity.rs`, `src/container_sessions.rs`, `src/redstone.rs`, `src/fluid.rs`, `src/world_tick.rs`, `src/entity.rs`, `src/mob.rs`, `src/passive_mob.rs` |
 | Render | `src/chunk_schedule.rs`, `src/chunk_render.rs`, `src/culling/`, `src/block_model.rs`, `src/shader.wgsl` |
-| Network | `src/network/` (`protocol.rs`, `transport.rs`, `server.rs`, `client.rs`, `ingress.rs`, `egress.rs`) |
+| Network | `src/network/` (`protocol.rs`, `transport.rs`, `server.rs`, `client.rs`, `ingress.rs`, `egress.rs`; `loopback_test.rs` is `cfg(test)` only) |
 | Save / assets | `src/save/` (`format.rs`, `region.rs`, `player.rs`, `index.rs`), `src/resources.rs` |
-| Tests | inline `#[cfg(test)]`, `tests/` (`tests/common/tcp_harness.rs`), `src/sim_harness.rs` / `src/final_acceptance.rs` (harness/`cfg(test)` only) |
+| Tests | inline `#[cfg(test)]`, `tests/` (`tests/common/tcp_harness.rs`, `authority_harness.rs`), `src/sim_harness.rs` / `src/final_acceptance.rs` (harness/`cfg(test)` only) |

@@ -1,8 +1,8 @@
 mod common;
 
 use common::tcp_harness::{
-    drive_until, loopback_properties, session_slot, temp_world, wait_for_response, HeldLoopback,
-    TcpClient, STEP_SLEEP,
+    drive_until, gameplay_request, loopback_properties, session_slot, temp_world,
+    wait_for_response, HeldLoopback, TcpClient, STEP_SLEEP,
 };
 use icraft::authority::contract::SessionGameplayState;
 use icraft::authority::interest::InterestKind;
@@ -107,22 +107,6 @@ fn wait_for_pair_response(
     request_id: u128,
 ) -> GameplayResponse {
     wait_for_response(runtime, &mut [client, observer], 0, request_id)
-}
-
-fn request(
-    request_id: u128,
-    client_sequence: u64,
-    client_revision: u64,
-    operation: GameplayOperation,
-) -> GameplayRequest {
-    GameplayRequest {
-        request_id,
-        client_sequence,
-        session_id: 0,
-        dimension: Dimension::Overworld as u8,
-        client_revision,
-        operation,
-    }
 }
 
 fn accepted_revision(response: &GameplayResponse) -> u64 {
@@ -259,10 +243,11 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     );
 
     const BLOCK_REQUEST: u128 = 0xA001;
-    let leftover_block_use = request(
+    let leftover_block_use = gameplay_request(
+        &runtime,
+        alice_id,
         BLOCK_REQUEST,
         1,
-        block_revision,
         GameplayOperation::BlockAction {
             action: BlockActionKind::Place,
             x: CHEST_POSITION.0,
@@ -332,11 +317,15 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
 
     const OUT_OF_ORDER_REQUEST: u128 = 0xA002;
     alice.send(GameToClient::GameplayRequest {
-        request: request(
+        request: gameplay_request(
+            &runtime,
+            alice_id,
             OUT_OF_ORDER_REQUEST,
             1,
-            block_revision,
-            GameplayOperation::ItemUse { item: Item::Bread as u32, count: 1 },
+            GameplayOperation::ItemUse {
+                item: Item::Bread as u32,
+                count: 1,
+            },
         ),
     });
     let out_of_order = wait_for_pair_response(&mut runtime, &mut alice, &mut bob, OUT_OF_ORDER_REQUEST);
@@ -349,12 +338,19 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
 
     const STALE_REQUEST: u128 = 0xA003;
     alice.send(GameToClient::GameplayRequest {
-        request: request(
-            STALE_REQUEST,
-            2,
-            0,
-            GameplayOperation::ItemUse { item: Item::Bread as u32, count: 1 },
-        ),
+        request: GameplayRequest {
+            client_revision: 0,
+            ..gameplay_request(
+                &runtime,
+                alice_id,
+                STALE_REQUEST,
+                2,
+                GameplayOperation::ItemUse {
+                    item: Item::Bread as u32,
+                    count: 1,
+                },
+            )
+        },
     });
     let stale = wait_for_pair_response(&mut runtime, &mut alice, &mut bob, STALE_REQUEST);
     assert_eq!(
@@ -392,10 +388,11 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
 
     const OPEN_REQUEST: u128 = 0xA004;
     alice.send(GameToClient::GameplayRequest {
-        request: request(
+        request: gameplay_request(
+            &runtime,
+            alice_id,
             OPEN_REQUEST,
             3,
-            block_revision,
             GameplayOperation::Container {
                 action: ContainerAction::Open.to_wire(),
                 x: CHEST_POSITION.0,
@@ -486,10 +483,11 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
         .set_session_gameplay(alice_id, alice_gameplay));
     const CLICK_REQUEST: u128 = 0xA005;
     alice.send(GameToClient::GameplayRequest {
-        request: request(
+        request: gameplay_request(
+            &runtime,
+            alice_id,
             CLICK_REQUEST,
             4,
-            open_revision,
             GameplayOperation::ContainerClick {
                 x: CHEST_POSITION.0,
                 y: CHEST_POSITION.1,

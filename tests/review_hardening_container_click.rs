@@ -6,6 +6,7 @@
 
 mod common;
 
+use common::authority_harness::authority_request;
 use common::tcp_harness::session_slot;
 use icraft::authority::contract::{SessionContract, SessionGameplayState, SessionInventorySlot};
 use icraft::authority::{AuthorityConfig, AuthorityCore};
@@ -15,8 +16,8 @@ use icraft::dimension::Dimension;
 use icraft::enchantment::Enchantment;
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::protocol::{
-    ContainerAction, GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse,
-    ItemWire, RejectReason, SlotRefWire,
+    ContainerAction, GameplayOperation, GameplayOutcome, GameplayResponse, ItemWire, RejectReason,
+    SlotRefWire,
 };
 use icraft::world::BlockType;
 use std::collections::BTreeMap;
@@ -40,29 +41,19 @@ fn new_core() -> AuthorityCore {
     core
 }
 
-fn request(
-    core: &AuthorityCore,
-    request_id: u128,
-    client_sequence: u64,
-    operation: GameplayOperation,
-) -> GameplayRequest {
-    GameplayRequest {
-        request_id,
-        client_sequence,
-        session_id: SESSION_ID,
-        dimension: Dimension::Overworld as u8,
-        client_revision: core.revision_for_dimension(Dimension::Overworld),
-        operation,
-    }
-}
-
 fn submit(
     core: &mut AuthorityCore,
     request_id: u128,
     client_sequence: u64,
     operation: GameplayOperation,
 ) -> GameplayResponse {
-    core.submit_request(request(core, request_id, client_sequence, operation))
+    core.submit_request(authority_request(
+        core,
+        SESSION_ID,
+        request_id,
+        client_sequence,
+        operation,
+    ))
 }
 
 fn accepted(response: &GameplayResponse) -> u64 {

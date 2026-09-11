@@ -10,8 +10,7 @@ use icraft::authority::contract::{SessionBrewState, SessionGameplayState};
 use icraft::dimension::Dimension;
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::protocol::{
-    BlockActionKind, GameplayOperation, GameplayOutcome, GameplayRequest, RejectReason,
-    SlotRefWire,
+    BlockActionKind, GameplayOperation, GameplayOutcome, RejectReason, SlotRefWire,
 };
 use icraft::network::server::ServerToHost;
 use icraft::server_runtime::{
@@ -33,15 +32,6 @@ fn properties(label: &str) -> ServerProperties {
     properties.simulation_distance = 4;
     properties.max_players = 20;
     properties
-}
-
-fn request(
-    runtime: &ServerRuntime,
-    request_id: u128,
-    sequence: u64,
-    operation: GameplayOperation,
-) -> GameplayRequest {
-    gameplay_request(runtime, LOCAL_ID, request_id, sequence, operation)
 }
 
 #[test]
@@ -74,8 +64,9 @@ fn end_gateway_hop_accepts_destination_pose() {
         .unwrap();
     runtime.tick().unwrap();
 
-    let enter = request(
+    let enter = gameplay_request(
         &runtime,
+        LOCAL_ID,
         1,
         1,
         GameplayOperation::BlockAction {
@@ -225,8 +216,9 @@ fn ignite_portal_brew_lock_does_not_place_fire() {
     }
     let before = runtime.authority.session(LOCAL_ID).unwrap().gameplay;
 
-    let ignite = request(
+    let ignite = gameplay_request(
         &runtime,
+        LOCAL_ID,
         1,
         1,
         GameplayOperation::BlockAction {

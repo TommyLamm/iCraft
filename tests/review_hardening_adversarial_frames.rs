@@ -3,6 +3,9 @@
 //! These fixtures write crafted length headers and lying `Vec` lengths with
 //! `std::net::TcpStream`. They must not go through `NetworkClient`.
 
+mod common;
+
+use common::tcp_harness::connect_loopback_std;
 use icraft::network::protocol::{Packet, MAX_PACKET_SIZE, PROTOCOL_VERSION};
 use icraft::network::server::{HostToServer, NetworkServer, ServerToHost};
 use std::io::{Read, Write};
@@ -41,26 +44,14 @@ impl RawServer {
     }
 
     fn connect_raw(&self) -> TcpStream {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            match TcpStream::connect(&self.addr) {
-                Ok(stream) if stream.local_addr().ok() != stream.peer_addr().ok() => {
-                    stream.set_nodelay(true).ok();
-                    stream
-                        .set_read_timeout(Some(Duration::from_secs(2)))
-                        .expect("set read timeout");
-                    stream
-                        .set_write_timeout(Some(Duration::from_secs(2)))
-                        .expect("set write timeout");
-                    return stream;
-                }
-                Ok(_) | Err(_) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Ok(_) => panic!("server did not start before the connection deadline"),
-                Err(error) => panic!("server did not start: {error}"),
-            }
-        }
+        let stream = connect_loopback_std(&self.addr);
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set read timeout");
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .expect("set write timeout");
+        stream
     }
 
     fn assert_no_join(&self, description: &str) {

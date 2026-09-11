@@ -299,143 +299,7 @@ mod tests {
     use tokio::sync::{mpsc, watch};
     use tokio::time::Instant;
 
-    struct TestServer {
-        addr: String,
-        host_tx: tokio::sync::mpsc::Sender<HostToServer>,
-        event_rx: std_mpsc::Receiver<ServerToHost>,
-        handle: JoinHandle<()>,
-        metrics: NetworkMetrics,
-    }
-
-    impl TestServer {
-        fn start(seed: u64, gamemode: u8) -> Self {
-            Self::start_with_config(
-                seed,
-                gamemode,
-                ServerConfig {
-                    catchup_queue_capacity: MAX_CATCHUP_QUEUE_DEPTH,
-                    catchup_drain_delay: Duration::ZERO,
-                    // Stress tests intentionally exercise rosters larger than
-                    // the production default player cap.
-                    max_players: 128,
-                    ..ServerConfig::default()
-                },
-            )
-        }
-
-        fn start_with_config(seed: u64, gamemode: u8, config: ServerConfig) -> Self {
-            let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
-            let addr = reserved.local_addr().unwrap().to_string();
-            drop(reserved);
-
-            let (host_tx, host_rx) = tokio::sync::mpsc::channel(128);
-            let (event_tx, event_rx) = std_mpsc::channel();
-            let metrics = NetworkMetrics::default();
-            let handle = NetworkServer::spawn_with_config_and_metrics(
-                addr.clone(),
-                seed,
-                gamemode,
-                host_rx,
-                event_tx,
-                config,
-                metrics.clone(),
-            );
-            Self {
-                addr,
-                host_tx,
-                event_rx,
-                handle,
-                metrics,
-            }
-        }
-
-        async fn connect_stream(&self) -> tokio::net::TcpStream {
-            let deadline = Instant::now() + Duration::from_secs(2);
-            loop {
-                match tokio::net::TcpStream::connect(&self.addr).await {
-                    Ok(stream) if stream.local_addr().ok() != stream.peer_addr().ok() => {
-                        break stream;
-                    }
-                    Ok(_) if Instant::now() < deadline => {
-                        // On Windows, connecting before the server has bound can
-                        // transiently self-connect when the reserved server port
-                        // is selected as the client's ephemeral port.
-                        time::sleep(Duration::from_millis(10)).await;
-                    }
-                    Err(_) if Instant::now() < deadline => {
-                        time::sleep(Duration::from_millis(10)).await;
-                    }
-                    Ok(_) => panic!("server did not start before the connection deadline"),
-                    Err(error) => panic!("server did not start: {error}"),
-                }
-            }
-        }
-
-        async fn connect(&self, username: &str) -> (Connection, PlayerId) {
-            let mut connection = Connection::new(self.connect_stream().await);
-            connection
-                .send(&Packet::Handshake {
-                    protocol_version: PROTOCOL_VERSION,
-                    username: username.into(),
-                })
-                .await
-                .unwrap();
-
-            match time::timeout(Duration::from_secs(2), connection.recv())
-                .await
-                .unwrap()
-                .unwrap()
-            {
-                Packet::LoginSuccess {
-                    protocol_version,
-                    player_id,
-                    seed,
-                    gamemode,
-                } => {
-                    assert_eq!(protocol_version, PROTOCOL_VERSION);
-                    assert_ne!(player_id, 0);
-                    assert_eq!(seed, 0xCAFE_BABE);
-                    assert_eq!(gamemode, 1);
-                    (connection, player_id)
-                }
-                packet => panic!("expected login success, got {packet:?}"),
-            }
-        }
-
-        async fn next_event_matching(
-            &self,
-            predicate: impl Fn(&ServerToHost) -> bool,
-        ) -> ServerToHost {
-            let deadline = Instant::now() + Duration::from_secs(2);
-            loop {
-                while let Ok(event) = self.event_rx.try_recv() {
-                    if predicate(&event) {
-                        return event;
-                    }
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "timed out waiting for server event"
-                );
-                time::sleep(Duration::from_millis(10)).await;
-            }
-        }
-
-        async fn stop(self) -> NetworkMetricsSnapshot {
-            let metrics = self.metrics.clone();
-            let _ = self.host_tx.send(HostToServer::Stop).await;
-            time::timeout(
-                Duration::from_secs(2),
-                tokio::task::spawn_blocking(move || {
-                    self.handle.join().unwrap();
-                }),
-            )
-            .await
-            .expect("server thread did not stop")
-            .unwrap();
-            metrics.snapshot()
-        }
-    }
+    use crate::network::loopback_test::{connect_loopback_stream, LoopbackTestServer};
 
     async fn recv_matching(
         connection: &mut Connection,
@@ -479,7 +343,7 @@ mod tests {
 
     #[tokio::test]
     async fn connect_and_login() {
-        let server = TestServer::start(0xCAFE_BABE, 1);
+        let server = LoopbackTestServer::start(0xCAFE_BABE, 1);
         let mut connection = Connection::new(server.connect_stream().await);
         connection
             .send(&Packet::Handshake {
@@ -517,7 +381,7 @@ mod tests {
 
     #[tokio::test]
     async fn gameplay_request_is_bound_to_authenticated_session() {
-        let server = TestServer::start(0xCAFE_BABE, 1);
+        let server = LoopbackTestServer::start(0xCAFE_BABE, 1);
         let (mut client, id) = server.connect("steve").await;
         let request = crate::network::protocol::GameplayRequest {
             request_id: 123,
@@ -547,7 +411,7 @@ mod tests {
 
     #[tokio::test]
     async fn gameplay_requests_are_idempotent_and_rejections_keep_sequences() {
-        let server = TestServer::start(0xCAFE_BABE, 1);
+        let server = LoopbackTestServer::start(0xCAFE_BABE, 1);
         let (mut client, id) = server.connect("sequencer").await;
         let request = GameplayRequest {
             request_id: 700,
@@ -725,7 +589,7 @@ mod tests {
 
     #[tokio::test]
     async fn request_rate_limit_rejects_without_forwarding_the_second_request() {
-        let server = TestServer::start_with_config(
+        let server = LoopbackTestServer::start_with_config(
             0xCAFE_BABE,
             1,
             ServerConfig {
@@ -788,7 +652,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_logins_reserve_max_player_slot_atomically() {
-        let server = TestServer::start_with_config(
+        let server = LoopbackTestServer::start_with_config(
             0xCAFE_BABE,
             1,
             ServerConfig {
@@ -832,7 +696,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_case_insensitive_duplicate_login_is_atomic() {
-        let server = TestServer::start_with_config(
+        let server = LoopbackTestServer::start_with_config(
             0xCAFE_BABE,
             1,
             ServerConfig {
@@ -876,7 +740,7 @@ mod tests {
 
     #[tokio::test]
     async fn leftover_inbound_packets_close_the_connection() {
-        let server = TestServer::start(0xCAFE_BABE, 1);
+        let server = LoopbackTestServer::start(0xCAFE_BABE, 1);
         let (mut client, id) = server.connect("legacy-adapter").await;
 
         client
@@ -899,7 +763,7 @@ mod tests {
 
     #[tokio::test]
     async fn server_list_ping_reports_version_and_capacity_without_login() {
-        let server = TestServer::start(0xCAFE_BABE, 1);
+        let server = LoopbackTestServer::start(0xCAFE_BABE, 1);
         let mut client = Connection::new(server.connect_stream().await);
         client
             .send(&Packet::ServerListPingRequest {
@@ -925,7 +789,7 @@ mod tests {
 
     #[tokio::test]
     async fn inbound_block_change_closes_the_connection() {
-        let server = TestServer::start(0xCAFE_BABE, 1);
+        let server = LoopbackTestServer::start(0xCAFE_BABE, 1);
         let (mut client, id) = server.connect("steve").await;
 
         client
@@ -953,7 +817,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_old_protocol_during_handshake() {
-        let server = TestServer::start(0xCAFE_BABE, 1);
+        let server = LoopbackTestServer::start(0xCAFE_BABE, 1);
         let mut connection = Connection::new(server.connect_stream().await);
         connection
             .send(&Packet::Handshake {
@@ -981,7 +845,7 @@ mod tests {
 
     #[tokio::test]
     async fn relays_player_position_through_host() {
-        let server = TestServer::start(0xCAFE_BABE, 1);
+        let server = LoopbackTestServer::start(0xCAFE_BABE, 1);
         let (mut client_a, id_a) = server.connect("steve").await;
         let (mut client_b, _) = server.connect("alex").await;
 
@@ -1393,7 +1257,7 @@ mod tests {
 
     #[tokio::test]
     async fn newcomer_receives_roster_larger_than_queue_capacity() {
-        let server = TestServer::start(0xCAFE_BABE, 1);
+        let server = LoopbackTestServer::start(0xCAFE_BABE, 1);
         let player_count = CLIENT_QUEUE_CAPACITY + 1;
         let mut existing_clients = Vec::with_capacity(player_count);
         let mut expected_ids = HashSet::with_capacity(player_count);
@@ -1424,7 +1288,7 @@ mod tests {
 
     #[tokio::test]
     async fn weather_snapshot_can_target_only_the_joining_client() {
-        let server = TestServer::start(0xCAFE_BABE, 1);
+        let server = LoopbackTestServer::start(0xCAFE_BABE, 1);
         let (mut existing, _) = server.connect("existing").await;
         let (mut joining, joining_id) = server.connect("joining").await;
 
@@ -1471,7 +1335,7 @@ mod tests {
 
     #[tokio::test]
     async fn weather_snapshot_and_lightning_broadcast_in_reliable_order() {
-        let server = TestServer::start(0xCAFE_BABE, 1);
+        let server = LoopbackTestServer::start(0xCAFE_BABE, 1);
         let (mut client, _) = server.connect("observer").await;
         let strike = LightningStrike {
             x: -8,
@@ -1534,7 +1398,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_cannot_inject_authoritative_lightning() {
-        let server = TestServer::start(0xCAFE_BABE, 1);
+        let server = LoopbackTestServer::start(0xCAFE_BABE, 1);
         let (mut attacker, _) = server.connect("attacker").await;
         let (mut observer, _) = server.connect("observer").await;
 
@@ -1572,7 +1436,7 @@ mod tests {
 
     #[tokio::test]
     async fn relays_player_action_through_host() {
-        let server = TestServer::start(0xCAFE_BABE, 1);
+        let server = LoopbackTestServer::start(0xCAFE_BABE, 1);
         let (_client_a, id_a) = server.connect("steve").await;
         let (mut client_b, _) = server.connect("alex").await;
         server
@@ -1593,7 +1457,7 @@ mod tests {
 
     #[tokio::test]
     async fn relays_chat_through_host_with_canonical_sender() {
-        let server = TestServer::start(0xCAFE_BABE, 1);
+        let server = LoopbackTestServer::start(0xCAFE_BABE, 1);
         let (mut client_a, id_a) = server.connect("steve").await;
         let (mut client_b, _) = server.connect("alex").await;
 
@@ -1641,7 +1505,7 @@ mod tests {
 
     #[tokio::test]
     async fn newcomer_receives_existing_roster() {
-        let server = TestServer::start(0xCAFE_BABE, 1);
+        let server = LoopbackTestServer::start(0xCAFE_BABE, 1);
         let (_client_a, id_a) = server.connect("steve").await;
         let (mut client_b, _) = server.connect("alex").await;
         let packet = recv_matching(
@@ -1657,7 +1521,7 @@ mod tests {
 
     #[tokio::test]
     async fn disconnect_cleans_up_and_notifies_remaining_clients() {
-        let server = TestServer::start(0xCAFE_BABE, 1);
+        let server = LoopbackTestServer::start(0xCAFE_BABE, 1);
         let (client_a, id_a) = server.connect("steve").await;
         let (mut client_b, _) = server.connect("alex").await;
         drop(client_a);
@@ -1681,7 +1545,7 @@ mod tests {
 
     #[tokio::test]
     async fn relays_block_action_gameplay_request() {
-        let server = TestServer::start(0xCAFE_BABE, 1);
+        let server = LoopbackTestServer::start(0xCAFE_BABE, 1);
         let (mut client_a, id_a) = server.connect("steve").await;
         let (_client_b, _id_b) = server.connect("alex").await;
 
@@ -1739,7 +1603,7 @@ mod tests {
 
     #[tokio::test]
     async fn player_session_projection_is_private_and_rejects_mismatched_owner() {
-        let server = TestServer::start(0xCAFE_BABE, 1);
+        let server = LoopbackTestServer::start(0xCAFE_BABE, 1);
         let (mut client_a, id_a) = server.connect("steve").await;
         let (mut client_b, id_b) = server.connect("alex").await;
         let state = SessionGameplayWire {
@@ -1808,7 +1672,7 @@ mod tests {
         server.stop().await;
     }
 
-    async fn handshake_once(server: &TestServer, username: &str) -> (Connection, Packet) {
+    async fn handshake_once(server: &LoopbackTestServer, username: &str) -> (Connection, Packet) {
         let mut connection = Connection::new(server.connect_stream().await);
         connection
             .send(&Packet::Handshake {
@@ -1826,7 +1690,7 @@ mod tests {
 
     #[tokio::test]
     async fn mutating_username_does_not_share_identity_with_sanitized_form() {
-        let server = TestServer::start_with_config(
+        let server = LoopbackTestServer::start_with_config(
             0xCAFE_BABE,
             1,
             ServerConfig {
@@ -1884,7 +1748,7 @@ mod tests {
         }
     }
 
-    fn drain_host_events(server: &TestServer) -> Vec<ServerToHost> {
+    fn drain_host_events(server: &LoopbackTestServer) -> Vec<ServerToHost> {
         let mut events = Vec::new();
         while let Ok(event) = server.event_rx.try_recv() {
             events.push(event);
@@ -1894,7 +1758,7 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_chat_is_rejected_before_host_enqueue() {
-        let server = TestServer::start(0xCAFE_BABE, 1);
+        let server = LoopbackTestServer::start(0xCAFE_BABE, 1);
         let (mut flooder, flooder_id) = server.connect("flood").await;
         let (mut peer, peer_id) = server.connect("peer").await;
 
@@ -1968,7 +1832,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_and_pose_rate_limits_are_independent() {
-        let server = TestServer::start_with_config(
+        let server = LoopbackTestServer::start_with_config(
             0xCAFE_BABE,
             1,
             ServerConfig {
@@ -2038,20 +1902,7 @@ mod tests {
             metrics,
         );
         let connect = |username: &'static str| async {
-            let deadline = Instant::now() + Duration::from_secs(2);
-            let stream = loop {
-                match tokio::net::TcpStream::connect(&addr).await {
-                    Ok(stream) if stream.local_addr().ok() != stream.peer_addr().ok() => {
-                        break stream;
-                    }
-                    _ if Instant::now() < deadline => {
-                        time::sleep(Duration::from_millis(10)).await;
-                    }
-                    Ok(_) => panic!("server did not start before the connection deadline"),
-                    Err(error) => panic!("server did not start: {error}"),
-                }
-            };
-            let mut connection = Connection::new(stream);
+            let mut connection = Connection::new(connect_loopback_stream(&addr).await);
             connection
                 .send(&Packet::Handshake {
                     protocol_version: PROTOCOL_VERSION,
@@ -2141,7 +1992,7 @@ mod tests {
 
     #[tokio::test]
     async fn broadcast_container_slot_is_reliable_or_evicts_slow_viewer() {
-        let server = TestServer::start(0xCAFE_BABE, 1);
+        let server = LoopbackTestServer::start(0xCAFE_BABE, 1);
         let (mut fast, _) = server.connect("fast").await;
         let (slow, slow_id) = server.connect("slow").await;
 
@@ -2227,7 +2078,7 @@ mod tests {
 
     #[tokio::test]
     async fn pre_auth_connections_are_capped_at_twice_max_players() {
-        let server = TestServer::start_with_config(
+        let server = LoopbackTestServer::start_with_config(
             0xCAFE_BABE,
             1,
             ServerConfig {

@@ -65,7 +65,7 @@
 | 13 | [`game_mode` 納入 session_sync 與座標常數](13_gamemode_sync_and_coord_helpers.md) | P2 | 少 split-brain 與三份 `position_to_milli` | 無 | 已完成 |
 | 14 | [random-tick eligible 索引](14_random_tick_eligible_index.md) | P1 | simulation union 不再每 tick 掃+sort | 無 | 已完成 |
 | 15 | [policy 幽靈 API 與 inventory hit 去重](15_policy_ghost_and_inventory_hit.md) | P2 | 少重複 chunk policy 與 hit probe | 03 | 已完成 |
-| 16 | [測試 `request()`／`TestServer` 合併](16_test_request_and_loopback_server.md) | P2 | 少約 8 份 fixture 複本 | 無 | 未開始 |
+| 16 | [測試 `request()`／`TestServer` 合併](16_test_request_and_loopback_server.md) | P2 | 少約 8 份 fixture 複本 | 無 | 已完成 |
 
 ---
 

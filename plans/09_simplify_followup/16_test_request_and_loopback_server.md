@@ -15,11 +15,11 @@ Plan 13 合併了 integration `TcpClient`／`temp_world`，但：
 
 ## 精確 acceptance
 
-- [ ] TCP 測試改用 `tcp_harness::{gameplay_request, current_revision, session_slot}`（或同等），刪本地 `fn request()`。
-- [ ] `AuthorityCore` 測試改用共用 `authority_request` helper（可放 `tests/common/` 或 `authority` 測試模組）。
-- [ ] `TestServer` 併入 `tests/common/` 或 `network` test helper；`server.rs` 單元測試改呼叫共用型別。
-- [ ] Windows loopback self-connect 重試邏輯只留一份。
-- [ ] `cargo test --test review_hardening_ingress`、`--test review_hardening_session_lifecycle`、`cargo test --lib network::server` 通過。
+- [x] TCP 測試改用 `tcp_harness::{gameplay_request, current_revision, session_slot}`（或同等），刪本地 `fn request()`。
+- [x] `AuthorityCore` 測試改用共用 `authority_request` helper（可放 `tests/common/` 或 `authority` 測試模組）。
+- [x] `TestServer` 併入 `tests/common/` 或 `network` test helper；`server.rs` 單元測試改呼叫共用型別。
+- [x] Windows loopback self-connect 重試邏輯只留一份。
+- [x] `cargo test --test review_hardening_ingress`、`--test review_hardening_session_lifecycle`、`cargo test --lib network::server` 通過。
 
 ## 預計檔案與測試
 
@@ -38,3 +38,29 @@ Plan 13 合併了 integration `TcpClient`／`temp_world`，但：
 - 刪 `SimHarness`／`final_acceptance`。
 - 改 production 網路握手。
 - 把 `microbench.rs` 去重（lib vs bin 雙編譯；低優先，可順手 `#[path]` 但不必須）。
+
+## 實作與證據
+
+- 新增 `tests/common/authority_harness.rs`：`authority_request` 依 live session dimension／revision 組 `GameplayRequest`（對齊 `gameplay_request`）。
+- TCP 測試刪本地 `fn request()`：`review_hardening_ingress`／`session_lifecycle`／`chunk_residency`／`headless_server_authority` 改呼叫 `tcp_harness::gameplay_request`（stale revision 用 struct update 覆寫）。ingress flood 測試改等 peer 進入 `runtime.players`＋authority session 後再 stamp。
+- AuthorityCore 測試：`authority_gameplay_domains`／`review_hardening_container_click`／`waterlogging_authority` 改共用 `authority_request`（waterlogging 保留薄 `fluid_request` 只包固定 FluidUse 座標）。
+- `src/network/loopback_test.rs`：抽出 `LoopbackTestServer`＋`connect_loopback_stream`；`server.rs` 單元測試改用共用型別；`host_queue_full_*` 不再內嵌第二份 self-connect。
+- sync 路徑：`tcp_harness::connect_loopback_std`；`review_hardening_adversarial_frames` 改用之（手組 frame 未改）。
+- `ARCHITECTURE.md` Tests／Network 列補上 harness／`loopback_test`。
+- 未刪 `SimHarness`／`final_acceptance`；未改 production handshake；未去重 `microbench`。`runtime_topology_parity` 的 harness method `request` 與 `server_runtime` 單元測試專用 container-open helper 不在本計劃檔案清單內，保留。
+
+### 測試
+
+```
+cargo test --lib network::server -- --test-threads=1
+  32 passed
+
+cargo test --test review_hardening_ingress -- --test-threads=1
+  2 passed
+
+cargo test --test review_hardening_session_lifecycle -- --test-threads=1
+  3 passed
+
+cargo test --test review_hardening_chunk_residency --test review_hardening_container_click --test authority_gameplay_domains --test waterlogging_authority --test headless_server_authority -- --test-threads=1
+  各檔 test result ok（chunk_residency 3、container_click 2、authority_gameplay_domains 9、waterlogging 5、headless 依編譯順序其一為 4）
+```
