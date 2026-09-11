@@ -25,8 +25,9 @@ pub(crate) const AUTHORITY_ENTITY_ID_START: u64 = 1 << 63;
 pub(crate) const ATTACK_COOLDOWN_TICKS: u16 = 5;
 
 pub use contract::{
-    common_gameplay_vectors, RevisionClock, AUTHORITY_CONTRACT_VERSION, FIXED_TICK_HZ,
-    RESPONSE_CACHE_CAPACITY,
+    common_gameplay_vectors, milli_within_abs_limit, position_to_milli, position_to_milli_opt,
+    RevisionClock, AUTHORITY_CONTRACT_VERSION, FIXED_TICK_HZ, POSITION_ABS_LIMIT,
+    POSITION_MILLI_ABS_LIMIT, RESPONSE_CACHE_CAPACITY,
 };
 
 // Dimension is a wire-ordered enum and is used as the deterministic key for

@@ -184,7 +184,7 @@ fn ensure_nether_mob(
 
     // Do not materialize an enemy directly on top of the player.
     let pos = Vec3::new(wx as f32 + 0.5, y as f32, wz as f32 + 0.5);
-    if pos.distance_squared(player_pos) < 8.0 * 8.0 {
+    if pos.distance_squared(player_pos) < crate::interaction::player_reach_squared() {
         return;
     }
     let kind = match next_u64(&mut seed) % 6 {
@@ -695,7 +695,7 @@ fn ensure_enderman(
             continue;
         }
         let position = Vec3::new(wx as f32 + 0.5, y as f32, wz as f32 + 0.5);
-        if position.distance_squared(player_pos) < 8.0 * 8.0
+        if position.distance_squared(player_pos) < crate::interaction::player_reach_squared()
             || entities
                 .query_radius_types(position, 3.0, &[EntityType::Enderman])
                 .next()

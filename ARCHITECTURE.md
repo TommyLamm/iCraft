@@ -103,13 +103,20 @@ enter the deterministic core:
 - `PlayerSessionState` in `ServerRuntime` owns interest, the save codec,
   `Instant` pose clocks, and teleport allowance.
 
-Pose / dimension / gameplay overlays go only through
-`write_pose`, `sync_pose_from_authority`, `sync_dimension`, and
-`sync_gameplay_projection` in `src/server_runtime/session_sync.rs`.
-`teleport_session` grants `teleport_allowance` before `write_pose`.
-TCP ingress still rejects out-of-order sequences before they cross the host
-channel (the network thread has no `AuthorityCore`); that watermark is not a
-second accepted-sequence source.
+Pose / dimension / game mode / gameplay overlays go only through
+`write_pose`, `sync_pose_from_authority`, `sync_dimension`, `sync_game_mode`,
+and `sync_gameplay_projection` in `src/server_runtime/session_sync.rs`.
+`sync_gameplay_projection` always overlays `game_mode` too so `/gamemode`,
+hardcore→spectator, join, and save cannot split `SessionContract` from
+`PlayerData`. `teleport_session` grants `teleport_allowance` before
+`write_pose`. TCP ingress still rejects out-of-order sequences before they
+cross the host channel (the network thread has no `AuthorityCore`); that
+watermark is not a second accepted-sequence source.
+
+Float→milli pose conversion and the milli abs bound live in
+`authority::contract` (`position_to_milli` / `POSITION_MILLI_ABS_LIMIT`).
+Block / interaction reach is `interaction::PLAYER_REACH` (still 8.0) with
+`player_reach_squared()` for squared comparisons.
 
 ## Mutation path
 

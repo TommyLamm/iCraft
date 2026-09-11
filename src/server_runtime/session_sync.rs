@@ -3,7 +3,8 @@
 //! Authority `SessionContract` and runtime `PlayerSessionState` stay separate
 //! types (interest / save codec cannot enter the deterministic core). These
 //! helpers are the only production writers of pose (`PlayerData` + contract),
-//! dimension (interest set + contract), and gameplay-projection fields.
+//! dimension (interest set + contract), game mode, and gameplay-projection
+//! fields.
 
 use super::{apply_gameplay_to_player_data, ServerRuntime};
 use crate::dimension::Dimension;
@@ -73,8 +74,24 @@ impl ServerRuntime {
         }
     }
 
-    /// Overlay the authority `SessionGameplayState` onto runtime `PlayerData`.
+    /// Copy `SessionContract.game_mode` onto runtime `PlayerData`.
+    ///
+    /// Authority remains the source of truth for `/gamemode`, hardcore→spectator,
+    /// and save restore. Join seeds the contract from `PlayerData`, then this
+    /// helper keeps both records aligned on every later projection/save path.
+    pub(super) fn sync_game_mode(&mut self, id: u64) {
+        let Some(game_mode) = self.authority.session(id).map(|session| session.game_mode) else {
+            return;
+        };
+        if let Some(session) = self.players.get_mut(&id) {
+            session.data.game_mode = game_mode;
+        }
+    }
+
+    /// Overlay the authority `SessionGameplayState` onto runtime `PlayerData`,
+    /// including `game_mode` so mode changes never leave the save codec behind.
     pub(super) fn sync_gameplay_projection(&mut self, id: u64) {
+        self.sync_game_mode(id);
         let Some(gameplay) = self.authority.session(id).map(|session| session.gameplay) else {
             return;
         };

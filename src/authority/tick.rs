@@ -232,7 +232,7 @@ impl AuthorityCore {
                 target.1 as f32 + 0.5,
                 target.2 as f32 + 0.5,
             );
-            if eye.distance(target_center) > 8.0 {
+            if eye.distance(target_center) > crate::interaction::PLAYER_REACH {
                 self.clear_mining_progress(id, dimension);
                 continue;
             }

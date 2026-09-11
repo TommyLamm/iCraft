@@ -22,11 +22,11 @@ ARCHITECTURE 規定 pose／dimension／gameplay 只走 `write_pose`／`sync_dime
 
 ## 精確 acceptance
 
-- [ ] `session_sync` 有 `sync_game_mode(id)`（或 gameplay projection 的 contract→runtime 方向包含 mode）；join／respawn／`/gamemode`／save 前都走它。
-- [ ] save codec 讀到的 `PlayerData.game_mode` 與 `SessionContract.game_mode` 在 round-trip 後一致。
-- [ ] 單一 `position_to_milli`（建議 `authority` 或 `contract` 子模組）+ 統一 milli 上限；fishing `validate()` 用同一 helper。
-- [ ] `PLAYER_REACH`／`player_reach_squared` 單一來源；`validate_request`、mining、trade／mount 的「方塊 reach」改用它。**不要**強行統一「眼睛 raycast」與「實體中心」語意，只消掉魔術數字。
-- [ ] `tests/review_hardening_session_lifecycle.rs`、fishing／combat bounds 測試通過。
+- [x] `session_sync` 有 `sync_game_mode(id)`（或 gameplay projection 的 contract→runtime 方向包含 mode）；join／respawn／`/gamemode`／save 前都走它。
+- [x] save codec 讀到的 `PlayerData.game_mode` 與 `SessionContract.game_mode` 在 round-trip 後一致。
+- [x] 單一 `position_to_milli`（建議 `authority` 或 `contract` 子模組）+ 統一 milli 上限；fishing `validate()` 用同一 helper。
+- [x] `PLAYER_REACH`／`player_reach_squared` 單一來源；`validate_request`、mining、trade／mount 的「方塊 reach」改用它。**不要**強行統一「眼睛 raycast」與「實體中心」語意，只消掉魔術數字。
+- [x] `tests/review_hardening_session_lifecycle.rs`、fishing／combat bounds 測試通過。
 
 ## 預計檔案與測試
 
@@ -46,3 +46,32 @@ ARCHITECTURE 規定 pose／dimension／gameplay 只走 `write_pose`／`sync_dime
 - 合併 `PlayerData` 與 `SessionGameplayState` 成單一 live struct。
 - 合併 dual response cache。
 - 改 reach 數值（保持 8.0）。
+
+## 實作與證據
+
+### 改了什麼
+
+- `session_sync::sync_game_mode`：contract → `PlayerData.game_mode`。
+- `sync_gameplay_projection` 一律先呼叫 `sync_game_mode`（覆蓋 `/gamemode`、hardcore→spectator 經 projection）。
+- join 註冊後、leave／`save_all` 前、以及 respawn（去掉 ad-hoc 寫入）都走 session_sync。
+- `authority::contract`：單一 `position_to_milli`／`position_to_milli_opt`、`POSITION_ABS_LIMIT`／`POSITION_MILLI_ABS_LIMIT`、`milli_within_abs_limit`；dispatch／server_world／fishing 共用。
+- `interaction::PLAYER_REACH`／`player_reach_squared`：`validate_request`、mining eye check、trade／mount、LoS raycast、boss 近距 spawn 門檻改用常數（數值仍為 8.0）。
+- `ARCHITECTURE.md` 補上 `sync_game_mode` 與座標／reach 單一來源。
+
+### 測了什麼
+
+- `cargo test --lib creative_world_meta_seeds_new_player` — ok
+- `cargo test --lib authority_gameplay_round_trips` — ok（Adventure mode round-trip）
+- `cargo test --lib fishing` — 10 ok
+- `cargo test --lib -- trade mount mining` — 20 ok
+- `cargo test --test review_hardening_session_lifecycle` — 3 ok
+- `cargo test --test authority_persistence` — 4 ok
+- `cargo test --test plan33_tcp_fishing_lifecycle` — 3 ok
+- `cargo test --lib combat` — 8 ok
+- `cargo test --lib -- game_mode` — 2 ok（persisted_player_game_mode + typed_mining_game_modes）
+
+### 留下的缺口
+
+- LoginSuccess 的 world-default `gamemode` 與 per-session `SessionContract.game_mode` 仍是兩條通道；本計劃只收斂 runtime／authority 雙寫，不改 wire LoginSuccess。
+- 眼睛 raycast 與實體中心距離仍用不同測點；僅常數來源統一。
+- 未合併 `PlayerData`／`SessionGameplayState`（計劃排除）。

@@ -18,6 +18,34 @@ pub const AUTHORITY_CONTRACT_VERSION: u16 = 2;
 pub const FIXED_TICK_HZ: u32 = 20;
 pub const RESPONSE_CACHE_CAPACITY: usize = 128;
 
+/// Absolute world-unit bound for float→milli conversion. Values beyond this
+/// are rejected before they can overflow the milli domain.
+pub const POSITION_ABS_LIMIT: f32 = 2_000_000.0;
+/// Absolute milli bound matching `POSITION_ABS_LIMIT * 1_000`.
+pub const POSITION_MILLI_ABS_LIMIT: i32 = 2_000_000_000;
+
+/// Convert a world-space pose to milli units used by fishing / combat domains.
+pub fn position_to_milli(position: [f32; 3]) -> Result<[i32; 3], RejectReason> {
+    let mut result = [0; 3];
+    for (index, value) in position.into_iter().enumerate() {
+        if !value.is_finite() || value.abs() > POSITION_ABS_LIMIT {
+            return Err(RejectReason::InvalidState);
+        }
+        result[index] = (value * 1_000.0).round() as i32;
+    }
+    Ok(result)
+}
+
+/// Same conversion as [`position_to_milli`], returning `None` on reject.
+pub fn position_to_milli_opt(position: [f32; 3]) -> Option<[i32; 3]> {
+    position_to_milli(position).ok()
+}
+
+/// True when a milli coordinate is inside [`POSITION_MILLI_ABS_LIMIT`].
+pub fn milli_within_abs_limit(value: i32) -> bool {
+    value.unsigned_abs() <= POSITION_MILLI_ABS_LIMIT as u32
+}
+
 /// Monotonic server revision shared by mutations and ACKs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RevisionClock {

@@ -1,7 +1,8 @@
 use super::AuthorityCore;
 use crate::authority::combat;
 use crate::authority::contract::{
-    self, MiningProgressState, SessionGameplayState, SessionInventorySlot, WorldMutation,
+    self, position_to_milli, MiningProgressState, SessionGameplayState, SessionInventorySlot,
+    WorldMutation,
 };
 use crate::authority::fishing;
 use crate::authority::transactions;
@@ -1383,17 +1384,6 @@ fn preserves_brew_locks(before: &SessionGameplayState, after: &SessionGameplaySt
         !transactions::brew_locks_slot(before, index as u8)
             || before.inventory[index] == after.inventory[index]
     })
-}
-
-fn position_to_milli(position: [f32; 3]) -> Result<[i32; 3], RejectReason> {
-    let mut result = [0; 3];
-    for (index, value) in position.into_iter().enumerate() {
-        if !value.is_finite() || value.abs() > 2_000_000.0 {
-            return Err(RejectReason::InvalidState);
-        }
-        result[index] = (value * 1_000.0).round() as i32;
-    }
-    Ok(result)
 }
 
 fn map_fishing_error(error: fishing::FishingDomainError) -> RejectReason {

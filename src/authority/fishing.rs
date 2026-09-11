@@ -6,7 +6,8 @@
 //! inventory/XP operation succeeds.
 
 use crate::authority::contract::{
-    SessionFishingHookState, SessionGameplayState, SessionInventorySlot, SESSION_INVENTORY_SLOTS,
+    milli_within_abs_limit, SessionFishingHookState, SessionGameplayState, SessionInventorySlot,
+    SESSION_INVENTORY_SLOTS,
 };
 use crate::fishing::{
     authoritative_launch_velocity_milli, deterministic_fishing_roll, FishingHookStage,
@@ -18,7 +19,6 @@ use crate::network::protocol::{ItemWire, SessionSlotWire};
 
 const OFFHAND_SLOT: u8 = (SESSION_INVENTORY_SLOTS - 1) as u8;
 const HOTBAR_SLOTS: u8 = 9;
-const MAX_ABS_MILLI: i32 = 2_000_000_000;
 const MAX_HOOK_VELOCITY_MILLI: i32 = 64_000;
 const MAX_WATER_SURFACE_DELTA_MILLI: i32 = 2_000;
 
@@ -43,11 +43,11 @@ impl FishingDomainContext {
             || self
                 .player_position_milli
                 .into_iter()
-                .any(|value| value.unsigned_abs() > MAX_ABS_MILLI as u32)
+                .any(|value| !milli_within_abs_limit(value))
             || self.open_water != self.water_surface_y_milli.is_some()
             || self
                 .water_surface_y_milli
-                .is_some_and(|value| value.unsigned_abs() > MAX_ABS_MILLI as u32)
+                .is_some_and(|value| !milli_within_abs_limit(value))
         {
             return Err(FishingDomainError::InvalidContext);
         }
@@ -543,7 +543,7 @@ fn validate_hook(hook: SessionFishingHookState) -> Result<(), FishingDomainError
         || hook
             .position_milli
             .into_iter()
-            .any(|value| value.unsigned_abs() > MAX_ABS_MILLI as u32)
+            .any(|value| !milli_within_abs_limit(value))
         || hook
             .velocity_milli
             .into_iter()
@@ -559,7 +559,7 @@ fn validate_hook(hook: SessionFishingHookState) -> Result<(), FishingDomainError
 fn validate_position(position: [i32; 3]) -> Result<(), FishingDomainError> {
     if position
         .into_iter()
-        .any(|value| value.unsigned_abs() > MAX_ABS_MILLI as u32)
+        .any(|value| !milli_within_abs_limit(value))
     {
         Err(FishingDomainError::InvalidContext)
     } else {

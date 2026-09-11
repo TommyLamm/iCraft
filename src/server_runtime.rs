@@ -1302,6 +1302,11 @@ impl ServerRuntime {
         // the same durable world directory as level/player state.  Runtime
         // construction validates this file before an authority world exists.
         self.persist_properties()?;
+        let mut player_ids: Vec<_> = self.players.keys().copied().collect();
+        player_ids.sort_unstable();
+        for id in player_ids.iter().copied() {
+            self.sync_game_mode(id);
+        }
         let mut names: Vec<_> = self.players.values().collect();
         names.sort_by_key(|session| session.id);
         for session in names {
@@ -1498,6 +1503,9 @@ impl ServerRuntime {
                 "injected save_player failure",
             ));
         }
+        // `save_all` calls `sync_game_mode` first so `session.data.game_mode`
+        // matches the contract; still overlay gameplay from authority onto the
+        // clone, and keep game_mode from the contract as the durable source.
         let mut data = session.data.clone();
         let current_dimension = self
             .authority

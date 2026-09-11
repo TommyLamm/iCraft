@@ -97,16 +97,14 @@ impl ServerRuntime {
                     .get(&id)
                     .map(|session| (session.data.yaw, session.data.pitch))
                     .unwrap_or((0.0, 0.0));
-                let game_mode = self.authority.session(id).map(|session| session.game_mode);
                 if let Some(session) = self.players.get_mut(&id) {
                     session.interest.open_containers.clear();
                     session.teleport_allowance = Some(respawn_position);
-                    if let Some(game_mode) = game_mode {
-                        session.data.game_mode = game_mode;
-                    }
                 }
                 self.sync_dimension(id, dimension);
                 let _ = self.write_pose(id, respawn_position, yaw, pitch, false);
+                // Hardcore→spectator (and any other respawn mode change) lives on
+                // the contract; sync_gameplay_projection pulls game_mode too.
                 self.sync_gameplay_projection(id);
                 self.send_respawn_result(id, respawn_position, dimension);
                 self.update_interest_for(id, dimension, respawn_position);
@@ -206,6 +204,9 @@ impl ServerRuntime {
         session.chunk_index_dimension = Some(join_dimension);
         self.interest_index_seed_session(id, join_dimension, join_chunks.iter().copied());
         self.players.insert(id, session);
+        // Seed was PlayerData → contract; re-enter through session_sync so both
+        // records share the same writer for every later mode change.
+        self.sync_game_mode(id);
         let (mut chunks, mut entities) = self
             .players
             .get(&id)
@@ -319,6 +320,7 @@ impl ServerRuntime {
     }
 
     pub(super) fn handle_leave(&mut self, id: u64) -> io::Result<()> {
+        self.sync_game_mode(id);
         if let Some(session) = self.players.remove(&id) {
             let dimension = session.interest.dimension;
             self.interest_index_clear_session(

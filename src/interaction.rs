@@ -2,6 +2,17 @@ use crate::chunk_manager::ChunkManager;
 use crate::world::BlockType;
 use glam::Vec3;
 
+/// Authoritative block / interaction reach in world units (unchanged at 8.0).
+/// Eye-raycast and entity-center checks may still measure different points; they
+/// share this distance budget so magic literals do not diverge.
+pub const PLAYER_REACH: f32 = 8.0;
+
+/// Squared reach for `distance_squared` comparisons.
+#[inline]
+pub const fn player_reach_squared() -> f32 {
+    PLAYER_REACH * PLAYER_REACH
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RaycastTargetPolicy {
     /// Select the solid face that a newly placed block should attach to.

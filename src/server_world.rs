@@ -5,8 +5,8 @@
 //! never imports wgpu, winit, audio, camera, or UI modules.
 
 use crate::authority::contract::{
-    AuthoritySnapshot, RevisionClock, SessionFishingHookState, SessionGameplayState,
-    SessionInventorySlot, WorldMutation,
+    position_to_milli_opt, AuthoritySnapshot, RevisionClock, SessionFishingHookState,
+    SessionGameplayState, SessionInventorySlot, WorldMutation,
 };
 use crate::authority::fishing::{FishingDomainContext, FishingDomainError};
 use crate::authority::interest::chunks_around;
@@ -577,7 +577,7 @@ impl ServerWorld {
         Ok(FishingDomainContext {
             world_seed: self.seed as u64 ^ (u64::from(self.dimension as u8) << 32),
             hook_entity_id: hook.entity_id,
-            player_position_milli: position_to_milli(player_position)
+            player_position_milli: position_to_milli_opt(player_position)
                 .ok_or(FishingDomainError::InvalidContext)?,
             open_water,
             water_surface_y_milli: open_water
@@ -988,13 +988,13 @@ impl ServerWorld {
             target.1 as f32 + 0.5,
             target.2 as f32 + 0.5,
         );
-        if origin.distance(target_vec) > 8.0 {
+        if origin.distance(target_vec) > crate::interaction::PLAYER_REACH {
             return false;
         }
         let Some(hit) = crate::interaction::raycast(
             origin,
             direction,
-            8.0,
+            crate::interaction::PLAYER_REACH,
             &self.chunks,
             crate::interaction::RaycastTargetPolicy::Break,
         ) else {
@@ -1148,7 +1148,7 @@ impl ServerWorld {
             }
             let distance = Vec3::from_array(position)
                 .distance_squared(Vec3::new(x as f32, y as f32, z as f32));
-            if distance > 8.0 * 8.0 {
+            if distance > crate::interaction::player_reach_squared() {
                 return Err(RejectReason::TooFar);
             }
         }
@@ -1251,7 +1251,7 @@ impl ServerWorld {
         if villager
             .position
             .distance_squared(Vec3::from_array(player_position))
-            > 8.0 * 8.0
+            > crate::interaction::player_reach_squared()
         {
             return Err(RejectReason::TooFar);
         }
@@ -1336,7 +1336,7 @@ impl ServerWorld {
         if vehicle
             .position
             .distance_squared(Vec3::from_array(player_position))
-            > 8.0 * 8.0
+            > crate::interaction::player_reach_squared()
         {
             return Err(RejectReason::TooFar);
         }
@@ -2272,17 +2272,6 @@ fn operation_position(operation: &GameplayOperation) -> Option<(i32, i32, i32)> 
         } => Some((*x, *y, *z)),
         _ => None,
     }
-}
-
-fn position_to_milli(position: [f32; 3]) -> Option<[i32; 3]> {
-    let mut result = [0; 3];
-    for (index, value) in position.into_iter().enumerate() {
-        if !value.is_finite() || value.abs() > 2_000_000.0 {
-            return None;
-        }
-        result[index] = (value * 1_000.0).round() as i32;
-    }
-    Some(result)
 }
 
 fn milli_to_vec3(position: [i32; 3]) -> Vec3 {
