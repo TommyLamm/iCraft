@@ -1,6 +1,10 @@
 use crate::inventory::{ToolMaterial, ToolType};
 use crate::redstone::Direction;
 
+#[path = "block_table.rs"]
+mod block_table;
+pub use block_table::{BlockDef, BLOCK_TABLE, BLOCK_TYPE_COUNT};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SoundMaterial {
     Grass,
@@ -186,6 +190,7 @@ pub enum BlockSupportStatus {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BlockProperties {
     pub name: &'static str,
     pub hardness: f32,
@@ -366,17 +371,14 @@ impl BlockType {
         matches!(self, BlockType::OakSlab | BlockType::CobblestoneSlab)
     }
 
+    #[inline]
+    pub fn def(self) -> &'static BlockDef {
+        &BLOCK_TABLE[self as usize]
+    }
+
+    #[inline]
     pub fn is_cross_model(self) -> bool {
-        matches!(
-            self,
-            BlockType::Dandelion
-                | BlockType::Poppy
-                | BlockType::TallGrass
-                | BlockType::SugarCane
-                | BlockType::WheatCrop
-                | BlockType::CarrotCrop
-                | BlockType::PotatoCrop
-        )
+        self.def().is_cross_model
     }
 
     pub fn can_stay_on(self, below: BlockType) -> bool {
@@ -571,896 +573,14 @@ impl BlockType {
         }
     }
 
+    #[inline]
     pub fn sound_material(self) -> Option<SoundMaterial> {
-        match self {
-            BlockType::Air
-            | BlockType::Water
-            | BlockType::Lava
-            | BlockType::Fire
-            | BlockType::NetherPortal
-            | BlockType::EndPortal => None,
-            BlockType::Grass
-            | BlockType::OakLeaves
-            | BlockType::BirchLeaves
-            | BlockType::SpruceLeaves
-            | BlockType::TallGrass
-            | BlockType::Dandelion
-            | BlockType::Poppy
-            | BlockType::SugarCane => Some(SoundMaterial::Grass),
-            BlockType::OakLog
-            | BlockType::OakPlanks
-            | BlockType::BirchLog
-            | BlockType::BirchPlanks
-            | BlockType::SpruceLog
-            | BlockType::SprucePlanks
-            | BlockType::Bookshelf
-            | BlockType::CraftingTable
-            | BlockType::Chest
-            | BlockType::EnchantingTable
-            | BlockType::BrewingStand
-            | BlockType::Pumpkin
-            | BlockType::Melon => Some(SoundMaterial::Wood),
-            BlockType::Sand | BlockType::Clay | BlockType::SoulSand => Some(SoundMaterial::Sand),
-            BlockType::Gravel | BlockType::Cactus => Some(SoundMaterial::Gravel),
-            BlockType::Snow | BlockType::SnowLayer => Some(SoundMaterial::Snow),
-            BlockType::Ice => Some(SoundMaterial::Ice),
-            BlockType::Glass => Some(SoundMaterial::Glass),
-            BlockType::Anvil => Some(SoundMaterial::Stone),
-            BlockType::OakDoor
-            | BlockType::OakDoorOpen
-            | BlockType::OakTrapdoor
-            | BlockType::OakTrapdoorOpen
-            | BlockType::NoteBlock => Some(SoundMaterial::Wood),
-            _ => Some(SoundMaterial::Stone),
-        }
+        self.def().sound
     }
 
-    pub fn properties(self) -> BlockProperties {
-        match self {
-            BlockType::Air => BlockProperties {
-                name: "Air",
-                hardness: 0.0,
-                render_type: RenderType::Cutout,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 0,
-            },
-            BlockType::Grass => BlockProperties {
-                name: "Grass Block",
-                hardness: 0.6,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::Dirt => BlockProperties {
-                name: "Dirt",
-                hardness: 0.5,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::Stone => BlockProperties {
-                name: "Stone",
-                hardness: 1.5,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::Sand => BlockProperties {
-                name: "Sand",
-                hardness: 0.5,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::Gravel => BlockProperties {
-                name: "Gravel",
-                hardness: 0.6,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::OakLog => BlockProperties {
-                name: "Oak Log",
-                hardness: 2.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::OakPlanks => BlockProperties {
-                name: "Oak Planks",
-                hardness: 2.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::OakLeaves => BlockProperties {
-                name: "Oak Leaves",
-                hardness: 0.2,
-                render_type: RenderType::Cutout,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::Cobblestone => BlockProperties {
-                name: "Cobblestone",
-                hardness: 2.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::Bedrock => BlockProperties {
-                name: "Bedrock",
-                hardness: -1.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::Water => BlockProperties {
-                name: "Water",
-                hardness: 100.0,
-                render_type: RenderType::Translucent,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 0,
-            },
-            BlockType::CoalOre => BlockProperties {
-                name: "Coal Ore",
-                hardness: 3.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::IronOre => BlockProperties {
-                name: "Iron Ore",
-                hardness: 3.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::GoldOre => BlockProperties {
-                name: "Gold Ore",
-                hardness: 3.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::DiamondOre => BlockProperties {
-                name: "Diamond Ore",
-                hardness: 3.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::RedstoneOre => BlockProperties {
-                name: "Redstone Ore",
-                hardness: 3.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::Glass => BlockProperties {
-                name: "Glass",
-                hardness: 0.3,
-                render_type: RenderType::Cutout,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::Brick => BlockProperties {
-                name: "Brick",
-                hardness: 2.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::StoneBrick => BlockProperties {
-                name: "Stone Brick",
-                hardness: 1.5,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::Snow => BlockProperties {
-                name: "Snow Block",
-                hardness: 0.1,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::Ice => BlockProperties {
-                name: "Ice",
-                hardness: 0.5,
-                render_type: RenderType::Translucent,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::Clay => BlockProperties {
-                name: "Clay",
-                hardness: 0.6,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::Sandstone => BlockProperties {
-                name: "Sandstone",
-                hardness: 0.8,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::Obsidian => BlockProperties {
-                name: "Obsidian",
-                hardness: 50.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::CraftingTable => BlockProperties {
-                name: "Crafting Table",
-                hardness: 2.5,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::Furnace | BlockType::FurnaceLit => BlockProperties {
-                name: "Furnace",
-                hardness: 3.5,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: if self == BlockType::FurnaceLit { 13 } else { 0 },
-            },
-            BlockType::Chest => BlockProperties {
-                name: "Chest",
-                hardness: 2.5,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::TNT => BlockProperties {
-                name: "TNT",
-                hardness: 0.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::Bookshelf => BlockProperties {
-                name: "Bookshelf",
-                hardness: 1.5,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::Torch => BlockProperties {
-                name: "Torch",
-                hardness: 0.0,
-                render_type: RenderType::Cutout,
-                is_solid: false,
-                is_passable: false,
-                light_emission: 14,
-            },
-            BlockType::Lava => BlockProperties {
-                name: "Lava",
-                hardness: 100.0,
-                render_type: RenderType::Opaque,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 15,
-            },
-            BlockType::BirchLog => BlockProperties {
-                name: "Birch Log",
-                hardness: 2.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::BirchPlanks => BlockProperties {
-                name: "Birch Planks",
-                hardness: 2.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::BirchLeaves => BlockProperties {
-                name: "Birch Leaves",
-                hardness: 0.2,
-                render_type: RenderType::Cutout,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::SpruceLog => BlockProperties {
-                name: "Spruce Log",
-                hardness: 2.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::SprucePlanks => BlockProperties {
-                name: "Spruce Planks",
-                hardness: 2.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::SpruceLeaves => BlockProperties {
-                name: "Spruce Leaves",
-                hardness: 0.2,
-                render_type: RenderType::Cutout,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::TallGrass => BlockProperties {
-                name: "Tall Grass",
-                hardness: 0.0,
-                render_type: RenderType::Cutout,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 0,
-            },
-            BlockType::Dandelion => BlockProperties {
-                name: "Dandelion",
-                hardness: 0.0,
-                render_type: RenderType::Cutout,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 0,
-            },
-            BlockType::Poppy => BlockProperties {
-                name: "Poppy",
-                hardness: 0.0,
-                render_type: RenderType::Cutout,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 0,
-            },
-            BlockType::Cactus => BlockProperties {
-                name: "Cactus",
-                hardness: 0.4,
-                render_type: RenderType::Cutout,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::SugarCane => BlockProperties {
-                name: "Sugar Cane",
-                hardness: 0.0,
-                render_type: RenderType::Cutout,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 0,
-            },
-            BlockType::Pumpkin => BlockProperties {
-                name: "Pumpkin",
-                hardness: 1.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::Melon => BlockProperties {
-                name: "Melon",
-                hardness: 1.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::EnchantingTable => BlockProperties {
-                name: "Enchanting Table",
-                hardness: 5.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 7,
-            },
-            BlockType::BrewingStand => BlockProperties {
-                name: "Brewing Stand",
-                hardness: 0.5,
-                render_type: RenderType::Cutout,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 1,
-            },
-            BlockType::Anvil => BlockProperties {
-                name: "Anvil",
-                hardness: 5.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::RedstoneWire => BlockProperties {
-                name: "Redstone Wire",
-                hardness: 0.0,
-                render_type: RenderType::Cutout,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 0,
-            },
-            BlockType::RedstoneTorch | BlockType::RedstoneTorchOff => BlockProperties {
-                name: "Redstone Torch",
-                hardness: 0.0,
-                render_type: RenderType::Cutout,
-                is_solid: false,
-                is_passable: true,
-                light_emission: if self == BlockType::RedstoneTorch {
-                    7
-                } else {
-                    0
-                },
-            },
-            BlockType::Repeater
-            | BlockType::RepeaterPowered
-            | BlockType::Comparator
-            | BlockType::ComparatorPowered
-            | BlockType::StoneButton
-            | BlockType::StoneButtonPressed
-            | BlockType::Lever
-            | BlockType::LeverOn
-            | BlockType::PressurePlate
-            | BlockType::PressurePlatePowered => BlockProperties {
-                name: match self {
-                    BlockType::Repeater | BlockType::RepeaterPowered => "Redstone Repeater",
-                    BlockType::Comparator | BlockType::ComparatorPowered => "Redstone Comparator",
-                    BlockType::StoneButton | BlockType::StoneButtonPressed => "Stone Button",
-                    BlockType::Lever | BlockType::LeverOn => "Lever",
-                    _ => "Stone Pressure Plate",
-                },
-                hardness: 0.5,
-                render_type: RenderType::Cutout,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 0,
-            },
-            BlockType::Piston
-            | BlockType::PistonExtended
-            | BlockType::StickyPiston
-            | BlockType::StickyPistonExtended => BlockProperties {
-                name: if matches!(
-                    self,
-                    BlockType::StickyPiston | BlockType::StickyPistonExtended
-                ) {
-                    "Sticky Piston"
-                } else {
-                    "Piston"
-                },
-                hardness: 1.5,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::RedstoneLamp | BlockType::RedstoneLampLit => BlockProperties {
-                name: "Redstone Lamp",
-                hardness: 0.3,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: if self == BlockType::RedstoneLampLit {
-                    15
-                } else {
-                    0
-                },
-            },
-            BlockType::OakDoor | BlockType::OakDoorOpen => BlockProperties {
-                name: "Oak Door",
-                hardness: 3.0,
-                render_type: RenderType::Cutout,
-                is_solid: self == BlockType::OakDoor,
-                is_passable: self == BlockType::OakDoorOpen,
-                light_emission: 0,
-            },
-            BlockType::OakTrapdoor | BlockType::OakTrapdoorOpen => BlockProperties {
-                name: "Oak Trapdoor",
-                hardness: 3.0,
-                render_type: RenderType::Cutout,
-                is_solid: self == BlockType::OakTrapdoor,
-                is_passable: self == BlockType::OakTrapdoorOpen,
-                light_emission: 0,
-            },
-            BlockType::Dispenser | BlockType::Dropper => BlockProperties {
-                name: if self == BlockType::Dispenser {
-                    "Dispenser"
-                } else {
-                    "Dropper"
-                },
-                hardness: 3.5,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::NoteBlock => BlockProperties {
-                name: "Note Block",
-                hardness: 0.8,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::Fire => BlockProperties {
-                name: "Fire",
-                hardness: 0.0,
-                render_type: RenderType::Cutout,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 15,
-            },
-            BlockType::SnowLayer => BlockProperties {
-                name: "Snow Layer",
-                hardness: 0.1,
-                render_type: RenderType::Cutout,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 0,
-            },
-            BlockType::Netherrack => BlockProperties {
-                name: "Netherrack",
-                hardness: 0.4,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::SoulSand => BlockProperties {
-                name: "Soul Sand",
-                hardness: 0.5,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::Glowstone => BlockProperties {
-                name: "Glowstone",
-                hardness: 0.3,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 15,
-            },
-            BlockType::NetherPortal => BlockProperties {
-                name: "Nether Portal",
-                hardness: -1.0,
-                render_type: RenderType::Translucent,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 11,
-            },
-            BlockType::EndStone => BlockProperties {
-                name: "End Stone",
-                hardness: 3.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::EndPortalFrame | BlockType::EndPortalFrameFilled => BlockProperties {
-                name: "End Portal Frame",
-                hardness: -1.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: if self == BlockType::EndPortalFrameFilled {
-                    2
-                } else {
-                    0
-                },
-            },
-            BlockType::EndPortal => BlockProperties {
-                name: "End Portal",
-                hardness: -1.0,
-                render_type: RenderType::Translucent,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 15,
-            },
-            BlockType::Purpur => BlockProperties {
-                name: "Purpur Block",
-                hardness: 1.5,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::DragonEgg => BlockProperties {
-                name: "Dragon Egg",
-                hardness: 3.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 1,
-            },
-            BlockType::WitherSkeletonSkull => BlockProperties {
-                name: "Wither Skeleton Skull",
-                hardness: 1.0,
-                render_type: RenderType::Cutout,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 0,
-            },
-            BlockType::NetherBrick => BlockProperties {
-                name: "Nether Bricks",
-                hardness: 2.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::EndCityChest => BlockProperties {
-                name: "End City Chest",
-                hardness: 2.5,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 3,
-            },
-            BlockType::Bed => BlockProperties {
-                name: "Bed",
-                hardness: 0.2,
-                render_type: RenderType::Cutout,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::Farmland => BlockProperties {
-                name: "Farmland",
-                hardness: 0.6,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::WheatCrop => BlockProperties {
-                name: "Wheat Crop",
-                hardness: 0.0,
-                render_type: RenderType::Cutout,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 0,
-            },
-            BlockType::CarrotCrop => BlockProperties {
-                name: "Carrot Crop",
-                hardness: 0.0,
-                render_type: RenderType::Cutout,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 0,
-            },
-            BlockType::PotatoCrop => BlockProperties {
-                name: "Potato Crop",
-                hardness: 0.0,
-                render_type: RenderType::Cutout,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 0,
-            },
-            BlockType::OakSlab => BlockProperties {
-                name: "Oak Slab",
-                hardness: 2.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::CobblestoneSlab => BlockProperties {
-                name: "Cobblestone Slab",
-                hardness: 2.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::OakStair => BlockProperties {
-                name: "Oak Stairs",
-                hardness: 2.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::CobblestoneStair => BlockProperties {
-                name: "Cobblestone Stairs",
-                hardness: 2.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::OakFence => BlockProperties {
-                name: "Oak Fence",
-                hardness: 2.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::OakFenceGate => BlockProperties {
-                name: "Oak Fence Gate",
-                hardness: 2.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::CobblestoneWall => BlockProperties {
-                name: "Cobblestone Wall",
-                hardness: 2.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::GlassPane => BlockProperties {
-                name: "Glass Pane",
-                hardness: 0.3,
-                render_type: RenderType::Cutout,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::OakLadder => BlockProperties {
-                name: "Ladder",
-                hardness: 0.4,
-                render_type: RenderType::Cutout,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::OakSign => BlockProperties {
-                name: "Oak Sign",
-                hardness: 1.0,
-                render_type: RenderType::Cutout,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 0,
-            },
-            BlockType::OakSapling | BlockType::BirchSapling | BlockType::SpruceSapling => {
-                BlockProperties {
-                    name: "Sapling",
-                    hardness: 0.0,
-                    render_type: RenderType::Cutout,
-                    is_solid: false,
-                    is_passable: true,
-                    light_emission: 0,
-                }
-            }
-            BlockType::Spawner => BlockProperties {
-                name: "Mob Spawner",
-                hardness: 5.0,
-                render_type: RenderType::Cutout,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::MossyCobblestone => BlockProperties {
-                name: "Mossy Cobblestone",
-                hardness: 2.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::DirtPath => BlockProperties {
-                name: "Dirt Path",
-                hardness: 0.6,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::NetherWartCrop => BlockProperties {
-                name: "Nether Wart",
-                hardness: 0.0,
-                render_type: RenderType::Cutout,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 0,
-            },
-            BlockType::EndStoneBrick => BlockProperties {
-                name: "End Stone Bricks",
-                hardness: 3.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::RespawnAnchor => BlockProperties {
-                name: "Respawn Anchor",
-                hardness: 5.0,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 3,
-            },
-            BlockType::EndGateway => BlockProperties {
-                name: "End Gateway",
-                hardness: -1.0,
-                render_type: RenderType::Translucent,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 15,
-            },
-            BlockType::Rail => BlockProperties {
-                name: "Rail",
-                hardness: 0.7,
-                render_type: RenderType::Cutout,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 0,
-            },
-            BlockType::PoweredRail => BlockProperties {
-                name: "Powered Rail",
-                hardness: 0.7,
-                render_type: RenderType::Cutout,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 0,
-            },
-            BlockType::DetectorRail => BlockProperties {
-                name: "Detector Rail",
-                hardness: 0.7,
-                render_type: RenderType::Cutout,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 0,
-            },
-            BlockType::ActivatorRail => BlockProperties {
-                name: "Activator Rail",
-                hardness: 0.7,
-                render_type: RenderType::Cutout,
-                is_solid: false,
-                is_passable: true,
-                light_emission: 0,
-            },
-            BlockType::Hopper => BlockProperties {
-                name: "Hopper",
-                hardness: 3.0,
-                render_type: RenderType::Cutout,
-                is_solid: false,
-                is_passable: false,
-                light_emission: 0,
-            },
-            BlockType::Observer => BlockProperties {
-                name: "Observer",
-                hardness: 3.5,
-                render_type: RenderType::Opaque,
-                is_solid: true,
-                is_passable: false,
-                light_emission: 0,
-            },
-        }
+    #[inline]
+    pub fn properties(self) -> &'static BlockProperties {
+        &self.def().properties
     }
 
     /// Whether this block is a full, opaque cube that casts vertex ambient occlusion.
@@ -1469,280 +589,21 @@ impl BlockType {
         properties.is_solid && properties.render_type == RenderType::Opaque
     }
 
+    #[inline]
     pub fn get_face_tex_index(self, face_idx: usize) -> (u32, u32) {
-        match self {
-            BlockType::Grass => {
-                if face_idx == 4 {
-                    (0, 0)
-                } else if face_idx == 5 {
-                    (2, 0)
-                } else {
-                    (1, 0)
-                }
-            }
-            BlockType::Dirt => (2, 0),
-            BlockType::Stone => (3, 0),
-            BlockType::Sand => (4, 0),
-            BlockType::Gravel => (5, 0),
-            BlockType::OakPlanks => (6, 0),
-            BlockType::OakLeaves => (7, 0),
-            BlockType::Cobblestone => (8, 0),
-            BlockType::Bedrock => (9, 0),
-            BlockType::Water => (10, 0),
-            BlockType::CoalOre => (11, 0),
-            BlockType::IronOre => (12, 0),
-            BlockType::GoldOre => (13, 0),
-            BlockType::DiamondOre => (14, 0),
-            BlockType::RedstoneOre => (15, 0),
-
-            BlockType::Glass => (0, 1),
-            BlockType::Brick => (1, 1),
-            BlockType::StoneBrick => (2, 1),
-            BlockType::Snow => {
-                if face_idx == 4 {
-                    (3, 1)
-                } else if face_idx == 5 {
-                    (2, 0)
-                } else {
-                    (4, 1)
-                }
-            }
-            BlockType::Ice => (5, 1),
-            BlockType::Clay => (6, 1),
-            BlockType::Sandstone => {
-                if face_idx == 4 || face_idx == 5 {
-                    (7, 1)
-                } else {
-                    (8, 1)
-                }
-            }
-            BlockType::Obsidian => (9, 1),
-            BlockType::OakLog => {
-                if face_idx == 4 || face_idx == 5 {
-                    (10, 1)
-                } else {
-                    (11, 1)
-                }
-            }
-            BlockType::CraftingTable => {
-                if face_idx == 4 {
-                    (12, 1)
-                } else if face_idx == 5 {
-                    (6, 0)
-                } else {
-                    (13, 1)
-                }
-            }
-            BlockType::Furnace | BlockType::FurnaceLit => {
-                if face_idx == 0 {
-                    (14, 1)
-                } else {
-                    (3, 0)
-                }
-            }
-            BlockType::Chest => (15, 1),
-
-            BlockType::TNT => {
-                if face_idx == 4 {
-                    (0, 2)
-                } else if face_idx == 5 {
-                    (1, 2)
-                } else {
-                    (2, 2)
-                }
-            }
-            BlockType::Bookshelf => {
-                if face_idx == 4 || face_idx == 5 {
-                    (6, 0)
-                } else {
-                    (3, 2)
-                }
-            }
-            BlockType::Torch => (4, 2),
-            BlockType::Lava => (15, 2),
-            BlockType::Air => (0, 0),
-            // Trees & Biomes Additions
-            BlockType::BirchLog => {
-                if face_idx == 4 || face_idx == 5 {
-                    (0, 12)
-                } else {
-                    (1, 12)
-                }
-            }
-            BlockType::BirchPlanks => (2, 12),
-            BlockType::BirchLeaves => (3, 12),
-            BlockType::SpruceLog => {
-                if face_idx == 4 || face_idx == 5 {
-                    (4, 12)
-                } else {
-                    (5, 12)
-                }
-            }
-            BlockType::SprucePlanks => (6, 12),
-            BlockType::SpruceLeaves => (7, 12),
-            BlockType::TallGrass => (8, 12),
-            BlockType::Dandelion => (9, 12),
-            BlockType::Poppy => (10, 12),
-            BlockType::Cactus => (11, 12),
-            BlockType::SugarCane => (12, 12),
-            BlockType::Pumpkin => (13, 12),
-            BlockType::Melon => (14, 12),
-            BlockType::EnchantingTable => (0, 13),
-            BlockType::BrewingStand => (1, 13),
-            BlockType::Anvil => (2, 13),
-            BlockType::RedstoneWire => (5, 2),
-            BlockType::RedstoneTorch | BlockType::RedstoneTorchOff => (6, 2),
-            BlockType::Repeater | BlockType::RepeaterPowered => (7, 2),
-            BlockType::Comparator | BlockType::ComparatorPowered => (8, 2),
-            BlockType::StoneButton | BlockType::StoneButtonPressed => (9, 2),
-            BlockType::Lever | BlockType::LeverOn => (10, 2),
-            BlockType::PressurePlate | BlockType::PressurePlatePowered => (11, 2),
-            BlockType::Piston | BlockType::PistonExtended => (12, 2),
-            BlockType::StickyPiston | BlockType::StickyPistonExtended => (13, 2),
-            BlockType::RedstoneLamp => (14, 2),
-            BlockType::RedstoneLampLit => (8, 14),
-            BlockType::OakDoor | BlockType::OakDoorOpen => (9, 14),
-            BlockType::OakTrapdoor | BlockType::OakTrapdoorOpen => (10, 14),
-            BlockType::Dispenser => (11, 14),
-            BlockType::Dropper => (12, 14),
-            BlockType::NoteBlock => (13, 14),
-            BlockType::Fire => (15, 12),
-            BlockType::SnowLayer => (3, 1),
-            BlockType::Netherrack => (10, 15),
-            BlockType::SoulSand => (11, 15),
-            BlockType::Glowstone => (12, 15),
-            BlockType::NetherPortal => (13, 15),
-            BlockType::EndStone => (14, 15),
-            BlockType::EndPortalFrame => match face_idx {
-                4 => (15, 15), // top
-                _ => (9, 4),   // sides and bottom
-            },
-            BlockType::EndPortalFrameFilled => match face_idx {
-                4 => (6, 4), // frame top composited with the Eye of Ender
-                _ => (9, 4), // sides and bottom retain the frame texture
-            },
-            BlockType::EndPortal => (14, 10),
-            BlockType::Purpur => (15, 10),
-            BlockType::DragonEgg => (14, 11),
-            BlockType::WitherSkeletonSkull => (15, 11),
-            BlockType::NetherBrick => (9, 10),
-            BlockType::EndCityChest => (10, 10),
-            BlockType::Bed => (6, 0),
-            BlockType::Farmland => {
-                if face_idx == 4 {
-                    (6, 5)
-                } else {
-                    (2, 0)
-                }
-            }
-            BlockType::WheatCrop => (8, 5),
-            BlockType::CarrotCrop => (0, 6),
-            BlockType::PotatoCrop => (4, 6),
-            BlockType::OakSlab => (6, 0),
-            BlockType::CobblestoneSlab => (8, 0),
-            BlockType::OakStair => (6, 0),
-            BlockType::CobblestoneStair => (8, 0),
-            BlockType::OakFence => (6, 0),
-            BlockType::OakFenceGate => (6, 0),
-            BlockType::CobblestoneWall => (8, 0),
-            BlockType::GlassPane => (0, 1),
-            BlockType::OakLadder => (3, 5),
-            BlockType::OakSign => (6, 0),
-            BlockType::OakSapling | BlockType::BirchSapling | BlockType::SpruceSapling => (4, 0),
-            BlockType::Spawner => (1, 4),
-            BlockType::MossyCobblestone => (4, 2),
-            BlockType::DirtPath => {
-                if face_idx == 4 {
-                    (6, 5)
-                } else {
-                    (2, 0)
-                }
-            }
-            BlockType::NetherWartCrop => (2, 6),
-            BlockType::EndStoneBrick => (15, 10),
-            BlockType::RespawnAnchor => (14, 11),
-            BlockType::EndGateway => (14, 10),
-            BlockType::Rail => (0, 8),
-            BlockType::PoweredRail => (3, 8),
-            BlockType::DetectorRail => (3, 9),
-            BlockType::ActivatorRail => (3, 10),
-            BlockType::Hopper => (11, 15),
-            BlockType::Observer => (11, 16),
-        }
+        self.def().face_tex[face_idx.min(5)]
     }
 
+    #[inline]
     pub fn preferred_tool(self) -> ToolType {
-        match self {
-            BlockType::Grass
-            | BlockType::Dirt
-            | BlockType::Sand
-            | BlockType::Gravel
-            | BlockType::Snow
-            | BlockType::SnowLayer
-            | BlockType::Clay
-            | BlockType::Sandstone => ToolType::Shovel,
-            BlockType::Stone
-            | BlockType::Cobblestone
-            | BlockType::CoalOre
-            | BlockType::IronOre
-            | BlockType::GoldOre
-            | BlockType::DiamondOre
-            | BlockType::RedstoneOre
-            | BlockType::StoneBrick
-            | BlockType::Obsidian
-            | BlockType::Furnace
-            | BlockType::EnchantingTable
-            | BlockType::BrewingStand
-            | BlockType::Anvil
-            | BlockType::Netherrack
-            | BlockType::Glowstone
-            | BlockType::EndStone
-            | BlockType::EndPortalFrame
-            | BlockType::EndPortalFrameFilled
-            | BlockType::Purpur
-            | BlockType::DragonEgg
-            | BlockType::NetherBrick
-            | BlockType::EndCityChest => ToolType::Pickaxe,
-            BlockType::OakLog
-            | BlockType::OakPlanks
-            | BlockType::BirchLog
-            | BlockType::BirchPlanks
-            | BlockType::SpruceLog
-            | BlockType::SprucePlanks
-            | BlockType::CraftingTable
-            | BlockType::Chest
-            | BlockType::Bookshelf
-            | BlockType::Pumpkin
-            | BlockType::Melon => ToolType::Axe,
-            _ => ToolType::None,
-        }
+        self.def().preferred_tool
     }
 
+    #[inline]
     pub fn min_harvest_material(self) -> Option<ToolMaterial> {
-        match self {
-            BlockType::Stone
-            | BlockType::Cobblestone
-            | BlockType::CoalOre
-            | BlockType::Furnace
-            | BlockType::StoneBrick
-            | BlockType::Sandstone => Some(ToolMaterial::Wood), // Stone tier tools or above
-            BlockType::BrewingStand
-            | BlockType::Anvil
-            | BlockType::Netherrack
-            | BlockType::Glowstone
-            | BlockType::EndStone
-            | BlockType::Purpur
-            | BlockType::NetherBrick
-            | BlockType::EndCityChest => Some(ToolMaterial::Stone),
-            BlockType::EnchantingTable => Some(ToolMaterial::Diamond),
-            BlockType::IronOre => Some(ToolMaterial::Stone),
-            BlockType::GoldOre | BlockType::RedstoneOre | BlockType::DiamondOre => {
-                Some(ToolMaterial::Iron)
-            }
-            BlockType::Obsidian => Some(ToolMaterial::Diamond),
-            _ => None,
-        }
+        self.def().min_harvest
     }
+
 }
 
 #[cfg(test)]
@@ -1892,7 +753,76 @@ mod tests {
         assert_eq!(BlockType::OakPlanks.min_harvest_material(), None);
     }
 
+    #[test]
+    fn canonical_block_table_covers_every_variant() {
+        assert_eq!(BLOCK_TABLE.len(), BLOCK_TYPE_COUNT);
+        assert_eq!(BLOCK_TYPE_COUNT, BlockType::Observer as usize + 1);
+        for id in 0..BLOCK_TYPE_COUNT as u8 {
+            let block = BlockType::from_u8(id);
+            assert_eq!(block as usize, id as usize);
+            let def = block.def();
+            // Every discriminant maps to exactly one table row.
+            assert!(
+                std::ptr::eq(def, &BLOCK_TABLE[id as usize]),
+                "variant {block:?} must index its own row"
+            );
+        }
+    }
 
+    #[test]
+    fn block_static_property_snapshot_is_byte_identical() {
+        // Locked dump of every static field for every discriminant. Changing a
+        // gameplay number here is intentional and must update this golden string.
+        let mut lines = Vec::with_capacity(BLOCK_TYPE_COUNT);
+        for id in 0..BLOCK_TYPE_COUNT as u8 {
+            let b = BlockType::from_u8(id);
+            let d = b.def();
+            let p = &d.properties;
+            let faces = (0..6)
+                .map(|f| {
+                    let (c, r) = d.face_tex[f];
+                    format!("{c},{r}")
+                })
+                .collect::<Vec<_>>()
+                .join(";");
+            lines.push(format!(
+                "{id}|{b:?}|{name}|{hardness:.3}|{render:?}|{solid}|{pass}|{light}|{faces}|{sound:?}|{tool:?}|{harvest:?}|{cross}",
+                name = p.name,
+                hardness = p.hardness,
+                render = p.render_type,
+                solid = p.is_solid as u8,
+                pass = p.is_passable as u8,
+                light = p.light_emission,
+                sound = d.sound,
+                tool = d.preferred_tool,
+                harvest = d.min_harvest,
+                cross = d.is_cross_model as u8,
+            ));
+        }
+        let snapshot = lines.join("\n");
+        let expected = include_str!("block_property_snapshot.txt")
+            .replace("\r\n", "\n")
+            .trim_end()
+            .to_string();
+        assert_eq!(
+            snapshot, expected,
+            "BlockDef table drifted from the locked snapshot"
+        );
+        // Thin accessors must agree with the table row.
+        for id in 0..BLOCK_TYPE_COUNT as u8 {
+            let b = BlockType::from_u8(id);
+            let d = b.def();
+            assert_eq!(b.properties().name, d.properties.name);
+            assert_eq!(b.properties().hardness, d.properties.hardness);
+            assert_eq!(b.sound_material(), d.sound);
+            assert_eq!(b.preferred_tool(), d.preferred_tool);
+            assert_eq!(b.min_harvest_material(), d.min_harvest);
+            assert_eq!(b.is_cross_model(), d.is_cross_model);
+            for face in 0..6 {
+                assert_eq!(b.get_face_tex_index(face), d.face_tex[face]);
+            }
+        }
+    }
 
     #[test]
     fn block_state_encoding_roundtrip() {

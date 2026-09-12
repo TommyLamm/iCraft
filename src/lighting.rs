@@ -212,7 +212,7 @@ fn propagate(
                 continue;
             }
 
-            if nb.get_block(nx, ny, nz).properties().render_type == RenderType::Opaque {
+            if nb.get_block(nx, ny, nz).def().properties.render_type == RenderType::Opaque {
                 continue;
             }
 
@@ -405,7 +405,7 @@ pub fn update_sky_light_after_placed(
     let mut propagate_queue = VecDeque::new();
 
     let block = chunk_manager.get_block(wx, wy, wz);
-    if block.properties().render_type != RenderType::Opaque {
+    if block.def().properties.render_type != RenderType::Opaque {
         propagate_queue.push_back(LightNode {
             x: wx,
             y: wy,
@@ -471,7 +471,7 @@ pub fn update_sky_light_after_removed(
     if above_sky {
         for y in (height.min_y()..=wy).rev() {
             let block = chunk_manager.get_block(wx, y, wz);
-            if block.properties().render_type == RenderType::Opaque {
+            if block.def().properties.render_type == RenderType::Opaque {
                 break;
             }
             chunk_manager.set_sky_light(wx, y, wz, 15);
@@ -527,7 +527,7 @@ pub fn update_block_light_after_placed(
         propagate_block_light(chunk_manager, &mut propagate_queue, dirty_chunks);
     } else {
         let block = chunk_manager.get_block(wx, wy, wz);
-        if block.properties().render_type == RenderType::Opaque {
+        if block.def().properties.render_type == RenderType::Opaque {
             let old_val = chunk_manager.get_block_light(wx, wy, wz);
             if old_val > 0 {
                 chunk_manager.set_block_light(wx, wy, wz, 0);
@@ -643,7 +643,7 @@ fn neighbor_needs_propagation(
         };
         let bx = nx.rem_euclid(CHUNK_WIDTH as i32) as usize;
         let bz = nz.rem_euclid(CHUNK_DEPTH as i32) as usize;
-        if chunk.get_block_local(bx, ny, bz).properties().render_type == RenderType::Opaque {
+        if chunk.get_block_local(bx, ny, bz).def().properties.render_type == RenderType::Opaque {
             continue;
         }
         if get_light(chunk, bx, ny, bz) < light - 1 {
@@ -1120,11 +1120,11 @@ mod tests {
         ];
         for &(x, y, z, block, place) in &ops {
             let old = chunk_manager.get_block(x, y, z);
-            let old_emission = old.properties().light_emission;
-            let new_emission = block.properties().light_emission;
+            let old_emission = old.def().properties.light_emission;
+            let new_emission = block.def().properties.light_emission;
             chunk_manager.set_block(x, y, z, block);
             if place {
-                if block.properties().render_type == RenderType::Opaque {
+                if block.def().properties.render_type == RenderType::Opaque {
                     update_sky_light_after_placed(&mut chunk_manager, x, y, z, &mut dirty);
                 } else {
                     update_sky_light_after_removed(&mut chunk_manager, x, y, z, &mut dirty);

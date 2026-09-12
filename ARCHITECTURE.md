@@ -335,6 +335,11 @@ A chunk is a 16×16 column of sparse 16-high paletted `ChunkSection`s. Block
 entities live in the owning chunk. Use signed-Y helpers in `src/world/`
 (`world_y_to_section_y`, `section_and_local_y_to_world_y`,
 `Chunk::world_y_range()`, `Dimension::height()`), not hard-coded `0..256`.
+`BlockType` is `#[repr(u8)]` with stable wire/save discriminants; static
+gameplay/render fields live in `BLOCK_TABLE` (`src/world/block_table.rs`),
+indexed by discriminant. `BlockType::def()` / `properties()` return
+`&'static` rows (no per-voxel struct rebuild). Behavioral helpers
+(`can_stay_on`, `support_status_at`) stay as code.
 Nether and End generation fill paletted `ChunkSection`s directly (no
 full-column dense scratch). Overworld and Superflat do the same via
 `set_block_local`; Superflat starts from `Chunk::empty_in_dimension` instead
@@ -483,7 +488,7 @@ from `saves/`).
 | Presentation (desktop-only) | `src/presentation/` — `embedded_runtime.rs`, `network_event.rs`, `frame.rs` are `#[path]` children of `state`. `visibility.rs` (section visibility BFS only; entity LOS worker removed) is loaded via `main.rs`. `gpu_frame_resources` / `presentation_click` are `mod` in `main.rs`; `microbench` is the same behind feature `microbench`. |
 | Authority | `src/authority/` (`tick.rs`, `portals.rs`, `dispatch.rs`, `combat.rs`, `contract.rs`, `fishing.rs`, `interest.rs`, `mining.rs`, `transactions.rs`) |
 | Runtime | `src/server_runtime.rs` plus `ingress.rs`, `projection.rs`, `session_sync.rs`; `src/server_world.rs`; `src/bin/icraft-server.rs` |
-| World | `src/world/` (`block.rs`, `section.rs`, `chunk.rs`, `mesh.rs`), `src/chunk_manager.rs`, `src/dimension.rs`, `src/worldgen/`, `src/structure/` |
+| World | `src/world/` (`block.rs`, `block_table.rs`, `section.rs`, `chunk.rs`, `mesh.rs`), `src/chunk_manager.rs`, `src/dimension.rs`, `src/worldgen/`, `src/structure/` |
 | Gameplay | `src/player.rs`, `src/physics.rs`, `src/inventory/`, `src/block_entity.rs`, `src/redstone.rs`, `src/fluid.rs`, `src/world_tick.rs`, `src/entity.rs`, `src/mob.rs`, `src/passive_mob.rs`, `src/village/` (`VillagerProfession` / `TradeOffer`; POI/raid/merchant-session managers are `cfg(test)` only), `src/fishing.rs` (wire stages + authority helpers; presentation `FishingManager` is `cfg(test)` only) |
 | Render | `src/chunk_schedule.rs`, `src/chunk_render.rs` (CPU mesh data; wgpu vertex layout lives next to desktop pipelines), `src/culling/` (`los` + `connectivity` in lib), `src/block_model.rs`, `src/shader.wgsl` |
 | Network | `src/network/` (`protocol.rs`, `transport.rs`, `server.rs`, `client.rs`, `ingress.rs`, `egress.rs`; `loopback_test.rs` is `cfg(test)` only) |

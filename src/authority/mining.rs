@@ -32,11 +32,12 @@ pub fn calculate_block_break_rewards(
         };
     }
 
-    let eligible = old_block.min_harvest_material().map_or(true, |minimum| {
+    let old_def = old_block.def();
+    let eligible = old_def.min_harvest.map_or(true, |minimum| {
         held_stack
             .and_then(|stack| stack.item.tool_properties())
             .is_some_and(|tool| {
-                tool.tool_type == old_block.preferred_tool() && tool.material >= minimum
+                tool.tool_type == old_def.preferred_tool && tool.material >= minimum
             })
     });
     let silk_touch = held_stack
@@ -128,11 +129,12 @@ pub fn calculate_block_break_rewards(
 /// Deterministic fixed-tick mining duration. Creative is handled by the
 /// authority before calling this helper.
 pub fn mining_time_seconds(block: BlockType, held_stack: Option<&ItemStack>) -> f32 {
-    let hardness = block.properties().hardness;
+    let def = block.def();
+    let hardness = def.properties.hardness;
     if hardness < 0.0 {
         return f32::MAX;
     }
-    let preferred = block.preferred_tool();
+    let preferred = def.preferred_tool;
     let mut speed = 1.0;
     let mut matching = false;
     if let Some(stack) = held_stack {

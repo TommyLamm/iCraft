@@ -619,7 +619,7 @@ impl ChunkSection {
             if b != BlockType::Air {
                 non_air_count += 1;
             }
-            let props = b.properties();
+            let props = &b.def().properties;
             if props.render_type == RenderType::Opaque {
                 opaque_count += 1;
             }
@@ -736,8 +736,8 @@ impl ChunkSection {
                 self.non_air_count += 1;
             }
 
-            let old_props = old_block.properties();
-            let new_props = block.properties();
+            let old_props = &old_block.def().properties;
+            let new_props = &block.def().properties;
 
             if old_props.render_type == RenderType::Opaque {
                 self.opaque_count = self.opaque_count.saturating_sub(1);

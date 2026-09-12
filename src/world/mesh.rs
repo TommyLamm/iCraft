@@ -514,7 +514,7 @@ fn face_should_render(
         return true;
     }
 
-    if neighbor.properties().render_type == RenderType::Opaque {
+    if neighbor.def().properties.render_type == RenderType::Opaque {
         return false;
     }
 
@@ -653,8 +653,9 @@ fn append_trapdoor_mesh(
 }
 
 fn is_greedy_cube(block: BlockType) -> bool {
-    block.properties().is_solid
-        && !block.is_cross_model()
+    let def = block.def();
+    def.properties.is_solid
+        && !def.is_cross_model
         && !matches!(
             block,
             BlockType::Water
@@ -923,7 +924,7 @@ impl Chunk {
                         continue;
                     }
 
-                    if block.is_cross_model() {
+                    if block.def().is_cross_model {
                         let sky_val = voxel.sky;
                         let block_val = voxel.block_light;
                         let light_val = sky_val as f32 + block_val as f32 * 16.0 + 1.0 * 256.0;
@@ -1007,7 +1008,7 @@ impl Chunk {
                             neighbor_level,
                             neighbor_falling,
                         ) {
-                            let block_render_type = block.properties().render_type;
+                            let block_render_type = block.def().properties.render_type;
                             let is_translucent = block_render_type == RenderType::Translucent;
 
                             let (v_list, i_list) = if is_translucent {
@@ -1243,7 +1244,7 @@ impl Chunk {
                         }
 
                         let (vertices, indices) =
-                            if face.block.properties().render_type == RenderType::Translucent {
+                            if face.block.def().properties.render_type == RenderType::Translucent {
                                 (&mut trans_vertices, &mut trans_indices)
                             } else {
                                 (&mut opaque_vertices, &mut opaque_indices)

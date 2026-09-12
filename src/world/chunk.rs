@@ -710,11 +710,12 @@ impl Chunk {
                 let mut direct_sky = if enable_sky { 15u8 } else { 0u8 };
                 for wy in (min_y..max_y).rev() {
                     let block = self.get_block_local(x, wy, z);
-                    if enable_sky && block.properties().is_opaque() {
+                    let props = &block.def().properties;
+                    if enable_sky && props.is_opaque() {
                         direct_sky = 0;
                     }
                     self.set_sky_light(x, wy, z, direct_sky);
-                    self.set_block_light(x, wy, z, block.properties().light_emission);
+                    self.set_block_light(x, wy, z, props.light_emission);
                 }
             }
         }
