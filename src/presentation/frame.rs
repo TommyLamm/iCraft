@@ -388,12 +388,12 @@ impl State {
                 if hand_indices_len > 0 && mesh_fits_buffers {
                     self.hand_num_indices = hand_indices_len as u32;
                     let upload_started = Instant::now();
-                    self.queue.write_buffer(
+                    self.queue.as_ref().unwrap().write_buffer(
                         &self.hand_vertex_buffer,
                         0,
                         bytemuck::cast_slice(&self.hand_vertices_scratch),
                     );
-                    self.queue.write_buffer(
+                    self.queue.as_ref().unwrap().write_buffer(
                         &self.hand_index_buffer,
                         0,
                         bytemuck::cast_slice(&self.hand_indices_scratch),
@@ -430,7 +430,7 @@ impl State {
             hand_uniform.inv_view_proj = combined.inverse().to_cols_array_2d();
             hand_uniform.camera_pos = [0.0, 0.0, 0.0, 0.0];
             let upload_started = Instant::now();
-            self.queue.write_buffer(
+            self.queue.as_ref().unwrap().write_buffer(
                 &self.hand_camera_buffer,
                 0,
                 bytemuck::bytes_of(&hand_uniform),
@@ -580,12 +580,12 @@ impl State {
             let ui_line_vert_len = ui_line_vertices.len().min(4096);
 
             let upload_started = Instant::now();
-            self.queue.write_buffer(
+            self.queue.as_ref().unwrap().write_buffer(
                 &self.ui_vertex_buffer,
                 0,
                 bytemuck::cast_slice(&ui_vertices[..ui_vert_len]),
             );
-            self.queue.write_buffer(
+            self.queue.as_ref().unwrap().write_buffer(
                 &self.ui_line_vertex_buffer,
                 0,
                 bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]),
@@ -691,12 +691,12 @@ impl State {
             let ui_vert_len = ui_vertices.len().min(UI_VERTEX_CAPACITY);
             let ui_line_vert_len = ui_line_vertices.len().min(UI_LINE_VERTEX_CAPACITY);
             let upload_started = Instant::now();
-            self.queue.write_buffer(
+            self.queue.as_ref().unwrap().write_buffer(
                 &self.ui_vertex_buffer,
                 0,
                 bytemuck::cast_slice(&ui_vertices[..ui_vert_len]),
             );
-            self.queue.write_buffer(
+            self.queue.as_ref().unwrap().write_buffer(
                 &self.ui_line_vertex_buffer,
                 0,
                 bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]),
@@ -836,12 +836,12 @@ impl State {
             let ui_line_vert_len = ui_line_vertices.len().min(4096);
 
             let upload_started = Instant::now();
-            self.queue.write_buffer(
+            self.queue.as_ref().unwrap().write_buffer(
                 &self.ui_vertex_buffer,
                 0,
                 bytemuck::cast_slice(&ui_vertices[..ui_vert_len]),
             );
-            self.queue.write_buffer(
+            self.queue.as_ref().unwrap().write_buffer(
                 &self.ui_line_vertex_buffer,
                 0,
                 bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]),
@@ -1154,12 +1154,12 @@ impl State {
             let ui_line_vert_len = ui_line_vertices.len().min(4096);
 
             let upload_started = Instant::now();
-            self.queue.write_buffer(
+            self.queue.as_ref().unwrap().write_buffer(
                 &self.ui_vertex_buffer,
                 0,
                 bytemuck::cast_slice(&ui_vertices[..ui_vert_len]),
             );
-            self.queue.write_buffer(
+            self.queue.as_ref().unwrap().write_buffer(
                 &self.ui_line_vertex_buffer,
                 0,
                 bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]),
@@ -3504,7 +3504,7 @@ impl State {
             // Direct path for safety.
             let ring = self.frame_ring_index;
             if self.mob_cuboid_num_instances > 0 {
-                self.queue.write_buffer(
+                self.queue.as_ref().unwrap().write_buffer(
                     &self.mob_cuboid_instance_buffers[ring],
                     0,
                     bytemuck::cast_slice(
@@ -3513,7 +3513,7 @@ impl State {
                 );
             }
             if self.mob_quad_num_instances > 0 {
-                self.queue.write_buffer(
+                self.queue.as_ref().unwrap().write_buffer(
                     &self.mob_quad_instance_buffers[ring],
                     0,
                     bytemuck::cast_slice(
@@ -3522,14 +3522,14 @@ impl State {
                 );
             }
             if !self.particle_instances_scratch.is_empty() {
-                self.queue.write_buffer(
+                self.queue.as_ref().unwrap().write_buffer(
                     &self.particle_instance_buffers[ring],
                     0,
                     bytemuck::cast_slice(&self.particle_instances_scratch),
                 );
             }
             if self.num_ui_vertices > 0 {
-                self.queue.write_buffer(
+                self.queue.as_ref().unwrap().write_buffer(
                     &self.ui_vertex_buffer,
                     0,
                     bytemuck::cast_slice(
@@ -3538,7 +3538,7 @@ impl State {
                 );
             }
             if self.num_ui_line_vertices > 0 {
-                self.queue.write_buffer(
+                self.queue.as_ref().unwrap().write_buffer(
                     &self.ui_line_vertex_buffer,
                     0,
                     bytemuck::cast_slice(
@@ -3547,7 +3547,7 @@ impl State {
                 );
             }
             if self.num_ui_textured_vertices > 0 {
-                self.queue.write_buffer(
+                self.queue.as_ref().unwrap().write_buffer(
                     &self.ui_textured_vertex_buffer,
                     0,
                     bytemuck::cast_slice(
@@ -3561,7 +3561,7 @@ impl State {
 
         let upload_started = Instant::now();
         let ring = self.frame_ring_index;
-        self.queue.write_buffer(
+        self.queue.as_ref().unwrap().write_buffer(
             &self.frame_upload_staging_buffers[ring],
             0,
             &self.frame_upload_cpu,
@@ -3599,6 +3599,8 @@ impl State {
         let render_encode_started = Instant::now();
         let mut encoder = self
             .device
+            .as_ref()
+            .unwrap()
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Render Encoder"),
             });
@@ -3927,9 +3929,9 @@ impl State {
         self.perf_counters.gpu_timestamps_inside_passes = self.gpu_timestamps_inside_passes;
 
         let command_buffer = encoder.finish();
-        self.queue.submit(std::iter::once(command_buffer));
+        self.queue.as_ref().unwrap().submit(std::iter::once(command_buffer));
         let completion_tx = self.gpu_completion_tx.clone();
-        self.queue.on_submitted_work_done(move || {
+        self.queue.as_ref().unwrap().on_submitted_work_done(move || {
             let _ = completion_tx.send(frame_submission_id);
         });
         if let Some(slot_index) = timestamp_readback_slot {

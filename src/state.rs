@@ -1236,7 +1236,7 @@ impl State {
             return;
         }
         let active_chunks = region.active_chunks;
-        let mut rebuilt = RenderRegion::new(&self.device, &self.region_bind_group_layout, coord);
+        let mut rebuilt = RenderRegion::new(self.device.as_ref().unwrap(), &self.region_bind_group_layout, coord);
         rebuilt.active_chunks = active_chunks;
         self.render_regions.insert(coord, rebuilt);
     }
@@ -2126,9 +2126,9 @@ mod camera_perspective_tests {
 
 pub struct State {
     pub window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    surface: Option<wgpu::Surface<'static>>,
+    device: Option<wgpu::Device>,
+    queue: Option<wgpu::Queue>,
     config: wgpu::SurfaceConfiguration,
     pub size: winit::dpi::PhysicalSize<u32>,
     terrain_render_pipeline: wgpu::RenderPipeline,
@@ -2295,6 +2295,7 @@ pub struct State {
     gpu_pass_timing_submission_tag: Option<u64>,
     gpu_timestamps_supported: bool,
     gpu_timestamps_inside_passes: bool,
+    supported_present_modes: Vec<wgpu::PresentMode>,
     terrain_candidates_scratch: Vec<crate::chunk_render::DrawCandidate>,
     terrain_draw_plan_scratch: crate::chunk_render::DrawPlan,
     lod_fills_scratch: Vec<crate::world::SectionKey>,
@@ -2569,7 +2570,35 @@ impl State {
         depth_texture.create_view(&wgpu::TextureViewDescriptor::default())
     }
 
-    pub async fn new(window: Arc<Window>, launch: WorldLaunch, settings: GameSettings) -> Self {
+    pub fn into_gpu_context(mut self) -> crate::presentation::bootstrap::GpuContext {
+        crate::presentation::bootstrap::GpuContext {
+            surface: self
+                .surface
+                .take()
+                .expect("presentation surface already taken"),
+            device: self
+                .device
+                .take()
+                .expect("presentation device already taken"),
+            queue: self
+                .queue
+                .take()
+                .expect("presentation queue already taken"),
+            config: self.config.clone(),
+            size: self.size,
+            supported_present_modes: self.supported_present_modes.clone(),
+            gpu_timestamps_supported: self.gpu_timestamps_supported,
+            gpu_timestamps_inside_passes: self.gpu_timestamps_inside_passes,
+        }
+    }
+
+
+    pub async fn new(
+        window: Arc<Window>,
+        launch: WorldLaunch,
+        settings: GameSettings,
+        gpu: crate::presentation::bootstrap::GpuContext,
+    ) -> Self {
         let role = launch.role.clone();
         let is_client = matches!(role, MultiplayerRole::Client { .. });
         let in_process_authority = matches!(
@@ -2582,9 +2611,10 @@ impl State {
             queue,
             config,
             size,
+            supported_present_modes,
             gpu_timestamps_supported,
             gpu_timestamps_inside_passes,
-        } = crate::presentation::bootstrap::create_gpu_context(&window, &settings).await;
+        } = gpu;
 
         let (gpu_timestamp_query_set, gpu_timestamp_resolve_buffer, gpu_timestamp_readback_slots) =
             if gpu_timestamps_inside_passes {
@@ -3445,9 +3475,9 @@ impl State {
             .map(EmbeddedRuntimeBridge::session_id);
         let mut state = Self {
             window,
-            surface,
-            device,
-            queue,
+            surface: Some(surface),
+            device: Some(device),
+            queue: Some(queue),
             config,
             size,
             terrain_render_pipeline,
@@ -3590,6 +3620,7 @@ impl State {
             gpu_pass_timing_submission_tag: None,
             gpu_timestamps_supported,
             gpu_timestamps_inside_passes,
+            supported_present_modes,
             terrain_candidates_scratch: Vec::with_capacity(256),
             terrain_draw_plan_scratch: crate::chunk_render::DrawPlan::default(),
             lod_fills_scratch: Vec::with_capacity(64),
@@ -5289,8 +5320,8 @@ impl State {
                         continue;
                     };
                     let (levels, upload_metrics) = Self::upload_section_mesh_bundle(
-                        &self.device,
-                        &self.queue,
+                        self.device.as_ref().unwrap(),
+                        self.queue.as_ref().unwrap(),
                         &self.region_bind_group_layout,
                         &mut self.render_regions,
                         section,
@@ -5613,7 +5644,7 @@ impl State {
                     is_underwater,
                 );
                 let upload_started = Instant::now();
-                self.queue.write_buffer(
+                self.queue.as_ref().unwrap().write_buffer(
                     &self.camera_buffer,
                     0,
                     bytemuck::cast_slice(&[self.camera_uniform]),
@@ -6135,7 +6166,7 @@ impl State {
             self.camera_uniform.sun_dir[3] = 1.0;
         }
         let upload_started = Instant::now();
-        self.queue.write_buffer(
+        self.queue.as_ref().unwrap().write_buffer(
             &self.camera_buffer,
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
@@ -6487,12 +6518,12 @@ impl State {
         }
 
         let upload_started = Instant::now();
-        self.queue.write_buffer(
+        self.queue.as_ref().unwrap().write_buffer(
             &self.crack_vertex_buffer,
             0,
             bytemuck::cast_slice(&vertices),
         );
-        self.queue
+        self.queue.as_ref().unwrap()
             .write_buffer(&self.crack_index_buffer, 0, bytemuck::cast_slice(&indices));
 
         Some((
@@ -7776,9 +7807,12 @@ impl State {
             self.size = new_size;
             self.config.width = new_size.width;
             self.config.height = new_size.height;
-            self.surface.configure(&self.device, &self.config);
+            self.surface
+                .as_ref()
+                .expect("presentation surface")
+                .configure(self.device.as_ref().unwrap(), &self.config);
             // Recreate depth texture on resize
-            self.depth_view = Self::create_depth_texture(&self.device, &self.config);
+            self.depth_view = Self::create_depth_texture(self.device.as_ref().unwrap(), &self.config);
         }
     }
 
@@ -7818,7 +7852,7 @@ impl State {
             .iter()
             .any(|slot| slot.mapping.load(Ordering::Acquire))
         {
-            self.device.poll(wgpu::Maintain::Poll);
+            self.device.as_ref().unwrap().poll(wgpu::Maintain::Poll);
         }
 
         let mut newest_sample = None;
@@ -7840,7 +7874,7 @@ impl State {
             let range = slice.get_mapped_range();
             if range.len() == GPU_TIMESTAMP_READBACK_BYTES as usize {
                 let mut pass_timings_ns = [0; 7];
-                let period = f64::from(self.queue.get_timestamp_period());
+                let period = f64::from(self.queue.as_ref().unwrap().get_timestamp_period());
                 for (pass_index, timing) in pass_timings_ns.iter_mut().enumerate() {
                     let start_offset = pass_index * 16;
                     let start = u64::from_ne_bytes(
@@ -7882,7 +7916,11 @@ impl State {
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         self.sync_translation_catalog();
         let allocs_before = crate::perf::thread_alloc_count();
-        let output = self.surface.get_current_texture()?;
+        let output = self
+            .surface
+            .as_ref()
+            .expect("presentation surface")
+            .get_current_texture()?;
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());

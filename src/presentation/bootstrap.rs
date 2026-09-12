@@ -17,8 +17,25 @@ pub(crate) struct GpuContext {
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
     pub size: winit::dpi::PhysicalSize<u32>,
+    pub supported_present_modes: Vec<wgpu::PresentMode>,
     pub gpu_timestamps_supported: bool,
     pub gpu_timestamps_inside_passes: bool,
+}
+
+/// Single present-mode policy for menu and game swapchains.
+pub(crate) fn choose_present_mode(
+    vsync: bool,
+    modes: &[wgpu::PresentMode],
+) -> wgpu::PresentMode {
+    if vsync {
+        wgpu::PresentMode::Fifo
+    } else if modes.contains(&wgpu::PresentMode::Mailbox) {
+        wgpu::PresentMode::Mailbox
+    } else if modes.contains(&wgpu::PresentMode::Immediate) {
+        wgpu::PresentMode::Immediate
+    } else {
+        wgpu::PresentMode::Fifo
+    }
 }
 
 /// Create the desktop wgpu surface, device, and swapchain config.
@@ -26,6 +43,9 @@ pub(crate) struct GpuContext {
 /// The NVIDIA Vulkan ICD crashes during the menu-to-world transition on
 /// this Windows setup. `PRIMARY` still chooses Vulkan first, so force
 /// DX12 here to match the menu and keep other platforms unchanged.
+///
+/// `App` owns one `GpuContext` for the window lifetime; menu↔game
+/// transitions reuse it instead of requesting another adapter/device.
 pub(crate) async fn create_gpu_context(
     window: &Arc<Window>,
     settings: &GameSettings,
@@ -83,27 +103,14 @@ pub(crate) async fn create_gpu_context(
         .copied()
         .find(|f| f.is_srgb())
         .unwrap_or(surface_caps.formats[0]);
+    let supported_present_modes = surface_caps.present_modes.clone();
 
     let config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format: surface_format,
         width: size.width.max(1),
         height: size.height.max(1),
-        present_mode: if settings.vsync {
-            wgpu::PresentMode::Fifo
-        } else if surface_caps
-            .present_modes
-            .contains(&wgpu::PresentMode::Mailbox)
-        {
-            wgpu::PresentMode::Mailbox
-        } else if surface_caps
-            .present_modes
-            .contains(&wgpu::PresentMode::Immediate)
-        {
-            wgpu::PresentMode::Immediate
-        } else {
-            wgpu::PresentMode::Fifo
-        },
+        present_mode: choose_present_mode(settings.vsync, &supported_present_modes),
         alpha_mode: surface_caps.alpha_modes[0],
         view_formats: vec![],
         desired_maximum_frame_latency: 2,
@@ -116,6 +123,7 @@ pub(crate) async fn create_gpu_context(
         queue,
         config,
         size,
+        supported_present_modes,
         gpu_timestamps_supported,
         gpu_timestamps_inside_passes,
     }

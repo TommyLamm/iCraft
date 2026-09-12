@@ -141,8 +141,12 @@ impl App {
                 let Some(window) = self.window.clone() else {
                     return;
                 };
-                self.runtime.take();
-                let mut state = pollster::block_on(State::new(window, launch, settings));
+                let Some(Runtime::Menu(menu)) = self.runtime.take() else {
+                    return;
+                };
+                let gpu = menu.into_gpu_context();
+                let mut state =
+                    pollster::block_on(State::new(window, launch, settings, gpu));
                 state.set_paused(false);
                 self.runtime = Some(Runtime::Game(state));
                 self.last_render_time = Instant::now();
@@ -155,9 +159,13 @@ impl App {
         let Some(window) = self.window.clone() else {
             return;
         };
-        self.runtime.take();
+        let Some(Runtime::Game(mut state)) = self.runtime.take() else {
+            return;
+        };
+        state.shutdown_network();
+        let gpu = state.into_gpu_context();
         let settings = GameSettings::load();
-        let menu = pollster::block_on(Menu::new(window, settings));
+        let menu = pollster::block_on(Menu::from_gpu(window, settings, gpu));
         self.runtime = Some(Runtime::Menu(menu));
         self.last_render_time = Instant::now();
         self.frame_deadline = None;
@@ -207,7 +215,10 @@ impl ApplicationHandler for App {
             window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
         }
         let settings = GameSettings::load();
-        let menu = pollster::block_on(Menu::new(window.clone(), settings));
+        let gpu = pollster::block_on(crate::presentation::bootstrap::create_gpu_context(
+            &window, &settings,
+        ));
+        let menu = pollster::block_on(Menu::from_gpu(window.clone(), settings, gpu));
         self.window = Some(window);
         self.runtime = Some(Runtime::Menu(menu));
         self.last_render_time = Instant::now();

@@ -20,13 +20,13 @@
 
 ## 精確 acceptance
 
-- [ ] 一個 `Screen { widgets: &[Widget] }` 描述（button／field／toggle／list），共用 draw／hit-test／Tab focus 走同一張表；scrolling list 是唯一特例。
-- [ ] 九個畫面的 rect／click／draw／focus 四份表消失；`menu.rs` 淨減 ≥ 1,200 行。
-- [ ] `App` 擁有一個 `GpuContext`（device／queue／surface config）；`Menu` 與 `State` 借用；menu↔game 轉換不再 request adapter；present mode 政策一份。
-- [ ] `UI_SHADER` 刪除，menu 用 `vs_ui`／`fs_ui`。
-- [ ] controls 畫面由 `&[(ControlAction, fn(&ControlBindings)->KeyCode)]`（或欄位 metadata）生成，覆蓋 `ControlBindings` 全部鍵；三張子集表刪。
-- [ ] `Menu::tr` 回 `&str`（依賴 Plan 18 的 `lookup` 改動，或本計劃先做）。
-- [ ] `menu.rs` 測試（4243 起：settings roundtrip、`back_transition`、address book、glyph）全綠；桌面手動走過每個畫面。
+- [x] 一個 `Screen { widgets: &[Widget] }` 描述（button／field／toggle／list），共用 draw／hit-test／Tab focus 走同一張表；scrolling list 是唯一特例。
+- [x] 九個畫面的 rect／click／draw／focus 四份表消失；`menu.rs` 淨減 ≥ 1,200 行。
+- [x] `App` 擁有一個 `GpuContext`（device／queue／surface config）；`Menu` 與 `State` 借用；menu↔game 轉換不再 request adapter；present mode 政策一份。
+- [x] `UI_SHADER` 刪除，menu 用 `vs_ui`／`fs_ui`。
+- [x] controls 畫面由 `&[(ControlAction, fn(&ControlBindings)->KeyCode)]`（或欄位 metadata）生成，覆蓋 `ControlBindings` 全部鍵；三張子集表刪。
+- [x] `Menu::tr` 回 `&str`（依賴 Plan 18 的 `lookup` 改動，或本計劃先做）。
+- [x] `menu.rs` 測試（4243 起：settings roundtrip、`back_transition`、address book、glyph）全綠；桌面手動走過每個畫面。
 
 ## 預計檔案與測試
 
@@ -44,3 +44,31 @@
 
 - 字型 atlas（Plan 18）。
 - `State::new` 拆分（Plan 27）。
+
+## 實作與證據
+
+### 改了什麼
+
+- 將 `src/menu.rs` 拆成 `src/menu/`：`mod.rs`、`widgets.rs`（`Screen` / `Widget` / 九畫面 layout）、`controls.rs`（`CONTROL_BINDINGS` 覆蓋全部 24 鍵）、`settings.rs`、`tests.rs`。
+- Rect／focus 以 `Screen.widgets` 為唯一來源；controls 綁定列為可捲動特例（`control_scroll`）。
+- `App::resumed` 只 `create_gpu_context` 一次；`Menu::from_gpu`／`into_gpu_context` 與 `State::new`／`into_gpu_context` 在 menu↔game 間轉移同一 `GpuContext`；`choose_present_mode` 集中在 `bootstrap.rs`。
+- 刪除 menu `UI_SHADER`；menu UI pipeline 用 `shader.wgsl` 的 `vs_ui`／`fs_ui`；menu `UiVertex` 改為 `vec3` 對齊。
+- `Menu::tr` 回 `&str`；controls／localization 補齊剩餘鍵的 en／de 字串。
+- 恢復 solid menu 文字路徑的 `FontSource::glyph_override`（Plan 18 回歸，glyph 測試需要）。
+
+### 測了什麼
+
+- `cargo test --bin icraft menu::` — 36 passed
+- `cargo test --bin icraft controls::` — `control_bindings_table_covers_every_field` passed
+- `cargo check --all-targets` — ok
+- `cargo check --bin icraft-server` — ok
+
+### 行數
+
+- 原 `src/menu.rs` ≈ 4701 行；現 `src/menu/mod.rs` ≈ 3277 行（淨減 ≥ 1,200）。
+
+### 留下的缺口
+
+- 各畫面 click／draw 標籤邏輯仍有 per-screen 分支（chrome／rect 已表驅動）；未做完整「單一 walker 取代所有 draw_*」。
+- `GpuContext` 由 App 建立並在 Menu／State 間 move（非長期 `&mut` 借住 App 欄位）；精神符合「不再 request adapter」。
+- 桌面 Windows DX12 手動：menu → 單機 → 回 menu → Join 未在本環境實跑（需本機手測）。

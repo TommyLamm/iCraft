@@ -327,7 +327,13 @@ the current dimension `WorldHeight`. Client unload uses
 `chunk_schedule::within_unload_hysteresis`.
 
 Windows menu/game init forces DX12 (Vulkan NVIDIA crash). Swapchains are at
-least 1×1.
+least 1×1. `App` creates one `GpuContext` (`presentation/bootstrap.rs`:
+device / queue / surface / config / present-mode policy) and menu↔game
+transitions move it through `Menu::from_gpu` / `into_gpu_context` and
+`State::new` / `into_gpu_context` — no second `request_adapter`. Menu UI
+uses `shader.wgsl` `vs_ui` / `fs_ui` (no duplicate menu `UI_SHADER`).
+Desktop menu lives under `src/menu/` (`mod.rs`, `widgets.rs` screen
+tables, `controls.rs` binding table, `settings.rs`).
 
 ## World
 
@@ -502,7 +508,7 @@ from `saves/`).
 
 | Area | Files |
 | --- | --- |
-| Desktop loop | `src/main.rs` (`mod accessibility` / `localization` / `advancements` / `weather`; `culling` facade), `src/app.rs`, `src/menu.rs`, `src/state.rs`, `src/audio.rs` |
+| Desktop loop | `src/main.rs` (`mod accessibility` / `localization` / `advancements` / `weather`; `culling` facade), `src/app.rs`, `src/menu/` (widget screens + shared `GpuContext`), `src/state.rs`, `src/audio.rs` |
 | Presentation (desktop-only) | `src/presentation/` — `embedded_runtime.rs`, `network_event.rs`, `frame.rs` are `#[path]` children of `state`. `visibility.rs` (section visibility BFS only; entity LOS worker removed) is loaded via `main.rs`. `gpu_frame_resources` / `presentation_click` are `mod` in `main.rs`; `microbench` is the same behind feature `microbench`. |
 | Authority | `src/authority/` (`tick.rs`, `portals.rs`, `dispatch.rs`, `combat.rs`, `contract.rs`, `fishing.rs`, `interest.rs`, `mining.rs`, `transactions.rs`) |
 | Runtime | `src/server_runtime.rs` plus `ingress.rs`, `projection.rs`, `session_sync.rs`; `src/server_world.rs`; `src/bin/icraft-server.rs` |

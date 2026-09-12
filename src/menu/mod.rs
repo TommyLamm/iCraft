@@ -17,9 +17,38 @@ use winit::event::ElementState;
 use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{Fullscreen, Window};
 
-#[path = "server_address_book.rs"]
+#[path = "../server_address_book.rs"]
 mod server_address_book;
 pub use server_address_book::{AddressBookError, ServerAddressBook, ServerPingResult};
+
+mod controls;
+mod settings;
+mod widgets;
+use controls::{ControlAction, CONTROL_BINDINGS};
+use widgets::*;
+
+
+fn controls_static_focus_count() -> usize {
+    1 + CONTROLS_VISIBLE_ROWS + 1
+}
+
+fn controls_button_rects() -> Vec<MenuRect> {
+    let mut rects = Vec::with_capacity(controls_static_focus_count());
+    rects.push(CONTROLS_SENSITIVITY.rect);
+    for i in 0..CONTROLS_VISIBLE_ROWS {
+        rects.push(control_binding_rect(i));
+    }
+    rects.push(CONTROLS_DONE.rect);
+    rects
+}
+
+fn options_button_rects() -> [MenuRect; 15] {
+    std::array::from_fn(|i| OPTIONS_SCREEN.widgets[i].rect)
+}
+
+fn accessibility_button_rects() -> [MenuRect; 11] {
+    std::array::from_fn(|i| ACCESSIBILITY_SCREEN.widgets[i].rect)
+}
 
 const UI_VERTEX_CAPACITY: usize = 65_536;
 const SETTINGS_FILE: &str = "settings.txt";
@@ -29,671 +58,9 @@ const META_FILE: &str = "world.meta";
 const CURRENT_WORLD_FORMAT_VERSION: u32 = 3;
 const OPTIONS_ROW_TOPS: [f32; 6] = [0.58, 0.38, 0.18, -0.02, -0.22, -0.42];
 
-fn clamp_setting_volume(value: f32, fallback: f32) -> f32 {
-    finite_clamped_setting(value, fallback, 0.0, 1.0)
-}
+pub use settings::{ControlBindings, GameSettings, Language};
+use settings::{cycle_fps_cap, fps_cap_label, key_name, parse_bool, parse_key};
 
-fn finite_clamped_setting(value: f32, fallback: f32, min: f32, max: f32) -> f32 {
-    if value.is_finite() {
-        value.clamp(min, max)
-    } else {
-        fallback
-    }
-}
-
-pub use crate::localization::Language;
-
-#[derive(Debug, Clone)]
-pub struct ControlBindings {
-    pub forward: KeyCode,
-    pub backward: KeyCode,
-    pub left: KeyCode,
-    pub right: KeyCode,
-    pub jump: KeyCode,
-    pub sprint: KeyCode,
-    pub sneak: KeyCode,
-    pub inventory: KeyCode,
-    pub chat: KeyCode,
-    pub time_speed: KeyCode,
-    pub advancements: KeyCode,
-    pub debug: KeyCode,
-    pub perspective: KeyCode,
-    pub gamemode: KeyCode,
-    pub pause: KeyCode,
-    pub hotbar_1: KeyCode,
-    pub hotbar_2: KeyCode,
-    pub hotbar_3: KeyCode,
-    pub hotbar_4: KeyCode,
-    pub hotbar_5: KeyCode,
-    pub hotbar_6: KeyCode,
-    pub hotbar_7: KeyCode,
-    pub hotbar_8: KeyCode,
-    pub hotbar_9: KeyCode,
-}
-
-impl Default for ControlBindings {
-    fn default() -> Self {
-        Self {
-            forward: KeyCode::KeyW,
-            backward: KeyCode::KeyS,
-            left: KeyCode::KeyA,
-            right: KeyCode::KeyD,
-            jump: KeyCode::Space,
-            sprint: KeyCode::ControlLeft,
-            sneak: KeyCode::ShiftLeft,
-            inventory: KeyCode::KeyE,
-            chat: KeyCode::KeyT,
-            time_speed: KeyCode::KeyF,
-            advancements: KeyCode::KeyL,
-            debug: KeyCode::F3,
-            perspective: KeyCode::F5,
-            gamemode: KeyCode::KeyG,
-            pause: KeyCode::Escape,
-            hotbar_1: KeyCode::Digit1,
-            hotbar_2: KeyCode::Digit2,
-            hotbar_3: KeyCode::Digit3,
-            hotbar_4: KeyCode::Digit4,
-            hotbar_5: KeyCode::Digit5,
-            hotbar_6: KeyCode::Digit6,
-            hotbar_7: KeyCode::Digit7,
-            hotbar_8: KeyCode::Digit8,
-            hotbar_9: KeyCode::Digit9,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct GameSettings {
-    pub fov: f32,
-    pub sensitivity: f32,
-    pub render_distance: i32,
-    pub fullscreen: bool,
-    pub vsync: bool,
-    /// Maximum redraw rate; zero means uncapped.
-    pub fps_cap: u32,
-    pub master_volume: f32,
-    pub music_volume: f32,
-    pub sound_volume: f32,
-    pub weather_volume: f32,
-    pub difficulty: Difficulty,
-    pub language: Language,
-    pub controls: ControlBindings,
-    pub mp_host_port: String,
-    pub mp_server_address: String,
-    pub mp_join_port: String,
-    pub mp_username: String,
-    pub entity_distance_scale: f32,
-    pub accessibility: AccessibilitySettings,
-    pub resource_packs: Vec<String>,
-}
-
-impl Default for GameSettings {
-    fn default() -> Self {
-        Self {
-            fov: 70.0,
-            sensitivity: 0.002,
-            render_distance: 8,
-            fullscreen: false,
-            vsync: true,
-            fps_cap: 0,
-            master_volume: 1.0,
-            music_volume: 0.7,
-            sound_volume: 1.0,
-            weather_volume: 0.4,
-            difficulty: Difficulty::Normal,
-            language: Language::English,
-            controls: ControlBindings::default(),
-            mp_host_port: "25565".to_string(),
-            mp_server_address: "127.0.0.1".to_string(),
-            mp_join_port: "25565".to_string(),
-            mp_username: "PLAYER".to_string(),
-            entity_distance_scale: 1.0,
-            accessibility: AccessibilitySettings::default(),
-            resource_packs: Vec::new(),
-        }
-    }
-}
-
-impl GameSettings {
-    pub fn load() -> Self {
-        let mut settings = Self::default();
-        if let Ok(contents) = fs::read_to_string(SETTINGS_FILE) {
-            settings.apply_file_contents(&contents);
-        }
-        if let Ok(contents) = fs::read_to_string(CONTROLS_FILE) {
-            settings.apply_file_contents(&contents);
-        }
-        settings.sanitize_view_settings();
-        settings.render_distance = settings.render_distance.clamp(2, 16);
-        settings.clamp_audio_volumes();
-        settings.accessibility.sanitize();
-        settings
-    }
-
-    #[allow(dead_code)]
-    pub fn from_file_contents(contents: &str) -> Self {
-        let mut settings = Self::default();
-        settings.apply_file_contents(contents);
-        settings.sanitize_view_settings();
-        settings.render_distance = settings.render_distance.clamp(2, 16);
-        settings.clamp_audio_volumes();
-        settings.accessibility.sanitize();
-        settings
-    }
-
-    fn apply_file_contents(&mut self, contents: &str) {
-        for line in contents.lines() {
-            let line = line.trim();
-            if line.starts_with('#') || line.starts_with("//") || line.is_empty() {
-                continue;
-            }
-            let delimiter = if line.contains('=') { '=' } else { ':' };
-            let Some((key, value)) = line.split_once(delimiter) else {
-                continue;
-            };
-            let value = value.trim();
-            match key.trim() {
-                "fov" => self.fov = value.parse().unwrap_or(self.fov),
-                "sensitivity" => self.sensitivity = value.parse().unwrap_or(self.sensitivity),
-                "render_distance" => {
-                    self.render_distance = value.parse().unwrap_or(self.render_distance)
-                }
-                "fullscreen" => self.fullscreen = parse_bool(value, self.fullscreen),
-                "vsync" => self.vsync = parse_bool(value, self.vsync),
-                "fps_cap" => self.fps_cap = value.parse::<u32>().unwrap_or(self.fps_cap),
-                "volume" | "master_volume" => {
-                    self.master_volume = value.parse().unwrap_or(self.master_volume)
-                }
-                "music_volume" => self.music_volume = value.parse().unwrap_or(self.music_volume),
-                "sound_volume" => self.sound_volume = value.parse().unwrap_or(self.sound_volume),
-                "weather_volume" => {
-                    self.weather_volume = value.parse().unwrap_or(self.weather_volume)
-                }
-                "difficulty" => self.difficulty = Difficulty::parse(value),
-                "language" => self.language = Language::parse(value),
-                "key_forward" => set_key(&mut self.controls.forward, value),
-                "key_backward" => set_key(&mut self.controls.backward, value),
-                "key_left" => set_key(&mut self.controls.left, value),
-                "key_right" => set_key(&mut self.controls.right, value),
-                "key_jump" => set_key(&mut self.controls.jump, value),
-                "key_sprint" => set_key(&mut self.controls.sprint, value),
-                "key_sneak" => set_key(&mut self.controls.sneak, value),
-                "key_inventory" => set_key(&mut self.controls.inventory, value),
-                "key_chat" => set_key(&mut self.controls.chat, value),
-                "key_time_speed" => set_key(&mut self.controls.time_speed, value),
-                "key_advancements" => set_key(&mut self.controls.advancements, value),
-                "key_debug" => set_key(&mut self.controls.debug, value),
-                "key_perspective" => set_key(&mut self.controls.perspective, value),
-                "key_gamemode" => set_key(&mut self.controls.gamemode, value),
-                "key_pause" => set_key(&mut self.controls.pause, value),
-                "key_hotbar_1" => set_key(&mut self.controls.hotbar_1, value),
-                "key_hotbar_2" => set_key(&mut self.controls.hotbar_2, value),
-                "key_hotbar_3" => set_key(&mut self.controls.hotbar_3, value),
-                "key_hotbar_4" => set_key(&mut self.controls.hotbar_4, value),
-                "key_hotbar_5" => set_key(&mut self.controls.hotbar_5, value),
-                "key_hotbar_6" => set_key(&mut self.controls.hotbar_6, value),
-                "key_hotbar_7" => set_key(&mut self.controls.hotbar_7, value),
-                "key_hotbar_8" => set_key(&mut self.controls.hotbar_8, value),
-                "key_hotbar_9" => set_key(&mut self.controls.hotbar_9, value),
-                "mp_host_port" => self.mp_host_port = value.to_string(),
-                "mp_server_address" => self.mp_server_address = value.to_string(),
-                "mp_join_port" => self.mp_join_port = value.to_string(),
-                "mp_username" => self.mp_username = value.to_string(),
-                "entity_distance_scale" => {
-                    self.entity_distance_scale = value
-                        .parse::<f32>()
-                        .unwrap_or(self.entity_distance_scale)
-                        .clamp(0.5, 2.0)
-                }
-                "ui_scale" => {
-                    self.accessibility.ui_scale =
-                        value.parse().unwrap_or(self.accessibility.ui_scale)
-                }
-                "chat_scale" => {
-                    self.accessibility.chat_scale =
-                        value.parse().unwrap_or(self.accessibility.chat_scale)
-                }
-                "chat_opacity" => {
-                    self.accessibility.chat_opacity =
-                        value.parse().unwrap_or(self.accessibility.chat_opacity)
-                }
-                "subtitles" => {
-                    self.accessibility.subtitles = parse_bool(value, self.accessibility.subtitles)
-                }
-                "high_contrast" => {
-                    self.accessibility.high_contrast =
-                        parse_bool(value, self.accessibility.high_contrast)
-                }
-                "reduce_flashing" => {
-                    self.accessibility.reduce_flashing =
-                        parse_bool(value, self.accessibility.reduce_flashing)
-                }
-                "toggle_sprint" => {
-                    self.accessibility.toggle_sprint =
-                        parse_bool(value, self.accessibility.toggle_sprint)
-                }
-                "toggle_sneak" => {
-                    self.accessibility.toggle_sneak =
-                        parse_bool(value, self.accessibility.toggle_sneak)
-                }
-                "camera_bobbing" => {
-                    self.accessibility.camera_bobbing =
-                        parse_bool(value, self.accessibility.camera_bobbing)
-                }
-                "damage_tilt" => {
-                    self.accessibility.damage_tilt =
-                        parse_bool(value, self.accessibility.damage_tilt)
-                }
-                "resource_packs" => {
-                    self.resource_packs = value
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|id| !id.is_empty())
-                        .take(32)
-                        .map(str::to_string)
-                        .collect()
-                }
-                _ => {}
-            }
-        }
-    }
-
-    pub fn save(&self) {
-        if let Err(error) =
-            crate::save::atomic_write(SETTINGS_FILE, self.to_file_contents().as_bytes())
-        {
-            eprintln!("[Settings] Could not save settings: {error}");
-        }
-        if let Err(error) =
-            crate::save::atomic_write(CONTROLS_FILE, self.to_controls_file_contents().as_bytes())
-        {
-            eprintln!("[Settings] Could not save controls config: {error}");
-        }
-    }
-
-    fn to_controls_file_contents(&self) -> String {
-        format!(
-            concat!(
-                "# =====================================================================\n",
-                "# iCraft 玩家按鍵設定檔 (Keybindings Configuration)\n",
-                "# =====================================================================\n",
-                "# 本檔案供玩家自由修改遊戲內的所有按鍵綁定。\n",
-                "# 修改存檔後，啟動遊戲將自動載入最新按鍵設定。\n",
-                "#\n",
-                "# 【支援的按鍵名稱 (Supported Key Names)】:\n",
-                "#   - 字母鍵: A, B, C, ..., Z\n",
-                "#   - 數字鍵: 0, 1, 2, ..., 9\n",
-                "#   - 方向鍵: UP, DOWN, LEFT, RIGHT\n",
-                "#   - 修飾鍵: SPACE, LCTRL, RCTRL, LSHIFT, RSHIFT\n",
-                "#   - 控制鍵: ESC, ENTER, TAB, BACKSPACE, F1 ~ F12\n",
-                "# =====================================================================\n\n",
-                "# ---------------------------------------------------------------------\n",
-                "# 1. 角色移動與基本操作 (Movement & Basic Actions)\n",
-                "# ---------------------------------------------------------------------\n\n",
-                "# 前進 (Move Forward)\n",
-                "key_forward = {}\n\n",
-                "# 後退 (Move Backward)\n",
-                "key_backward = {}\n\n",
-                "# 向左平移 (Move Left)\n",
-                "key_left = {}\n\n",
-                "# 向右平移 (Move Right)\n",
-                "key_right = {}\n\n",
-                "# 跳躍 / 創造模式向上飛行 (Jump / Ascend)\n",
-                "key_jump = {}\n\n",
-                "# 疾跑 (Sprint)\n",
-                "key_sprint = {}\n\n",
-                "# 潛行 / 創造模式向下滑行 (Sneak / Descend)\n",
-                "key_sneak = {}\n\n",
-                "# 開啟 / 關閉背包 (Toggle Inventory)\n",
-                "key_inventory = {}\n\n",
-                "# ---------------------------------------------------------------------\n",
-                "# 2. 系統功能與模式切換快捷鍵 (System & Gameplay Hotkeys)\n",
-                "# ---------------------------------------------------------------------\n\n",
-                "# 開啟 / 關閉聊天框 (Open Chat)\n",
-                "key_chat = {}\n\n",
-                "# 時間加速 (Accelerate Time)\n",
-                "key_time_speed = {}\n\n",
-                "# 開啟 / 關閉成就樹 (Advancements Screen)\n",
-                "key_advancements = {}\n\n",
-                "# 開啟 / 關閉 F3 偵錯 Overlay (Debug Info)\n",
-                "key_debug = {}\n\n",
-                "# 切換第一人稱 / 第三人稱視角 (Toggle Camera View)\n",
-                "key_perspective = {}\n\n",
-                "# 切換生存 / 創造遊戲模式 (Toggle Game Mode)\n",
-                "key_gamemode = {}\n\n",
-                "# 暫停選單 / 關閉界面 (Pause Menu / Close UI)\n",
-                "key_pause = {}\n\n",
-                "# ---------------------------------------------------------------------\n",
-                "# 3. 快捷欄物品選擇 1 - 9 (Hotbar Item Selection 1-9)\n",
-                "# ---------------------------------------------------------------------\n\n",
-                "key_hotbar_1 = {}\n",
-                "key_hotbar_2 = {}\n",
-                "key_hotbar_3 = {}\n",
-                "key_hotbar_4 = {}\n",
-                "key_hotbar_5 = {}\n",
-                "key_hotbar_6 = {}\n",
-                "key_hotbar_7 = {}\n",
-                "key_hotbar_8 = {}\n",
-                "key_hotbar_9 = {}\n"
-            ),
-            key_name(self.controls.forward),
-            key_name(self.controls.backward),
-            key_name(self.controls.left),
-            key_name(self.controls.right),
-            key_name(self.controls.jump),
-            key_name(self.controls.sprint),
-            key_name(self.controls.sneak),
-            key_name(self.controls.inventory),
-            key_name(self.controls.chat),
-            key_name(self.controls.time_speed),
-            key_name(self.controls.advancements),
-            key_name(self.controls.debug),
-            key_name(self.controls.perspective),
-            key_name(self.controls.gamemode),
-            key_name(self.controls.pause),
-            key_name(self.controls.hotbar_1),
-            key_name(self.controls.hotbar_2),
-            key_name(self.controls.hotbar_3),
-            key_name(self.controls.hotbar_4),
-            key_name(self.controls.hotbar_5),
-            key_name(self.controls.hotbar_6),
-            key_name(self.controls.hotbar_7),
-            key_name(self.controls.hotbar_8),
-            key_name(self.controls.hotbar_9),
-        )
-    }
-
-    fn to_file_contents(&self) -> String {
-        let mut settings = self.clone();
-        settings.sanitize_view_settings();
-        settings.clamp_audio_volumes();
-        settings.accessibility.sanitize();
-        format!(
-            concat!(
-                "fov:{}\n",
-                "sensitivity:{}\n",
-                "render_distance:{}\n",
-                "fullscreen:{}\n",
-                "vsync:{}\n",
-                "fps_cap:{}\n",
-                "master_volume:{}\n",
-                "music_volume:{}\n",
-                "sound_volume:{}\n",
-                "weather_volume:{}\n",
-                "difficulty:{}\n",
-                "language:{}\n",
-                "key_forward:{}\n",
-                "key_backward:{}\n",
-                "key_left:{}\n",
-                "key_right:{}\n",
-                "key_jump:{}\n",
-                "key_sprint:{}\n",
-                "key_sneak:{}\n",
-                "key_inventory:{}\n",
-                "key_chat:{}\n",
-                "key_advancements:{}\n",
-                "key_debug:{}\n",
-                "key_perspective:{}\n",
-                "key_gamemode:{}\n",
-                "key_pause:{}\n",
-                "mp_host_port:{}\n",
-                "mp_server_address:{}\n",
-                "mp_join_port:{}\n",
-                "mp_username:{}\n",
-                "entity_distance_scale:{}\n",
-                "ui_scale:{}\n",
-                "chat_scale:{}\n",
-                "chat_opacity:{}\n",
-                "subtitles:{}\n",
-                "high_contrast:{}\n",
-                "reduce_flashing:{}\n",
-                "toggle_sprint:{}\n",
-                "toggle_sneak:{}\n",
-                "camera_bobbing:{}\n",
-                "damage_tilt:{}\n",
-                "resource_packs:{}\n"
-            ),
-            settings.fov,
-            settings.sensitivity,
-            settings.render_distance,
-            settings.fullscreen,
-            settings.vsync,
-            settings.fps_cap,
-            settings.master_volume,
-            settings.music_volume,
-            settings.sound_volume,
-            settings.weather_volume,
-            settings.difficulty.as_str(),
-            settings.language.as_str(),
-            key_name(settings.controls.forward),
-            key_name(settings.controls.backward),
-            key_name(settings.controls.left),
-            key_name(settings.controls.right),
-            key_name(settings.controls.jump),
-            key_name(settings.controls.sprint),
-            key_name(settings.controls.sneak),
-            key_name(settings.controls.inventory),
-            key_name(settings.controls.chat),
-            key_name(settings.controls.advancements),
-            key_name(settings.controls.debug),
-            key_name(settings.controls.perspective),
-            key_name(settings.controls.gamemode),
-            key_name(settings.controls.pause),
-            settings.mp_host_port,
-            settings.mp_server_address,
-            settings.mp_join_port,
-            settings.mp_username,
-            settings.entity_distance_scale,
-            settings.accessibility.ui_scale,
-            settings.accessibility.chat_scale,
-            settings.accessibility.chat_opacity,
-            settings.accessibility.subtitles,
-            settings.accessibility.high_contrast,
-            settings.accessibility.reduce_flashing,
-            settings.accessibility.toggle_sprint,
-            settings.accessibility.toggle_sneak,
-            settings.accessibility.camera_bobbing,
-            settings.accessibility.damage_tilt,
-            settings.resource_packs.join(","),
-        )
-    }
-
-    pub fn clamp_audio_volumes(&mut self) {
-        self.master_volume = clamp_setting_volume(self.master_volume, 1.0);
-        self.music_volume = clamp_setting_volume(self.music_volume, 0.7);
-        self.sound_volume = clamp_setting_volume(self.sound_volume, 1.0);
-        self.weather_volume = clamp_setting_volume(self.weather_volume, 0.4);
-    }
-
-    fn sanitize_view_settings(&mut self) {
-        self.fov = finite_clamped_setting(self.fov, 70.0, 30.0, 120.0);
-        self.sensitivity = finite_clamped_setting(self.sensitivity, 0.002, 0.0002, 0.006);
-        self.fps_cap = self.fps_cap.min(240);
-    }
-
-    pub fn effective_sound_volume(&self) -> f32 {
-        clamp_setting_volume(self.master_volume, 1.0) * clamp_setting_volume(self.sound_volume, 1.0)
-    }
-}
-
-fn parse_bool(value: &str, fallback: bool) -> bool {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "true" | "1" | "on" => true,
-        "false" | "0" | "off" => false,
-        _ => fallback,
-    }
-}
-
-const FPS_CAPS: [u32; 4] = [0, 30, 60, 144];
-
-fn cycle_fps_cap(current: u32, delta: i32) -> u32 {
-    let index = FPS_CAPS.iter().position(|&cap| cap == current).unwrap_or(0) as i32;
-    FPS_CAPS[(index + delta).rem_euclid(FPS_CAPS.len() as i32) as usize]
-}
-
-fn fps_cap_label(cap: u32) -> String {
-    if cap == 0 {
-        "UNCAPPED".to_string()
-    } else {
-        format!("{cap}")
-    }
-}
-
-fn set_key(target: &mut KeyCode, value: &str) {
-    if let Some(code) = parse_key(value) {
-        *target = code;
-    }
-}
-
-fn key_name(code: KeyCode) -> &'static str {
-    match code {
-        KeyCode::KeyA => "A",
-        KeyCode::KeyB => "B",
-        KeyCode::KeyC => "C",
-        KeyCode::KeyD => "D",
-        KeyCode::KeyE => "E",
-        KeyCode::KeyF => "F",
-        KeyCode::KeyG => "G",
-        KeyCode::KeyH => "H",
-        KeyCode::KeyI => "I",
-        KeyCode::KeyJ => "J",
-        KeyCode::KeyK => "K",
-        KeyCode::KeyL => "L",
-        KeyCode::KeyM => "M",
-        KeyCode::KeyN => "N",
-        KeyCode::KeyO => "O",
-        KeyCode::KeyP => "P",
-        KeyCode::KeyQ => "Q",
-        KeyCode::KeyR => "R",
-        KeyCode::KeyS => "S",
-        KeyCode::KeyT => "T",
-        KeyCode::KeyU => "U",
-        KeyCode::KeyV => "V",
-        KeyCode::KeyW => "W",
-        KeyCode::KeyX => "X",
-        KeyCode::KeyY => "Y",
-        KeyCode::KeyZ => "Z",
-        KeyCode::Digit0 => "0",
-        KeyCode::Digit1 => "1",
-        KeyCode::Digit2 => "2",
-        KeyCode::Digit3 => "3",
-        KeyCode::Digit4 => "4",
-        KeyCode::Digit5 => "5",
-        KeyCode::Digit6 => "6",
-        KeyCode::Digit7 => "7",
-        KeyCode::Digit8 => "8",
-        KeyCode::Digit9 => "9",
-        KeyCode::Space => "SPACE",
-        KeyCode::ControlLeft => "LCTRL",
-        KeyCode::ControlRight => "RCTRL",
-        KeyCode::ShiftLeft => "LSHIFT",
-        KeyCode::ShiftRight => "RSHIFT",
-        KeyCode::ArrowUp => "UP",
-        KeyCode::ArrowDown => "DOWN",
-        KeyCode::ArrowLeft => "LEFT",
-        KeyCode::ArrowRight => "RIGHT",
-        KeyCode::Escape => "ESC",
-        KeyCode::Enter => "ENTER",
-        KeyCode::Tab => "TAB",
-        KeyCode::Backspace => "BACKSPACE",
-        KeyCode::F1 => "F1",
-        KeyCode::F2 => "F2",
-        KeyCode::F3 => "F3",
-        KeyCode::F4 => "F4",
-        KeyCode::F5 => "F5",
-        KeyCode::F6 => "F6",
-        KeyCode::F7 => "F7",
-        KeyCode::F8 => "F8",
-        KeyCode::F9 => "F9",
-        KeyCode::F10 => "F10",
-        KeyCode::F11 => "F11",
-        KeyCode::F12 => "F12",
-        _ => "KEY",
-    }
-}
-
-fn parse_key(value: &str) -> Option<KeyCode> {
-    let value = value.trim().to_ascii_uppercase();
-    if value.len() == 1 {
-        let ch = value.as_bytes()[0];
-        if ch.is_ascii_alphabetic() {
-            return Some(match ch {
-                b'A' => KeyCode::KeyA,
-                b'B' => KeyCode::KeyB,
-                b'C' => KeyCode::KeyC,
-                b'D' => KeyCode::KeyD,
-                b'E' => KeyCode::KeyE,
-                b'F' => KeyCode::KeyF,
-                b'G' => KeyCode::KeyG,
-                b'H' => KeyCode::KeyH,
-                b'I' => KeyCode::KeyI,
-                b'J' => KeyCode::KeyJ,
-                b'K' => KeyCode::KeyK,
-                b'L' => KeyCode::KeyL,
-                b'M' => KeyCode::KeyM,
-                b'N' => KeyCode::KeyN,
-                b'O' => KeyCode::KeyO,
-                b'P' => KeyCode::KeyP,
-                b'Q' => KeyCode::KeyQ,
-                b'R' => KeyCode::KeyR,
-                b'S' => KeyCode::KeyS,
-                b'T' => KeyCode::KeyT,
-                b'U' => KeyCode::KeyU,
-                b'V' => KeyCode::KeyV,
-                b'W' => KeyCode::KeyW,
-                b'X' => KeyCode::KeyX,
-                b'Y' => KeyCode::KeyY,
-                b'Z' => KeyCode::KeyZ,
-                _ => return None,
-            });
-        }
-        if ch.is_ascii_digit() {
-            return Some(match ch {
-                b'0' => KeyCode::Digit0,
-                b'1' => KeyCode::Digit1,
-                b'2' => KeyCode::Digit2,
-                b'3' => KeyCode::Digit3,
-                b'4' => KeyCode::Digit4,
-                b'5' => KeyCode::Digit5,
-                b'6' => KeyCode::Digit6,
-                b'7' => KeyCode::Digit7,
-                b'8' => KeyCode::Digit8,
-                b'9' => KeyCode::Digit9,
-                _ => return None,
-            });
-        }
-    }
-    match value.as_str() {
-        "SPACE" => Some(KeyCode::Space),
-        "LCTRL" => Some(KeyCode::ControlLeft),
-        "RCTRL" => Some(KeyCode::ControlRight),
-        "LSHIFT" => Some(KeyCode::ShiftLeft),
-        "RSHIFT" => Some(KeyCode::ShiftRight),
-        "UP" => Some(KeyCode::ArrowUp),
-        "DOWN" => Some(KeyCode::ArrowDown),
-        "LEFT" => Some(KeyCode::ArrowLeft),
-        "RIGHT" => Some(KeyCode::ArrowRight),
-        "ESC" | "ESCAPE" => Some(KeyCode::Escape),
-        "ENTER" | "RETURN" => Some(KeyCode::Enter),
-        "TAB" => Some(KeyCode::Tab),
-        "BACKSPACE" => Some(KeyCode::Backspace),
-        "F1" => Some(KeyCode::F1),
-        "F2" => Some(KeyCode::F2),
-        "F3" => Some(KeyCode::F3),
-        "F4" => Some(KeyCode::F4),
-        "F5" => Some(KeyCode::F5),
-        "F6" => Some(KeyCode::F6),
-        "F7" => Some(KeyCode::F7),
-        "F8" => Some(KeyCode::F8),
-        "F9" => Some(KeyCode::F9),
-        "F10" => Some(KeyCode::F10),
-        "F11" => Some(KeyCode::F11),
-        "F12" => Some(KeyCode::F12),
-        _ => None,
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct WorldLaunch {
     pub world_dir: PathBuf,
     pub seed: u32,
@@ -1115,7 +482,7 @@ struct PanoramaUniform {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct UiVertex {
-    position: [f32; 2],
+    position: [f32; 3],
     color: [f32; 4],
 }
 
@@ -1128,10 +495,10 @@ impl UiVertex {
                 wgpu::VertexAttribute {
                     offset: 0,
                     shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x2,
+                    format: wgpu::VertexFormat::Float32x3,
                 },
                 wgpu::VertexAttribute {
-                    offset: 8,
+                    offset: 12,
                     shader_location: 1,
                     format: wgpu::VertexFormat::Float32x4,
                 },
@@ -1175,161 +542,6 @@ impl MenuRect {
     }
 }
 
-const MAIN_BUTTON_RECTS: [MenuRect; 4] = [
-    MenuRect::new(-0.34, 0.34, 0.21, 0.34),
-    MenuRect::new(-0.34, 0.34, 0.03, 0.16),
-    MenuRect::new(-0.34, 0.34, -0.15, -0.02),
-    MenuRect::new(-0.34, 0.34, -0.33, -0.20),
-];
-
-const CONFIRM_DELETE_BUTTON_RECTS: [MenuRect; 2] = [
-    MenuRect::new(-0.48, -0.02, -0.16, -0.02),
-    MenuRect::new(0.02, 0.48, -0.16, -0.02),
-];
-
-const CREATE_WORLD_RECTS: [MenuRect; 11] = [
-    MenuRect::new(-0.52, 0.52, 0.34, 0.47),
-    MenuRect::new(-0.52, 0.52, 0.13, 0.26),
-    MenuRect::new(-0.52, 0.52, -0.08, 0.05),
-    MenuRect::new(-0.52, 0.52, -0.29, -0.16),
-    MenuRect::new(-0.52, 0.52, -0.42, -0.30),
-    MenuRect::new(-0.52, -0.02, -0.54, -0.43),
-    MenuRect::new(0.02, 0.52, -0.54, -0.43),
-    MenuRect::new(-0.52, -0.02, -0.69, -0.58),
-    MenuRect::new(0.02, 0.52, -0.69, -0.58),
-    MenuRect::new(-0.52, -0.02, -0.84, -0.71),
-    MenuRect::new(0.02, 0.52, -0.84, -0.71),
-];
-
-const OPTIONS_BOTTOM_RECTS: [MenuRect; 3] = [
-    MenuRect::new(-0.82, -0.30, -0.78, -0.64),
-    MenuRect::new(-0.25, 0.25, -0.78, -0.64),
-    MenuRect::new(0.30, 0.82, -0.78, -0.64),
-];
-
-fn options_button_rects() -> [MenuRect; 15] {
-    let mut rects = [MenuRect::new(0.0, 0.0, 0.0, 0.0); 15];
-    for row in 0..6 {
-        let top = OPTIONS_ROW_TOPS[row];
-        rects[row] = MenuRect::new(-0.82, -0.05, top - 0.13, top);
-        rects[row + 6] = MenuRect::new(0.05, 0.82, top - 0.13, top);
-    }
-    rects[12] = OPTIONS_BOTTOM_RECTS[0];
-    rects[13] = OPTIONS_BOTTOM_RECTS[1];
-    rects[14] = OPTIONS_BOTTOM_RECTS[2];
-    rects
-}
-
-const CONTROLS_SENSITIVITY_RECT: MenuRect = MenuRect::new(-0.48, 0.48, 0.49, 0.62);
-const CONTROLS_DONE_RECT: MenuRect = MenuRect::new(-0.25, 0.25, -0.78, -0.64);
-
-fn control_button_rect(index: usize) -> MenuRect {
-    let column = index / 4;
-    let row = index % 4;
-    let (x0, x1) = if column == 0 {
-        (-0.78, -0.04)
-    } else {
-        (0.04, 0.78)
-    };
-    let top = 0.38 - row as f32 * 0.19;
-    MenuRect::new(x0, x1, top - 0.14, top)
-}
-
-fn controls_button_rects() -> [MenuRect; 10] {
-    [
-        CONTROLS_SENSITIVITY_RECT,
-        control_button_rect(0),
-        control_button_rect(1),
-        control_button_rect(2),
-        control_button_rect(3),
-        control_button_rect(4),
-        control_button_rect(5),
-        control_button_rect(6),
-        control_button_rect(7),
-        CONTROLS_DONE_RECT,
-    ]
-}
-
-const ACCESSIBILITY_DONE_RECT: MenuRect = MenuRect::new(-0.25, 0.25, -0.78, -0.64);
-
-fn accessibility_button_rect(index: usize) -> MenuRect {
-    let column = index / 5;
-    let row = index % 5;
-    let (x0, x1) = if column == 0 {
-        (-0.82, -0.05)
-    } else {
-        (0.05, 0.82)
-    };
-    let top = 0.56 - row as f32 * 0.18;
-    MenuRect::new(x0, x1, top - 0.13, top)
-}
-
-fn accessibility_button_rects() -> [MenuRect; 11] {
-    [
-        accessibility_button_rect(0),
-        accessibility_button_rect(1),
-        accessibility_button_rect(2),
-        accessibility_button_rect(3),
-        accessibility_button_rect(4),
-        accessibility_button_rect(5),
-        accessibility_button_rect(6),
-        accessibility_button_rect(7),
-        accessibility_button_rect(8),
-        accessibility_button_rect(9),
-        ACCESSIBILITY_DONE_RECT,
-    ]
-}
-
-const RESOURCE_PACKS_BOTTOM_RECTS: [MenuRect; 3] = [
-    MenuRect::new(-0.78, -0.28, -0.78, -0.64),
-    MenuRect::new(-0.22, 0.22, -0.78, -0.64),
-    MenuRect::new(0.28, 0.78, -0.78, -0.64),
-];
-
-fn resource_pack_item_rect(visible_index: isize) -> MenuRect {
-    let top = 0.56 - visible_index as f32 * 0.14;
-    MenuRect::new(-0.78, 0.78, top - 0.11, top)
-}
-
-const WORLDS_BOTTOM_RECTS: [MenuRect; 6] = [
-    MenuRect::new(-0.72, -0.27, -0.64, -0.51),
-    MenuRect::new(-0.23, 0.23, -0.64, -0.51),
-    MenuRect::new(0.27, 0.72, -0.64, -0.51),
-    MenuRect::new(-0.72, -0.27, -0.84, -0.72),
-    MenuRect::new(-0.23, 0.23, -0.84, -0.72),
-    MenuRect::new(0.27, 0.72, -0.84, -0.72),
-];
-
-fn world_item_rect(visible_index: isize) -> MenuRect {
-    let top = 0.58 - visible_index as f32 * 0.19;
-    MenuRect::new(-0.72, 0.72, top - 0.15, top)
-}
-
-const MULTIPLAYER_MODE_RECTS: [MenuRect; 2] = [
-    MenuRect::new(-0.52, -0.02, 0.45, 0.58),
-    MenuRect::new(0.02, 0.52, 0.45, 0.58),
-];
-
-const MULTIPLAYER_HOST_PORT_RECT: MenuRect = MenuRect::new(-0.52, 0.52, 0.17, 0.30);
-
-const MULTIPLAYER_JOIN_FIELD_RECTS: [MenuRect; 3] = [
-    MenuRect::new(-0.56, -0.02, 0.17, 0.30),
-    MenuRect::new(-0.56, -0.02, -0.04, 0.09),
-    MenuRect::new(-0.56, -0.02, -0.25, -0.12),
-];
-
-const MULTIPLAYER_PING_RECT: MenuRect = MenuRect::new(0.04, 0.56, -0.24, -0.11);
-
-const MULTIPLAYER_BOTTOM_RECTS: [MenuRect; 2] = [
-    MenuRect::new(-0.52, -0.02, -0.58, -0.45),
-    MenuRect::new(0.02, 0.52, -0.58, -0.45),
-];
-
-fn recent_server_item_rect(index: usize) -> MenuRect {
-    let top = 0.34 - index as f32 * 0.10;
-    MenuRect::new(0.04, 0.56, top - 0.08, top)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TextField {
     WorldName,
@@ -1344,18 +556,6 @@ enum TextField {
 enum MultiplayerMode {
     Host,
     Join,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ControlAction {
-    Forward,
-    Backward,
-    Left,
-    Right,
-    Jump,
-    Sprint,
-    Sneak,
-    Inventory,
 }
 
 fn back_transition(
@@ -1432,6 +632,7 @@ pub struct Menu {
     selected_world: Option<PathBuf>,
     world_scroll: usize,
     resource_pack_scroll: usize,
+    control_scroll: usize,
     create_name: String,
     create_seed: String,
     create_mode: GameMode,
@@ -1457,6 +658,8 @@ pub struct Menu {
     font_source: FontSource,
     focus_index: usize,
     supported_present_modes: Vec<wgpu::PresentMode>,
+    gpu_timestamps_supported: bool,
+    gpu_timestamps_inside_passes: bool,
 }
 
 impl Menu {
@@ -1482,64 +685,51 @@ impl Menu {
         };
     }
 
-    fn tr(&self, key: &str) -> String {
-        self.catalog.lookup(key).to_string()
+    fn tr<'a>(&'a self, key: &'a str) -> &'a str {
+        self.catalog.lookup(key)
     }
 
-    fn on_off_label(&self, value: bool) -> String {
+    fn on_off_label(&self, value: bool) -> &str {
         self.tr(if value { "menu.on" } else { "menu.off" })
     }
 
+    pub fn into_gpu_context(self) -> crate::presentation::bootstrap::GpuContext {
+        crate::presentation::bootstrap::GpuContext {
+            surface: self.surface,
+            device: self.device,
+            queue: self.queue,
+            config: self.config,
+            size: self.size,
+            supported_present_modes: self.supported_present_modes,
+            gpu_timestamps_supported: self.gpu_timestamps_supported,
+            gpu_timestamps_inside_passes: self.gpu_timestamps_inside_passes,
+        }
+    }
+
     pub async fn new(window: Arc<Window>, settings: GameSettings) -> Self {
+        let gpu = crate::presentation::bootstrap::create_gpu_context(&window, &settings).await;
+        Self::from_gpu(window, settings, gpu).await
+    }
+
+    pub async fn from_gpu(
+        window: Arc<Window>,
+        settings: GameSettings,
+        gpu: crate::presentation::bootstrap::GpuContext,
+    ) -> Self {
         window.set_cursor_visible(true);
         let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
         apply_fullscreen(&window, settings.fullscreen);
-        let size = window.inner_size();
-        // On this Windows/NVIDIA setup the Vulkan ICD crashes while the game
-        // surface is created. `PRIMARY` still prefers Vulkan, so explicitly
-        // select DX12 on Windows and use the normal primary backends elsewhere.
-        let backends = if cfg!(target_os = "windows") {
-            wgpu::Backends::DX12
-        } else {
-            wgpu::Backends::PRIMARY
-        };
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends,
-            ..Default::default()
-        });
-        let surface = instance.create_surface(window.clone()).unwrap();
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await
-            .expect("No compatible graphics adapter found");
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default(), None)
-            .await
-            .expect("Could not create graphics device");
-        let caps = surface.get_capabilities(&adapter);
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|format| format.is_srgb())
-            .unwrap_or(caps.formats[0]);
-        let supported_present_modes = caps.present_modes.clone();
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            present_mode: present_mode(settings.vsync, &caps.present_modes),
-            alpha_mode: caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-        surface.configure(&device, &config);
-
+        let crate::presentation::bootstrap::GpuContext {
+            surface,
+            device,
+            queue,
+            config,
+            size,
+            supported_present_modes,
+            gpu_timestamps_supported,
+            gpu_timestamps_inside_passes,
+        } = gpu;
+        let format = config.format;
         let panorama_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Menu Panorama Shader"),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(PANORAMA_SHADER)),
@@ -1606,7 +796,9 @@ impl Menu {
 
         let ui_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Menu UI Shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(UI_SHADER)),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
+                "../shader.wgsl"
+            ))),
         });
         let ui_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Menu UI Pipeline Layout"),
@@ -1618,12 +810,12 @@ impl Menu {
             layout: Some(&ui_layout),
             vertex: wgpu::VertexState {
                 module: &ui_shader,
-                entry_point: "vs_main",
+                entry_point: "vs_ui",
                 buffers: &[UiVertex::desc()],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &ui_shader,
-                entry_point: "fs_main",
+                entry_point: "fs_ui",
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -1678,6 +870,7 @@ impl Menu {
             selected_world: None,
             world_scroll: 0,
             resource_pack_scroll: 0,
+            control_scroll: 0,
             create_name: "NEW WORLD".to_string(),
             create_seed: String::new(),
             create_mode: GameMode::Survival,
@@ -1703,6 +896,8 @@ impl Menu {
             font_source,
             focus_index: 0,
             supported_present_modes,
+            gpu_timestamps_supported,
+            gpu_timestamps_inside_passes,
         }
     }
 
@@ -1730,6 +925,14 @@ impl Menu {
                 let max_scroll = self.worlds.len() - 5;
                 self.world_scroll =
                     (self.world_scroll as i32 + direction).clamp(0, max_scroll as i32) as usize;
+            }
+            MenuScreen::Controls => {
+                let max_scroll = CONTROL_BINDINGS.len().saturating_sub(CONTROLS_VISIBLE_ROWS);
+                if direction < 0 {
+                    self.control_scroll = self.control_scroll.saturating_sub(1);
+                } else {
+                    self.control_scroll = (self.control_scroll + 1).min(max_scroll);
+                }
             }
             MenuScreen::ResourcePacks => {
                 let count = self.resource_packs.available().len();
@@ -1927,9 +1130,9 @@ impl Menu {
 
     fn focus_count(&self) -> usize {
         match self.screen {
-            MenuScreen::Main => MAIN_BUTTON_RECTS.len(),
+            MenuScreen::Main => MAIN_SCREEN_RECTS.len(),
             MenuScreen::Options => options_button_rects().len(),
-            MenuScreen::Controls => controls_button_rects().len(),
+            MenuScreen::Controls => controls_static_focus_count(),
             MenuScreen::Accessibility => accessibility_button_rects().len(),
             MenuScreen::ResourcePacks => {
                 self.resource_packs.available().len() + RESOURCE_PACKS_BOTTOM_RECTS.len()
@@ -1939,14 +1142,14 @@ impl Menu {
                 self.server_address_book.addresses().len(),
             ),
             MenuScreen::Worlds => self.worlds.len() + WORLDS_BOTTOM_RECTS.len(),
-            MenuScreen::CreateWorld => CREATE_WORLD_RECTS.len(),
-            MenuScreen::ConfirmDelete => CONFIRM_DELETE_BUTTON_RECTS.len(),
+            MenuScreen::CreateWorld => CREATE_WORLD_SCREEN_RECTS.len(),
+            MenuScreen::ConfirmDelete => CONFIRM_DELETE_RECTS.len(),
         }
     }
 
     fn focus_rect(&self) -> Option<[f32; 4]> {
         let rects = match self.screen {
-            MenuScreen::Main => MAIN_BUTTON_RECTS.iter().map(|r| r.as_array()).collect(),
+            MenuScreen::Main => MAIN_SCREEN_RECTS.iter().map(|r| r.as_array()).collect(),
             MenuScreen::Options => options_button_rects()
                 .iter()
                 .map(|r| r.as_array())
@@ -1983,8 +1186,8 @@ impl Menu {
                 rects.extend(WORLDS_BOTTOM_RECTS.iter().map(|r| r.as_array()));
                 rects
             }
-            MenuScreen::CreateWorld => CREATE_WORLD_RECTS.iter().map(|r| r.as_array()).collect(),
-            MenuScreen::ConfirmDelete => CONFIRM_DELETE_BUTTON_RECTS
+            MenuScreen::CreateWorld => CREATE_WORLD_SCREEN_RECTS.iter().map(|r| r.as_array()).collect(),
+            MenuScreen::ConfirmDelete => CONFIRM_DELETE_RECTS
                 .iter()
                 .map(|r| r.as_array())
                 .collect(),
@@ -1999,18 +1202,18 @@ impl Menu {
         self.message = None;
         match self.screen {
             MenuScreen::Main => {
-                if MAIN_BUTTON_RECTS[0].contains(x, y) {
+                if MAIN_SCREEN_RECTS[0].contains(x, y) {
                     self.selected_role = MultiplayerRole::Singleplayer;
                     self.worlds = discover_worlds();
                     self.selected_world = self.worlds.first().map(|world| world.directory.clone());
                     self.world_scroll = 0;
                     self.screen = MenuScreen::Worlds;
-                } else if MAIN_BUTTON_RECTS[1].contains(x, y) {
+                } else if MAIN_SCREEN_RECTS[1].contains(x, y) {
                     self.active_field = None;
                     self.screen = MenuScreen::Multiplayer;
-                } else if MAIN_BUTTON_RECTS[2].contains(x, y) {
+                } else if MAIN_SCREEN_RECTS[2].contains(x, y) {
                     self.screen = MenuScreen::Options;
-                } else if MAIN_BUTTON_RECTS[3].contains(x, y) {
+                } else if MAIN_SCREEN_RECTS[3].contains(x, y) {
                     return MenuAction::Quit;
                 }
             }
@@ -2070,7 +1273,7 @@ impl Menu {
                         }
                     };
                     let Some(role) = role else {
-                        self.message = Some(self.tr("menu.enter_valid_multiplayer"));
+                        self.message = Some(self.tr("menu.enter_valid_multiplayer").to_string());
                         return MenuAction::None;
                     };
                     let is_client = matches!(role, MultiplayerRole::Client { .. });
@@ -2128,7 +1331,7 @@ impl Menu {
                         match copy_world(&directory, &destination) {
                             Ok(()) => {
                                 self.worlds = discover_worlds();
-                                self.message = Some(self.tr("menu.world_copied"));
+                                self.message = Some(self.tr("menu.world_copied").to_string());
                             }
                             Err(error) => self.message = Some(format!("COPY FAILED: {error}")),
                         }
@@ -2143,7 +1346,7 @@ impl Menu {
                         match backup_world(&directory, &destination) {
                             Ok(()) => {
                                 self.worlds = discover_worlds();
-                                self.message = Some(self.tr("menu.world_backed_up"));
+                                self.message = Some(self.tr("menu.world_backed_up").to_string());
                             }
                             Err(error) => self.message = Some(format!("BACKUP FAILED: {error}")),
                         }
@@ -2153,40 +1356,40 @@ impl Menu {
                 }
             }
             MenuScreen::CreateWorld => {
-                if CREATE_WORLD_RECTS[0].contains(x, y) {
+                if CREATE_WORLD_SCREEN_RECTS[0].contains(x, y) {
                     self.activate_field(TextField::WorldName);
-                } else if CREATE_WORLD_RECTS[1].contains(x, y) {
+                } else if CREATE_WORLD_SCREEN_RECTS[1].contains(x, y) {
                     self.activate_field(TextField::Seed);
-                } else if CREATE_WORLD_RECTS[2].contains(x, y) {
+                } else if CREATE_WORLD_SCREEN_RECTS[2].contains(x, y) {
                     self.create_mode = match self.create_mode {
                         GameMode::Survival => GameMode::Creative,
                         GameMode::Creative => GameMode::Adventure,
                         GameMode::Adventure => GameMode::Spectator,
                         GameMode::Spectator => GameMode::Survival,
                     };
-                } else if CREATE_WORLD_RECTS[3].contains(x, y) {
+                } else if CREATE_WORLD_SCREEN_RECTS[3].contains(x, y) {
                     self.create_difficulty =
                         self.create_difficulty.step(if x < 0.0 { -1 } else { 1 });
-                } else if CREATE_WORLD_RECTS[4].contains(x, y) {
+                } else if CREATE_WORLD_SCREEN_RECTS[4].contains(x, y) {
                     self.create_world_type = match self.create_world_type {
                         WorldType::Default => WorldType::Superflat,
                         WorldType::Superflat => WorldType::Default,
                     };
-                } else if CREATE_WORLD_RECTS[5].contains(x, y) {
+                } else if CREATE_WORLD_SCREEN_RECTS[5].contains(x, y) {
                     self.create_generate_structures = !self.create_generate_structures;
-                } else if CREATE_WORLD_RECTS[6].contains(x, y) {
+                } else if CREATE_WORLD_SCREEN_RECTS[6].contains(x, y) {
                     self.create_hardcore = !self.create_hardcore;
                     if self.create_hardcore {
                         self.create_mode = GameMode::Survival;
                         self.create_difficulty = Difficulty::Hard;
                     }
-                } else if CREATE_WORLD_RECTS[7].contains(x, y) {
+                } else if CREATE_WORLD_SCREEN_RECTS[7].contains(x, y) {
                     self.create_bonus_chest = !self.create_bonus_chest;
-                } else if CREATE_WORLD_RECTS[8].contains(x, y) {
+                } else if CREATE_WORLD_SCREEN_RECTS[8].contains(x, y) {
                     self.create_cheats = !self.create_cheats;
-                } else if CREATE_WORLD_RECTS[9].contains(x, y) {
+                } else if CREATE_WORLD_SCREEN_RECTS[9].contains(x, y) {
                     return self.create_world();
-                } else if CREATE_WORLD_RECTS[10].contains(x, y) {
+                } else if CREATE_WORLD_SCREEN_RECTS[10].contains(x, y) {
                     self.active_field = None;
                     self.screen = MenuScreen::Worlds;
                 }
@@ -2201,29 +1404,23 @@ impl Menu {
                     self.settings.save();
                     return MenuAction::None;
                 }
-                let actions = [
-                    ControlAction::Forward,
-                    ControlAction::Backward,
-                    ControlAction::Left,
-                    ControlAction::Right,
-                    ControlAction::Jump,
-                    ControlAction::Sprint,
-                    ControlAction::Sneak,
-                    ControlAction::Inventory,
-                ];
-                for (index, action) in actions.into_iter().enumerate() {
+                let visible = CONTROL_BINDINGS
+                    .iter()
+                    .skip(self.control_scroll)
+                    .take(CONTROLS_VISIBLE_ROWS);
+                for (index, meta) in visible.enumerate() {
                     if rects[1 + index].contains(x, y) {
-                        self.rebinding = Some(action);
+                        self.rebinding = Some(meta.action);
                     }
                 }
-                if rects[9].contains(x, y) {
+                if rects.last().is_some_and(|rect| rect.contains(x, y)) {
                     self.back();
                 }
             }
             MenuScreen::Accessibility => self.handle_accessibility_click(x, y),
             MenuScreen::ResourcePacks => self.handle_resource_pack_click(x, y),
             MenuScreen::ConfirmDelete => {
-                if CONFIRM_DELETE_BUTTON_RECTS[0].contains(x, y) {
+                if CONFIRM_DELETE_RECTS[0].contains(x, y) {
                     if let Some(directory) = self.selected_world.as_deref() {
                         if let Some(world) = world_index_by_directory(&self.worlds, directory)
                             .and_then(|index| self.worlds.get(index))
@@ -2239,7 +1436,7 @@ impl Menu {
                     self.selected_world = self.worlds.first().map(|world| world.directory.clone());
                     self.world_scroll = self.world_scroll.min(self.worlds.len().saturating_sub(5));
                     self.screen = MenuScreen::Worlds;
-                } else if CONFIRM_DELETE_BUTTON_RECTS[1].contains(x, y) {
+                } else if CONFIRM_DELETE_RECTS[1].contains(x, y) {
                     self.screen = MenuScreen::Worlds;
                 }
             }
@@ -2301,7 +1498,7 @@ impl Menu {
 
     fn ping_selected_server(&mut self) {
         let Some(target) = self.join_target() else {
-            self.message = Some(self.tr("menu.enter_valid_multiplayer"));
+            self.message = Some(self.tr("menu.enter_valid_multiplayer").to_string());
             return;
         };
         let result = self
@@ -2506,6 +1703,10 @@ impl Menu {
     }
 
     fn control_mut(&mut self, action: ControlAction) -> &mut KeyCode {
+        let _ = CONTROL_BINDINGS
+            .iter()
+            .find(|meta| meta.action == action)
+            .expect("control action must be in CONTROL_BINDINGS");
         match action {
             ControlAction::Forward => &mut self.settings.controls.forward,
             ControlAction::Backward => &mut self.settings.controls.backward,
@@ -2515,6 +1716,22 @@ impl Menu {
             ControlAction::Sprint => &mut self.settings.controls.sprint,
             ControlAction::Sneak => &mut self.settings.controls.sneak,
             ControlAction::Inventory => &mut self.settings.controls.inventory,
+            ControlAction::Chat => &mut self.settings.controls.chat,
+            ControlAction::TimeSpeed => &mut self.settings.controls.time_speed,
+            ControlAction::Advancements => &mut self.settings.controls.advancements,
+            ControlAction::Debug => &mut self.settings.controls.debug,
+            ControlAction::Perspective => &mut self.settings.controls.perspective,
+            ControlAction::Gamemode => &mut self.settings.controls.gamemode,
+            ControlAction::Pause => &mut self.settings.controls.pause,
+            ControlAction::Hotbar1 => &mut self.settings.controls.hotbar_1,
+            ControlAction::Hotbar2 => &mut self.settings.controls.hotbar_2,
+            ControlAction::Hotbar3 => &mut self.settings.controls.hotbar_3,
+            ControlAction::Hotbar4 => &mut self.settings.controls.hotbar_4,
+            ControlAction::Hotbar5 => &mut self.settings.controls.hotbar_5,
+            ControlAction::Hotbar6 => &mut self.settings.controls.hotbar_6,
+            ControlAction::Hotbar7 => &mut self.settings.controls.hotbar_7,
+            ControlAction::Hotbar8 => &mut self.settings.controls.hotbar_8,
+            ControlAction::Hotbar9 => &mut self.settings.controls.hotbar_9,
         }
     }
 
@@ -2587,7 +1804,7 @@ impl Menu {
             MenuScreen::Main => {
                 draw_logo(vertices, aspect, &self.font_source);
                 let [x, y] = self.mouse_ndc;
-                for rect in MAIN_BUTTON_RECTS {
+                for rect in MAIN_SCREEN_RECTS {
                     draw_button(
                         vertices,
                         rect.x0,
@@ -2849,12 +2066,12 @@ impl Menu {
         }
 
         let confirm_label = match self.multiplayer_mode {
-            MultiplayerMode::Host => self.tr("menu.select_world"),
-            MultiplayerMode::Join => self.tr("menu.connect"),
+            MultiplayerMode::Host => self.tr("menu.select_world").to_string(),
+            MultiplayerMode::Join => self.tr("menu.connect").to_string(),
         };
         for (rect, label) in MULTIPLAYER_BOTTOM_RECTS
             .iter()
-            .zip([confirm_label, self.tr("menu.back")])
+            .zip([confirm_label, self.tr("menu.back").to_string()])
         {
             let hover = rect.contains(x, y);
             draw_button(vertices, rect.x0, rect.x1, rect.y0, rect.y1, hover);
@@ -2960,9 +2177,9 @@ impl Menu {
             );
         }
         for (rect, label) in WORLDS_BOTTOM_RECTS[0..3].iter().zip([
-            self.tr("menu.play_selected"),
-            self.tr("menu.create_new_world"),
-            self.tr("menu.delete"),
+            self.tr("menu.play_selected").to_string(),
+            self.tr("menu.create_new_world").to_string(),
+            self.tr("menu.delete").to_string(),
         ]) {
             draw_button(
                 vertices,
@@ -2985,9 +2202,9 @@ impl Menu {
             );
         }
         for (rect, label) in WORLDS_BOTTOM_RECTS[3..6].iter().zip([
-            self.tr("menu.copy"),
-            self.tr("menu.backup"),
-            self.tr("menu.back"),
+            self.tr("menu.copy").to_string(),
+            self.tr("menu.backup").to_string(),
+            self.tr("menu.back").to_string(),
         ]) {
             draw_button(
                 vertices,
@@ -3022,7 +2239,7 @@ impl Menu {
             [1.0; 4],
             &self.font_source,
         );
-        let rects = CREATE_WORLD_RECTS;
+        let rects = CREATE_WORLD_SCREEN_RECTS;
         let [x, y] = self.mouse_ndc;
         draw_field(
             vertices,
@@ -3037,7 +2254,7 @@ impl Menu {
             &self.font_source,
         );
         let seed = if self.create_seed.is_empty() {
-            self.tr("menu.random")
+            self.tr("menu.random").to_string()
         } else {
             self.create_seed.clone()
         };
@@ -3294,7 +2511,7 @@ impl Menu {
                 "menu.language",
                 &[("value", self.settings.language.as_str())],
             ),
-            self.tr("menu.accessibility"),
+            self.tr("menu.accessibility").to_string(),
         ];
         let rects = options_button_rects();
         let [x, y] = self.mouse_ndc;
@@ -3342,10 +2559,10 @@ impl Menu {
                 &self.font_source,
             );
         }
-        for (rect, label) in OPTIONS_BOTTOM_RECTS.iter().zip([
-            self.tr("menu.resource_packs"),
-            self.tr("menu.controls"),
-            self.tr("menu.done"),
+        for (rect, label) in OPTIONS_BOTTOM_SCREEN_RECTS.iter().zip([
+            self.tr("menu.resource_packs").to_string(),
+            self.tr("menu.controls").to_string(),
+            self.tr("menu.done").to_string(),
         ]) {
             draw_button(
                 vertices,
@@ -3591,9 +2808,9 @@ impl Menu {
             );
         }
         for (rect, label) in RESOURCE_PACKS_BOTTOM_RECTS.iter().zip([
-            self.tr("menu.apply"),
-            self.tr("menu.reload"),
-            self.tr("menu.back"),
+            self.tr("menu.apply").to_string(),
+            self.tr("menu.reload").to_string(),
+            self.tr("menu.back").to_string(),
         ]) {
             draw_button(
                 vertices,
@@ -3667,19 +2884,13 @@ impl Menu {
             [1.0; 4],
             &self.font_source,
         );
-        let actions = [
-            ControlAction::Forward,
-            ControlAction::Backward,
-            ControlAction::Left,
-            ControlAction::Right,
-            ControlAction::Jump,
-            ControlAction::Sprint,
-            ControlAction::Sneak,
-            ControlAction::Inventory,
-        ];
-        for (index, action) in actions.into_iter().enumerate() {
+        let visible = CONTROL_BINDINGS
+            .iter()
+            .skip(self.control_scroll)
+            .take(CONTROLS_VISIBLE_ROWS);
+        for (index, meta) in visible.enumerate() {
             let rect = rects[1 + index];
-            let active = self.rebinding == Some(action);
+            let active = self.rebinding == Some(meta.action);
             draw_button_state(
                 vertices,
                 rect.x0,
@@ -3690,16 +2901,17 @@ impl Menu {
                 active,
             );
             let value = if active {
-                self.tr("menu.press_a_key")
+                self.tr("menu.press_a_key").to_string()
             } else {
-                key_name(self.control(action)).to_string()
+                key_name(self.control(meta.action)).to_string()
             };
+            let action_label = control_label(&self.catalog, meta.action);
             draw_centered_text_in(
                 vertices,
                 &self.catalog.format_lookup(
                     "menu.control_value",
                     &[
-                        ("action", &control_label(&self.catalog, action)),
+                        ("action", action_label),
                         ("value", &value),
                     ],
                 ),
@@ -3712,13 +2924,14 @@ impl Menu {
                 &self.font_source,
             );
         }
+        let done = rects.last().copied().unwrap_or(CONTROLS_DONE.rect);
         draw_button(
             vertices,
-            rects[9].x0,
-            rects[9].x1,
-            rects[9].y0,
-            rects[9].y1,
-            rects[9].contains(x, y),
+            done.x0,
+            done.x1,
+            done.y0,
+            done.y1,
+            done.contains(x, y),
         );
         draw_centered_text(
             vertices,
@@ -3732,16 +2945,11 @@ impl Menu {
     }
 
     fn control(&self, action: ControlAction) -> KeyCode {
-        match action {
-            ControlAction::Forward => self.settings.controls.forward,
-            ControlAction::Backward => self.settings.controls.backward,
-            ControlAction::Left => self.settings.controls.left,
-            ControlAction::Right => self.settings.controls.right,
-            ControlAction::Jump => self.settings.controls.jump,
-            ControlAction::Sprint => self.settings.controls.sprint,
-            ControlAction::Sneak => self.settings.controls.sneak,
-            ControlAction::Inventory => self.settings.controls.inventory,
-        }
+        let meta = CONTROL_BINDINGS
+            .iter()
+            .find(|meta| meta.action == action)
+            .expect("control action must be in CONTROL_BINDINGS");
+        (meta.getter)(&self.settings.controls)
     }
 
     fn draw_delete_confirmation(&self, vertices: &mut Vec<UiVertex>, aspect: f32) {
@@ -3766,7 +2974,7 @@ impl Menu {
             &self.font_source,
         );
         let [x, y] = self.mouse_ndc;
-        let [del_rect, cancel_rect] = CONFIRM_DELETE_BUTTON_RECTS;
+        let [del_rect, cancel_rect] = CONFIRM_DELETE_RECTS;
         draw_button(
             vertices,
             del_rect.x0,
@@ -3817,15 +3025,7 @@ fn apply_fullscreen(window: &Window, enabled: bool) {
 }
 
 fn present_mode(vsync: bool, modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
-    if vsync {
-        wgpu::PresentMode::Fifo
-    } else if modes.contains(&wgpu::PresentMode::Mailbox) {
-        wgpu::PresentMode::Mailbox
-    } else if modes.contains(&wgpu::PresentMode::Immediate) {
-        wgpu::PresentMode::Immediate
-    } else {
-        wgpu::PresentMode::Fifo
-    }
+    crate::presentation::bootstrap::choose_present_mode(vsync, modes)
 }
 
 fn hash_seed(value: &str) -> u32 {
@@ -3891,18 +3091,12 @@ fn accessibility_label(
     catalog.lookup(key).to_string()
 }
 
-fn control_label(catalog: &TranslationCatalog, action: ControlAction) -> String {
-    let key = match action {
-        ControlAction::Forward => "menu.control_forward",
-        ControlAction::Backward => "menu.control_backward",
-        ControlAction::Left => "menu.control_left",
-        ControlAction::Right => "menu.control_right",
-        ControlAction::Jump => "menu.control_jump",
-        ControlAction::Sprint => "menu.control_sprint",
-        ControlAction::Sneak => "menu.control_sneak",
-        ControlAction::Inventory => "menu.control_inventory",
-    };
-    catalog.lookup(key).to_string()
+fn control_label(catalog: &TranslationCatalog, action: ControlAction) -> &str {
+    let meta = CONTROL_BINDINGS
+        .iter()
+        .find(|meta| meta.action == action)
+        .expect("control action must be in CONTROL_BINDINGS");
+    catalog.lookup(meta.label_key)
 }
 
 fn hit(x: f32, y: f32, x0: f32, x1: f32, y0: f32, y1: f32) -> bool {
@@ -3910,7 +3104,14 @@ fn hit(x: f32, y: f32, x0: f32, x1: f32, y0: f32, y1: f32) -> bool {
 }
 
 fn draw_rect(vertices: &mut Vec<UiVertex>, x0: f32, x1: f32, y0: f32, y1: f32, color: [f32; 4]) {
-    for position in [[x0, y1], [x0, y0], [x1, y0], [x0, y1], [x1, y0], [x1, y1]] {
+    for position in [
+        [x0, y1, 0.0],
+        [x0, y0, 0.0],
+        [x1, y0, 0.0],
+        [x0, y1, 0.0],
+        [x1, y0, 0.0],
+        [x1, y1, 0.0],
+    ] {
         vertices.push(UiVertex { position, color });
     }
 }
@@ -4100,16 +3301,11 @@ fn draw_text_with_font(
     color: [f32; 4],
     font: &FontSource,
 ) {
-    // Solid-color menu path still expands glyphs; textured menu path uses the
-    // atlas bind group when `textured_vertices` is supplied by the caller.
-    let _ = font;
+    // Solid-color menu path expands glyphs, honoring pack bitmap overrides.
     let pixel_x = pixel * aspect;
     let mut cursor = x;
     for ch in text.to_ascii_uppercase().chars() {
-        // Prefer one textured quad when the caller provides a textured buffer
-        // via draw_text_with_font_textured; this solid path remains for the
-        // existing single-pipeline menu screens until the textured pass runs.
-        let rows = glyph(ch);
+        let rows = font.glyph_override(ch).unwrap_or_else(|| glyph(ch));
         for (row, bits) in rows.into_iter().enumerate() {
             for column in 0..5 {
                 if bits & (1 << (4 - column)) != 0 {
@@ -4164,17 +3360,6 @@ fn draw_text_with_font_textured(
     }
 }
 
-const UI_SHADER: &str = r#"
-struct In { @location(0) position: vec2<f32>, @location(1) color: vec4<f32> };
-struct Out { @builtin(position) position: vec4<f32>, @location(0) color: vec4<f32> };
-@vertex fn vs_main(input: In) -> Out {
-    var out: Out;
-    out.position = vec4<f32>(input.position, 0.0, 1.0);
-    out.color = input.color;
-    return out;
-}
-@fragment fn fs_main(input: Out) -> @location(0) vec4<f32> { return input.color; }
-"#;
 
 const PANORAMA_SHADER: &str = r#"
 struct Panorama { time: f32, width: f32, height: f32, padding: f32 };
@@ -4206,723 +3391,7 @@ fn hash(p: vec2<f32>) -> f32 { return fract(sin(dot(p, vec2<f32>(127.1, 311.7)))
 }
 "#;
 
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::presentation_inventory_policy::{
-        schedule_presentation_chunk_load, PresentationChunkLoadPolicy, PresentationTopology,
-    };
-    use std::collections::HashMap;
-
-    #[test]
-    fn legacy_metadata_preserves_saved_hardcore_and_creation_options() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should be after unix epoch")
-            .as_nanos();
-        for (case, level_hardcore, rules_hardcore) in
-            [("level", true, false), ("rules", false, true)]
-        {
-            let world_dir = Path::new(SAVES_DIR).join(format!(
-                "icraft_legacy_metadata_{}_{}_{}",
-                std::process::id(),
-                unique,
-                case
-            ));
-            let backup_dir = world_dir.with_extension("backup");
-            fs::create_dir_all(&world_dir).expect("temporary world should be created");
-
-            let mut level = crate::save::LevelData::default();
-            level.seed = 0xA11C_E55;
-            level.version = CURRENT_WORLD_FORMAT_VERSION;
-            level.hardcore = level_hardcore;
-            level.rules.hardcore = rules_hardcore;
-            level.world_type = WorldType::Superflat;
-            level.generate_structures = false;
-            level.bonus_chest = true;
-            level.cheats_enabled = true;
-            let player = crate::save::PlayerData::from_state(
-                glam::Vec3::ZERO,
-                glam::Vec3::ZERO,
-                0.0,
-                0.0,
-                &crate::player::PlayerState::new(),
-                GameMode::Adventure,
-                &crate::inventory::Inventory::new(),
-                crate::advancements::AdvancementProgressData::default(),
-            );
-            crate::save::SaveManager::new(&world_dir)
-                .save_player_and_level(&level, &player)
-                .expect("legacy fixtures should save");
-
-            let assert_metadata = |metadata: WorldMetadata| {
-                assert_eq!(metadata.seed, level.seed);
-                assert_eq!(metadata.game_mode, GameMode::Adventure);
-                assert_eq!(metadata.difficulty, Difficulty::Hard);
-                assert!(metadata.hardcore);
-                assert_eq!(metadata.world_type, WorldType::Superflat);
-                assert!(!metadata.generate_structures);
-                assert!(metadata.bonus_chest);
-                assert!(metadata.cheats_enabled);
-            };
-            assert_metadata(legacy_metadata(&world_dir).expect("legacy metadata should load"));
-
-            backup_world(&world_dir, &backup_dir).expect("legacy world backup should succeed");
-            assert_metadata(
-                legacy_metadata(&backup_dir).expect("backup metadata should retain legacy rules"),
-            );
-
-            fs::remove_dir_all(&world_dir).expect("temporary world should be removable");
-            fs::remove_dir_all(&backup_dir).expect("temporary backup should be removable");
-        }
-    }
-
-    #[test]
-    fn server_address_book_keeps_recent_ping_results() {
-        let mut book = ServerAddressBook::new(2);
-        book.remember("127.0.0.1:25565");
-        book.record_ping(ServerPingResult {
-            address: "example.test:25565".into(),
-            version: "0.1.0".into(),
-            motd: "Welcome".into(),
-            online_players: 2,
-            max_players: 20,
-            error: None,
-        });
-        book.record_ping(ServerPingResult {
-            address: "127.0.0.1:25565".into(),
-            version: "0.1.0".into(),
-            motd: "Local".into(),
-            online_players: 1,
-            max_players: 20,
-            error: None,
-        });
-        assert_eq!(book.addresses().len(), 2);
-        assert_eq!(book.addresses()[0], "127.0.0.1:25565");
-        assert_eq!(book.recent_results()[0].motd, "Local");
-    }
-
-    #[test]
-    fn multiplayer_focus_activation_covers_saved_servers_and_actions() {
-        assert_eq!(multiplayer_focus_count(MultiplayerMode::Host, 99), 5);
-        assert_eq!(multiplayer_focus_count(MultiplayerMode::Join, 0), 8);
-        assert_eq!(multiplayer_focus_count(MultiplayerMode::Join, 99), 11);
-        let rects = multiplayer_focus_rects(MultiplayerMode::Join, 2);
-        assert_eq!(rects.len(), 10);
-        assert_eq!(rects[0], [-0.52, -0.02, 0.45, 0.58]);
-        assert_eq!(rects[5], [0.04, 0.56, 0.26, 0.34]);
-        assert_eq!(rects[7], [0.04, 0.56, -0.24, -0.11]);
-        assert_eq!(rects[8], [-0.52, -0.02, -0.58, -0.45]);
-        assert_eq!(rects[9], [0.02, 0.52, -0.58, -0.45]);
-    }
-
-    #[test]
-    fn saved_server_addresses_split_for_join_form() {
-        assert_eq!(
-            split_host_port("example.test:25565"),
-            Some(("example.test".into(), "25565".into()))
-        );
-        assert_eq!(
-            split_host_port("[::1]:25565"),
-            Some(("::1".into(), "25565".into()))
-        );
-        assert!(split_host_port("not-an-address").is_none());
-    }
-
-    #[test]
-    fn load_world_creation_options_reads_game_mode_and_cheats() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should be after unix epoch")
-            .as_nanos();
-        let world_dir = Path::new(SAVES_DIR).join(format!(
-            "icraft_creation_options_{}_{}",
-            std::process::id(),
-            unique
-        ));
-        let metadata = WorldMetadata {
-            name: "CREATIVE WORLD".to_string(),
-            seed: 42,
-            game_mode: GameMode::Creative,
-            difficulty: Difficulty::Normal,
-            last_played: 0,
-            world_type: WorldType::Default,
-            generate_structures: true,
-            bonus_chest: false,
-            cheats_enabled: true,
-            hardcore: false,
-            version: CURRENT_WORLD_FORMAT_VERSION,
-            needs_upgrade: false,
-        };
-        metadata.save(&world_dir).expect("world.meta should save");
-        let options = load_world_creation_options(&world_dir);
-        assert_eq!(options.game_mode, GameMode::Creative);
-        assert!(options.cheats_enabled);
-        fs::remove_dir_all(&world_dir).expect("temporary world should be removable");
-    }
-
-    #[test]
-    fn sanitizes_world_names_and_generates_stable_slugs() {
-        assert_eq!(sanitize_name("  My <World>!  "), "My World");
-        assert_eq!(slugify("My World"), "my_world");
-    }
-
-    #[test]
-    fn selected_world_directory_survives_list_reordering() {
-        let metadata = |name: &str, last_played| WorldMetadata {
-            name: name.to_string(),
-            seed: 1,
-            game_mode: GameMode::Creative,
-            difficulty: Difficulty::Normal,
-            last_played,
-            world_type: WorldType::Default,
-            generate_structures: true,
-            bonus_chest: false,
-            cheats_enabled: false,
-            hardcore: false,
-            version: CURRENT_WORLD_FORMAT_VERSION,
-            needs_upgrade: false,
-        };
-        let first_dir = PathBuf::from("C:/saves/first");
-        let second_dir = PathBuf::from("C:/saves/second");
-        let mut worlds = vec![
-            WorldEntry {
-                directory: first_dir,
-                metadata: metadata("SAME NAME", 2),
-            },
-            WorldEntry {
-                directory: second_dir.clone(),
-                metadata: metadata("SAME NAME", 1),
-            },
-        ];
-
-        worlds.reverse();
-
-        let index = world_index_by_directory(&worlds, &second_dir).unwrap();
-        assert_eq!(worlds[index].directory, second_dir);
-    }
-
-    #[test]
-    fn settings_key_names_round_trip() {
-        for code in [
-            KeyCode::KeyW,
-            KeyCode::Space,
-            KeyCode::ControlLeft,
-            KeyCode::ArrowUp,
-        ] {
-            assert_eq!(parse_key(key_name(code)), Some(code));
-        }
-    }
-
-    #[test]
-    fn difficulty_steps_both_directions() {
-        assert_eq!(Difficulty::Peaceful.step(-1), Difficulty::Hard);
-        assert_eq!(Difficulty::Normal.step(1), Difficulty::Hard);
-    }
-
-    #[test]
-    fn legacy_settings_without_weather_volume_use_reduced_default() {
-        let settings = GameSettings::from_file_contents(
-            "master_volume:0.8\nsound_volume:0.6\nmusic_volume:0.2\n",
-        );
-
-        assert!((settings.weather_volume - 0.4).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn leftover_dynamic_resolution_settings_keys_are_ignored() {
-        let settings = GameSettings::from_file_contents(concat!(
-            "fov:90\n",
-            "render_scale:0.5\n",
-            "dynamic_resolution:true\n",
-            "entity_distance_scale:1.5\n",
-            "unknown_future_key:1\n",
-        ));
-
-        assert_eq!(settings.fov, 90.0);
-        assert!((settings.entity_distance_scale - 1.5).abs() < f32::EPSILON);
-
-        let contents = settings.to_file_contents();
-        assert!(!contents.contains("render_scale"));
-        assert!(!contents.contains("dynamic_resolution"));
-        assert!(contents.contains("entity_distance_scale:1.5\n"));
-        assert!(contents.contains("fov:90\n"));
-    }
-
-    #[test]
-    fn weather_volume_load_clamps_out_of_range_values() {
-        let too_high = GameSettings::from_file_contents("weather_volume:4.5\n");
-        let too_low = GameSettings::from_file_contents("weather_volume:-2\n");
-        let not_finite = GameSettings::from_file_contents("weather_volume:NaN\n");
-
-        assert_eq!(too_high.weather_volume, 1.0);
-        assert_eq!(too_low.weather_volume, 0.0);
-        assert_eq!(not_finite.weather_volume, 0.4);
-    }
-
-    #[test]
-    fn settings_file_round_trip_includes_weather_volume() {
-        let mut original = GameSettings::default();
-        original.weather_volume = 0.3;
-
-        let contents = original.to_file_contents();
-        let loaded = GameSettings::from_file_contents(&contents);
-
-        assert!(contents.contains("weather_volume:0.3\n"));
-        assert!((loaded.weather_volume - original.weather_volume).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn non_finite_view_settings_fall_back_during_load() {
-        for value in ["NaN", "inf", "-inf"] {
-            let settings =
-                GameSettings::from_file_contents(&format!("fov:{value}\nsensitivity:{value}\n"));
-
-            assert_eq!(settings.fov, 70.0, "fov should reject {value}");
-            assert_eq!(
-                settings.sensitivity, 0.002,
-                "sensitivity should reject {value}"
-            );
-        }
-    }
-
-    #[test]
-    fn non_finite_view_settings_are_sanitized_before_save() {
-        let mut settings = GameSettings::default();
-        settings.fov = f32::NAN;
-        settings.sensitivity = f32::INFINITY;
-
-        let contents = settings.to_file_contents();
-        let loaded = GameSettings::from_file_contents(&contents);
-
-        assert!(contents.contains("fov:70\n"));
-        assert!(contents.contains("sensitivity:0.002\n"));
-        assert!(!contents.contains("NaN"));
-        assert!(!contents.contains("inf"));
-        assert_eq!(loaded.fov, 70.0);
-        assert_eq!(loaded.sensitivity, 0.002);
-    }
-
-    #[test]
-    fn view_setting_boundaries_round_trip_without_drift() {
-        for (fov, sensitivity) in [(30.0, 0.0002), (120.0, 0.006)] {
-            let mut settings = GameSettings::default();
-            settings.fov = fov;
-            settings.sensitivity = sensitivity;
-
-            let loaded = GameSettings::from_file_contents(&settings.to_file_contents());
-
-            assert_eq!(loaded.fov, fov);
-            assert_eq!(loaded.sensitivity, sensitivity);
-        }
-    }
-
-    #[test]
-    fn weather_options_row_is_distinct_from_language_controls_and_back() {
-        assert_eq!(options_row_at(-0.08), Some(3));
-        assert_eq!(options_row_at(-0.28), Some(4));
-        assert_eq!(options_row_at(-0.48), Some(5));
-        assert_eq!(options_row_at(-0.70), None);
-        assert!(hit(0.4, -0.08, 0.05, 0.82, -0.15, -0.02));
-    }
-
-    #[test]
-    fn multiplayer_settings_defaults_and_mutation() {
-        let mut settings = GameSettings::default();
-        assert_eq!(settings.mp_host_port, "25565");
-        assert_eq!(settings.mp_server_address, "127.0.0.1");
-        assert_eq!(settings.mp_join_port, "25565");
-        assert_eq!(settings.mp_username, "PLAYER");
-
-        settings.mp_host_port = "25570".to_string();
-        settings.mp_server_address = "192.168.1.100".to_string();
-        settings.mp_join_port = "25571".to_string();
-        settings.mp_username = "TEST_USER".to_string();
-
-        assert_eq!(settings.mp_host_port, "25570");
-        assert_eq!(settings.mp_server_address, "192.168.1.100");
-        assert_eq!(settings.mp_join_port, "25571");
-        assert_eq!(settings.mp_username, "TEST_USER");
-    }
-
-    #[test]
-    fn leaving_controls_clears_pending_rebind() {
-        let (screen, active_field, rebinding) = back_transition(
-            MenuScreen::Controls,
-            Some(TextField::WorldName),
-            Some(ControlAction::Forward),
-        );
-
-        assert_eq!(screen, MenuScreen::Options);
-        assert_eq!(active_field, None);
-        assert_eq!(rebinding, None);
-    }
-
-    #[test]
-    fn world_path_guard_rejects_saves_root() {
-        assert!(validated_world_path(Path::new(SAVES_DIR)).is_err());
-    }
-
-    fn try_create_world_link(target: &Path, link: &Path) -> bool {
-        #[cfg(windows)]
-        {
-            if std::os::windows::fs::symlink_dir(target, link).is_ok() {
-                return true;
-            }
-            std::process::Command::new("cmd")
-                .args([
-                    "/C",
-                    "mklink",
-                    "/J",
-                    &link.to_string_lossy(),
-                    &target.to_string_lossy(),
-                ])
-                .status()
-                .map(|status| status.success())
-                .unwrap_or(false)
-        }
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(target, link).is_ok()
-        }
-        #[cfg(not(any(windows, unix)))]
-        {
-            let _ = (target, link);
-            false
-        }
-    }
-
-    #[test]
-    fn world_path_guard_rejects_escape_and_symlink_roots() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should be after unix epoch")
-            .as_nanos();
-        let pid = std::process::id();
-        let outside = std::env::temp_dir().join(format!("icraft_escape_{pid}_{unique}"));
-        fs::create_dir_all(&outside).expect("outside dir");
-        assert!(
-            validated_world_path(&outside).is_err(),
-            "canonicalize escaping saves/ must be rejected"
-        );
-
-        let _ = fs::create_dir_all(SAVES_DIR);
-        let inside = Path::new(SAVES_DIR).join(format!("icraft_real_{pid}_{unique}"));
-        let metadata = WorldMetadata {
-            name: "REAL".to_string(),
-            seed: 1,
-            game_mode: GameMode::Survival,
-            difficulty: Difficulty::Normal,
-            last_played: 0,
-            world_type: WorldType::Default,
-            generate_structures: true,
-            bonus_chest: false,
-            cheats_enabled: false,
-            hardcore: false,
-            version: CURRENT_WORLD_FORMAT_VERSION,
-            needs_upgrade: false,
-        };
-        metadata.save(&inside).expect("real world should save");
-        assert!(validated_world_path(&inside).is_ok());
-
-        let link = Path::new(SAVES_DIR).join(format!("icraft_link_{pid}_{unique}"));
-        let created =
-            try_create_world_link(&outside, &link) || try_create_world_link(&inside, &link);
-        if created {
-            assert!(
-                validated_world_path(&link).is_err(),
-                "symlink/junction world roots must not be playable"
-            );
-            let discovered = discover_worlds();
-            assert!(
-                !discovered.iter().any(|world| {
-                    world.directory.file_name() == link.file_name() || world.directory == link
-                }),
-                "symlink/junction world roots must not appear in the menu"
-            );
-            let _ = fs::remove_dir(&link);
-            let _ = fs::remove_file(&link);
-        }
-        let _ = fs::remove_dir_all(&inside);
-        let _ = fs::remove_dir_all(&outside);
-    }
-
-    #[test]
-    fn client_world_launch_uses_temp_dir_and_placeholder_seed() {
-        let launch = WorldLaunch {
-            world_dir: std::env::temp_dir().join("icraft_multiplayer_client"),
-            seed: 0,
-            game_mode: GameMode::Survival,
-            difficulty: Difficulty::Normal,
-            role: MultiplayerRole::Client {
-                server_addr: "127.0.0.1".to_string(),
-                port: 25565,
-                username: "PLAYER".to_string(),
-            },
-        };
-        assert!(launch.world_dir.starts_with(std::env::temp_dir()));
-        assert!(!launch.world_dir.starts_with("saves"));
-        assert_eq!(launch.seed, 0);
-        assert!(matches!(launch.game_mode, GameMode::Survival));
-        assert!(matches!(launch.role, MultiplayerRole::Client { .. }));
-    }
-
-    fn join_client_role() -> MultiplayerRole {
-        MultiplayerRole::Client {
-            server_addr: "127.0.0.1".to_string(),
-            port: 25565,
-            username: "JOINER".to_string(),
-        }
-    }
-
-    #[test]
-    fn join_client_load_policy_never_generates_or_mutates() {
-        let client = join_client_role();
-        assert!(client.is_join_client());
-        let join_policy = PresentationTopology::from(&client, false).chunk_load_policy();
-        assert_eq!(
-            join_policy,
-            PresentationChunkLoadPolicy::AwaitAuthoritativePayload
-        );
-
-        let mut generated = false;
-        let loaded = schedule_presentation_chunk_load(join_policy, || {
-            generated = true;
-            1
-        });
-        assert!(loaded.is_none());
-        assert!(!generated);
-
-        assert_eq!(
-            PresentationTopology::from(&MultiplayerRole::Singleplayer, true).chunk_load_policy(),
-            PresentationChunkLoadPolicy::GenerateLocally
-        );
-        assert_eq!(
-            PresentationTopology::from(&MultiplayerRole::Host { port: 25565 }, true)
-                .chunk_load_policy(),
-            PresentationChunkLoadPolicy::GenerateLocally
-        );
-        assert_eq!(
-            schedule_presentation_chunk_load(
-                PresentationTopology::Embedded.chunk_load_policy(),
-                || 7
-            ),
-            Some(7)
-        );
-    }
-
-    #[test]
-    fn controls_config_parse_and_round_trip() {
-        let mut settings = GameSettings::default();
-        let config_text = r#"
-# Custom Controls Config Test
-key_forward = UP
-key_backward = DOWN
-key_left = LEFT
-key_right = RIGHT
-key_jump = SPACE
-key_sprint = LCTRL
-key_sneak = LSHIFT
-key_inventory = E
-key_chat = Y
-key_advancements = K
-key_debug = F1
-key_perspective = F2
-key_gamemode = M
-key_pause = ESC
-"#;
-        settings.apply_file_contents(config_text);
-        assert_eq!(settings.controls.forward, KeyCode::ArrowUp);
-        assert_eq!(settings.controls.backward, KeyCode::ArrowDown);
-        assert_eq!(settings.controls.left, KeyCode::ArrowLeft);
-        assert_eq!(settings.controls.right, KeyCode::ArrowRight);
-        assert_eq!(settings.controls.chat, KeyCode::KeyY);
-        assert_eq!(settings.controls.advancements, KeyCode::KeyK);
-        assert_eq!(settings.controls.debug, KeyCode::F1);
-        assert_eq!(settings.controls.perspective, KeyCode::F2);
-        assert_eq!(settings.controls.gamemode, KeyCode::KeyM);
-        assert_eq!(settings.controls.pause, KeyCode::Escape);
-
-        let exported = settings.to_controls_file_contents();
-        assert!(exported.contains("key_forward = UP"));
-        assert!(exported.contains("key_backward = DOWN"));
-        assert!(exported.contains("key_chat = Y"));
-        assert!(exported.contains("key_advancements = K"));
-        assert!(exported.contains("key_debug = F1"));
-    }
-
-    #[test]
-    fn fps_cap_round_trip_and_sanitization() {
-        let settings = GameSettings::from_file_contents("fps_cap:144");
-        assert_eq!(settings.fps_cap, 144);
-        assert!(GameSettings::from_file_contents("fps_cap:0").fps_cap == 0);
-        assert_eq!(GameSettings::from_file_contents("fps_cap:999").fps_cap, 240);
-        assert!(GameSettings::from_file_contents("fps_cap:-1").fps_cap == 0);
-        let mut settings = GameSettings::default();
-        settings.fps_cap = 60;
-        assert!(settings.to_file_contents().contains("fps_cap:60"));
-    }
-
-    #[test]
-    fn fps_cap_cycles_through_uncapped_and_standard_rates() {
-        assert_eq!(cycle_fps_cap(0, 1), 30);
-        assert_eq!(cycle_fps_cap(30, 1), 60);
-        assert_eq!(cycle_fps_cap(60, 1), 144);
-        assert_eq!(cycle_fps_cap(144, 1), 0);
-        assert_eq!(fps_cap_label(0), "UNCAPPED");
-    }
-
-    #[test]
-    fn accessibility_settings_survive_restart_and_resource_pack_ids_round_trip() {
-        let mut settings = GameSettings::default();
-        settings.accessibility.ui_scale = 1.75;
-        settings.accessibility.chat_scale = 1.5;
-        settings.accessibility.chat_opacity = 0.25;
-        settings.accessibility.subtitles = true;
-        settings.accessibility.high_contrast = true;
-        settings.accessibility.reduce_flashing = true;
-        settings.accessibility.toggle_sprint = true;
-        settings.accessibility.toggle_sneak = true;
-        settings.accessibility.camera_bobbing = false;
-        settings.accessibility.damage_tilt = false;
-        settings.resource_packs = vec!["demo.base".to_string(), "demo.hud".to_string()];
-
-        let loaded = GameSettings::from_file_contents(&settings.to_file_contents());
-        assert_eq!(loaded.accessibility, settings.accessibility);
-        assert_eq!(loaded.resource_packs, settings.resource_packs);
-    }
-
-    #[test]
-    fn focus_layout_rects_remain_inside_ndc_at_common_aspects() {
-        let rects = [
-            [-0.90, 0.90, -0.88, 0.82],   // accessibility
-            [-0.86, 0.86, -0.88, 0.82],   // resource packs/worlds
-            [-0.64, 0.64, -0.92, 0.78],   // create world
-            [-0.48, 0.48, -0.84, 0.72],   // controls/confirm delete
-            [-0.99, 0.99, -0.97, -0.875], // chat input
-        ];
-        for aspect in [4.0f32 / 3.0, 16.0 / 9.0, 21.0 / 9.0] {
-            assert!(aspect.is_finite() && aspect > 0.0);
-            for [x0, x1, y0, y1] in rects {
-                assert!(x0 < x1 && y0 < y1);
-                assert!((-1.0..=1.0).contains(&x0));
-                assert!((-1.0..=1.0).contains(&x1));
-                assert!((-1.0..=1.0).contains(&y0));
-                assert!((-1.0..=1.0).contains(&y1));
-            }
-        }
-    }
-
-    #[test]
-    fn menu_rect_tables_are_valid_and_consistent() {
-        let mut all_rects = Vec::new();
-        all_rects.extend_from_slice(&MAIN_BUTTON_RECTS);
-        all_rects.extend_from_slice(&CONFIRM_DELETE_BUTTON_RECTS);
-        all_rects.extend_from_slice(&CREATE_WORLD_RECTS);
-        all_rects.extend_from_slice(&OPTIONS_BOTTOM_RECTS);
-        all_rects.extend_from_slice(&options_button_rects());
-        all_rects.extend_from_slice(&controls_button_rects());
-        all_rects.extend_from_slice(&accessibility_button_rects());
-        all_rects.extend_from_slice(&RESOURCE_PACKS_BOTTOM_RECTS);
-        all_rects.extend_from_slice(&WORLDS_BOTTOM_RECTS);
-        all_rects.extend_from_slice(&MULTIPLAYER_MODE_RECTS);
-        all_rects.push(MULTIPLAYER_HOST_PORT_RECT);
-        all_rects.extend_from_slice(&MULTIPLAYER_JOIN_FIELD_RECTS);
-        all_rects.push(MULTIPLAYER_PING_RECT);
-        all_rects.extend_from_slice(&MULTIPLAYER_BOTTOM_RECTS);
-
-        for i in 0..5 {
-            all_rects.push(world_item_rect(i));
-            all_rects.push(resource_pack_item_rect(i));
-        }
-        for i in 0..3 {
-            all_rects.push(recent_server_item_rect(i));
-        }
-
-        for rect in all_rects {
-            assert!(
-                rect.x0 < rect.x1,
-                "x0 ({}) must be < x1 ({})",
-                rect.x0,
-                rect.x1
-            );
-            assert!(
-                rect.y0 < rect.y1,
-                "y0 ({}) must be < y1 ({})",
-                rect.y0,
-                rect.y1
-            );
-            assert!((-1.0..=1.0).contains(&rect.x0));
-            assert!((-1.0..=1.0).contains(&rect.x1));
-            assert!((-1.0..=1.0).contains(&rect.y0));
-            assert!((-1.0..=1.0).contains(&rect.y1));
-
-            let cx = (rect.x0 + rect.x1) * 0.5;
-            let cy = (rect.y0 + rect.y1) * 0.5;
-            assert!(rect.contains(cx, cy));
-            assert!(hit(cx, cy, rect.x0, rect.x1, rect.y0, rect.y1));
-            assert!(!rect.contains(rect.x0 - 0.1, cy));
-            assert!(!rect.contains(rect.x1 + 0.1, cy));
-            assert!(!rect.contains(cx, rect.y0 - 0.1));
-            assert!(!rect.contains(cx, rect.y1 + 0.1));
-        }
-    }
-
-    fn lit_pixels(rows: [u8; 7]) -> usize {
-        rows.into_iter().map(|row| row.count_ones() as usize).sum()
-    }
-
-    #[test]
-    fn menu_text_uses_selected_font_and_builtin_fallback() {
-        let mut overrides = HashMap::new();
-        // A deliberately dense override makes it unambiguous that the
-        // ordinary menu text path selected the bitmap font.
-        overrides.insert('A', [31; 7]);
-        let bitmap = FontSource::Bitmap(overrides);
-
-        let mut custom_vertices = Vec::new();
-        draw_text(
-            &mut custom_vertices,
-            "AB",
-            0.0,
-            0.0,
-            0.01,
-            1.0,
-            [1.0; 4],
-            &bitmap,
-        );
-
-        let mut builtin_vertices = Vec::new();
-        draw_text(
-            &mut builtin_vertices,
-            "AB",
-            0.0,
-            0.0,
-            0.01,
-            1.0,
-            [1.0; 4],
-            &FontSource::BuiltIn,
-        );
-
-        // The selected bitmap overrides A, while the absent B override still
-        // falls back to the built-in glyph table.
-        assert_eq!(
-            custom_vertices.len(),
-            (lit_pixels([31; 7]) + lit_pixels(glyph('B'))) * 6
-        );
-        assert_eq!(
-            builtin_vertices.len(),
-            (lit_pixels(glyph('A')) + lit_pixels(glyph('B'))) * 6
-        );
-        assert!(custom_vertices.len() > builtin_vertices.len());
-
-        // The regular main-menu logo helper also receives the selected font;
-        // this guards against accidentally updating only the resource-pack
-        // listing path.
-        let mut custom_logo = Vec::new();
-        draw_logo(&mut custom_logo, 1.0, &bitmap);
-        let mut builtin_logo = Vec::new();
-        draw_logo(&mut builtin_logo, 1.0, &FontSource::BuiltIn);
-        assert!(custom_logo.len() > builtin_logo.len());
-    }
-}
+#[path = "tests.rs"]
+mod tests;
