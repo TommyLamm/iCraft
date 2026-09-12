@@ -762,7 +762,6 @@ async fn reliable_join_and_leave_wait_for_bounded_queue_capacity() {
     };
 
     let observer = tokio::spawn(async move {
-        time::sleep(Duration::from_millis(25)).await;
         let unwrap_packet = |queued| match queued {
             QueuedPacket::Reliable(packet) | QueuedPacket::Outbound(packet) => {
                 packet.into_packet()
@@ -1207,21 +1206,9 @@ async fn relays_chat_through_host_with_canonical_sender() {
     server.stop().await;
 }
 
-#[tokio::test]
-async fn newcomer_receives_existing_roster() {
-    let server = LoopbackTestServer::start(0xCAFE_BABE, 1);
-    let (_client_a, id_a) = server.connect("steve").await;
-    let (mut client_b, _) = server.connect("alex").await;
-    let packet = recv_matching(
-        &mut client_b,
-        |p| matches!(p, Packet::PlayerJoin { id, .. } if *id == id_a),
-    )
-    .await;
-    assert!(
-        matches!(packet, Packet::PlayerJoin { id, username, .. } if id == id_a && username == "steve")
-    );
-    server.stop().await;
-}
+// Join roster delivery for the basic two-player case is covered by
+// `newcomer_receives_roster_larger_than_queue_capacity` (wire/capacity) and
+// Plan30 TCP reconnect (domain). Keep only the capacity edge here.
 
 #[tokio::test]
 async fn disconnect_cleans_up_and_notifies_remaining_clients() {
@@ -1790,9 +1777,7 @@ async fn pre_auth_connections_are_capped_at_twice_max_players() {
         },
     );
     let _hold_a = server.connect_stream().await;
-    time::sleep(Duration::from_millis(40)).await;
     let _hold_b = server.connect_stream().await;
-    time::sleep(Duration::from_millis(40)).await;
 
     let mut excess = Connection::new(server.connect_stream().await);
     let excess_result = time::timeout(Duration::from_millis(500), excess.recv()).await;
@@ -1803,7 +1788,6 @@ async fn pre_auth_connections_are_capped_at_twice_max_players() {
 
     drop(_hold_a);
     drop(_hold_b);
-    time::sleep(Duration::from_millis(300)).await;
     let (_joined, packet) = handshake_once(&server, "late").await;
     assert!(matches!(packet, Packet::LoginSuccess { .. }));
     server.stop().await;

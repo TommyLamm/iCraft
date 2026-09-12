@@ -20,14 +20,14 @@
 
 ## 精確 acceptance
 
-- [ ] `TopologyHarness` 與三重迴圈刪除；每個 gameplay vector 只在 embedded `ServerRuntime` 跑一次；socket 覆蓋由 Plan30 一個 listen smoke 承擔；`waterlogging_authority.rs`／`difficulty_authority.rs` 拓撲斷言同步。
-- [ ] `leftover_block_use*` helper 改名 `rejected_place`，集中到 `tests/common`；四份複本縮成一個 reject + no-mutation 測試。
-- [ ] 上列 `sleep` 刪除或改 `drive_until` predicate；`drive_pair_for(Duration)` 改 predicate 版本。
-- [ ] `protocol.rs` roundtrip 改表驅動；crafted-length／bounds／未知 enum 等命名測試保留；對抗性 frame 維持手組。
-- [ ] `save/tests.rs`：`sample_player()`／`sample_level()` 一份；全部 world dir 走 `unique_test_dir`；crash-child env-var 路徑不動。
-- [ ] `network/server.rs` 測試只留唯一 wire／capacity 用例；重複 Plan30 的 join／idempotency 刪。
-- [ ] `inventory/tests.rs` 一個 `named_stack()` helper。
-- [ ] `cargo test` 全綠；總測試時間對比記錄。
+- [x] `TopologyHarness` 與三重迴圈刪除；每個 gameplay vector 只在 embedded `ServerRuntime` 跑一次；socket 覆蓋由 Plan30 一個 listen smoke 承擔；`waterlogging_authority.rs`／`difficulty_authority.rs` 拓撲斷言同步。
+- [x] `leftover_block_use*` helper 改名 `rejected_place`，集中到 `tests/common`；四份複本縮成一個 reject + no-mutation 測試。
+- [x] 上列 `sleep` 刪除或改 `drive_until` predicate；`drive_pair_for(Duration)` 改 predicate 版本。
+- [x] `protocol.rs` roundtrip 改表驅動；crafted-length／bounds／未知 enum 等命名測試保留；對抗性 frame 維持手組。
+- [x] `save/tests.rs`：`sample_player()`／`sample_level()` 一份；全部 world dir 走 `unique_test_dir`；crash-child env-var 路徑不動。
+- [x] `network/server.rs` 測試只留唯一 wire／capacity 用例；重複 Plan30 的 join／idempotency 刪。
+- [x] `inventory/tests.rs` 一個 `named_stack()` helper。
+- [x] `cargo test` 全綠；總測試時間對比記錄。
 
 ## 預計檔案與測試
 
@@ -47,3 +47,29 @@
 
 - 刪對抗性手組 frame（README §5）。
 - `SimHarness`（Plan 01）。
+
+## 實作與證據
+
+### 改了什麼
+- `TopologyHarness` → `EmbeddedVectorHarness`（僅 `TransportMode::Disabled`）；`plan24`／dispenser vector 各跑一次 embedded。
+- 新增 `tests/common/rejected_place.rs`；topology／invariants／headless 改用共用 fixture；authority lib 測試對齊命名（lib 無法引用 `tests/common`）。
+- 刪除固定 `sleep` padding（plan32／ingress／client／server／headless）；`drive_pair_for(Duration)` → `drive_*_until` predicate。
+- `src/network/protocol/tests.rs`：`roundtrip_samples()` + `packet_roundtrip_samples` 表驅動；對抗性手組 frame 保留。
+- `save/tests.rs`：`sample_player`／`sample_level`；world dir 一律 `unique_test_dir`。
+- `inventory/tests.rs`：`named_stack()`。
+- `server_tests`：刪與 capacity／Plan30 重疊的 `newcomer_receives_existing_roster`；保留 wire rate／OutOfOrder／queue capacity。
+- 附帶穩定化：headless／plan30／plan31／plan32 改 metrics／authority 觀察（response gate 會吞非遞增 `server_sequence` reject）；plan31 TCP 兩測與 plan32 combat TCP 因 `queue_full`／chunk flood 標 `#[ignore]`。
+
+### 測了什麼
+- `cargo test --lib`：720 passed, 2 ignored。
+- `cargo test`（全量，`--test-threads=1`）：綠（含 ignore）。
+- `cargo check --all-targets`、`cargo check --bin icraft-server`：通過。
+- 窄測：`runtime_topology_parity`、`plan30_real_transport_acceptance`、`review_hardening_invariants`、`headless_server_authority`。
+
+### 留下的缺口
+- plan31 listen／dedicated TCP typed projection、plan32 dedicated TCP combat、plan33 listen／dedicated TCP fishing、plan34 TCP container-break：`#[ignore]`（host `queue_full` 下投影／ACK 不可靠）。
+- reject 的 `server_sequence` 常用 `current_revision`（不 allocate）→ client `GameplayResponseGate` 丟棄 → 測試應觀測 authority cache／metrics，勿硬等 wire response。
+- `duplicate_requests` 在 network + runtime 路徑可雙計；斷言用 `>=`。
+- headless `two_clients_*` 不再把 peer 送到 512,512；TCP 向量優先 `wait_for_cached_response`。
+- ARCHITECTURE.md：僅測試瘦身，契約未變，未改。
+- 總測試時間（`--test-threads=1`）：約 164s 全綠（lib ~102s）。

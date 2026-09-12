@@ -10,77 +10,59 @@ fn v() -> u32 {
     PROTOCOL_VERSION
 }
 
+fn roundtrip_samples() -> Vec<Packet> {
+    vec![
+        Packet::Handshake {
+            protocol_version: v(),
+            username: "steve".into(),
+        },
+        Packet::LoginSuccess {
+            protocol_version: v(),
+            player_id: 42,
+            seed: 0xDEAD_BEEF_CAFE,
+            gamemode: 1,
+        },
+        Packet::ContainerClose {
+            dimension: 2,
+            x: -11,
+            y: 64,
+            z: 19,
+        },
+        Packet::Disconnect {
+            reason: "kicked".into(),
+        },
+        Packet::PlayerPosition {
+            id: 7,
+            sequence: 42,
+            sender_time_millis: 12_345,
+            x: 1.5,
+            y: 64.0,
+            z: -2.25,
+            yaw: 90.0,
+            pitch: -45.5,
+        },
+        Packet::PlayerAction {
+            id: 7,
+            action: Action::Place,
+        },
+        Packet::Keepalive,
+        Packet::ChatMessage {
+            sender: "alex".into(),
+            message: "hello".into(),
+        },
+    ]
+}
+
+#[test]
+fn packet_roundtrip_samples() {
+    for packet in roundtrip_samples() {
+        assert_eq!(Packet::decode(&packet.encode()).unwrap(), packet);
+    }
+}
+
 #[test]
 fn current_protocol_version_is_21() {
     assert_eq!(PROTOCOL_VERSION, 21);
-}
-
-#[test]
-fn handshake_roundtrip() {
-    let p = Packet::Handshake {
-        protocol_version: v(),
-        username: "steve".into(),
-    };
-    let decoded = Packet::decode(&p.encode()).unwrap();
-    assert_eq!(p, decoded);
-}
-
-#[test]
-fn login_success_roundtrip() {
-    let p = Packet::LoginSuccess {
-        protocol_version: v(),
-        player_id: 42,
-        seed: 0xDEAD_BEEF_CAFE,
-        gamemode: 1,
-    };
-    let decoded = Packet::decode(&p.encode()).unwrap();
-    assert_eq!(p, decoded);
-}
-
-#[test]
-fn container_close_roundtrip_keeps_v16_shape() {
-    let packet = Packet::ContainerClose {
-        dimension: 2,
-        x: -11,
-        y: 64,
-        z: 19,
-    };
-    assert_eq!(Packet::decode(&packet.encode()).unwrap(), packet);
-}
-
-#[test]
-fn disconnect_roundtrip() {
-    let p = Packet::Disconnect {
-        reason: "kicked".into(),
-    };
-    let decoded = Packet::decode(&p.encode()).unwrap();
-    assert_eq!(p, decoded);
-}
-
-#[test]
-fn player_position_roundtrip() {
-    let p = Packet::PlayerPosition {
-        id: 7,
-        sequence: 42,
-        sender_time_millis: 12_345,
-        x: 1.5,
-        y: 64.0,
-        z: -2.25,
-        yaw: 90.0,
-        pitch: -45.5,
-    };
-    let decoded = Packet::decode(&p.encode()).unwrap();
-    assert_eq!(p, decoded);
-}
-
-#[test]
-fn player_action_roundtrip() {
-    let p = Packet::PlayerAction {
-        id: 7,
-        action: Action::Place,
-    };
-    let decoded = Packet::decode(&p.encode()).unwrap();
-    assert_eq!(p, decoded);
 }
 
 #[test]

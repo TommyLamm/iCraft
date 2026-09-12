@@ -1417,7 +1417,9 @@ fn sessions_in_multiple_dimensions_tick_and_dispatch_independently() {
     let nether_revision = core.revision_for_dimension(Dimension::Nether);
     assert_eq!(overworld_revision, nether_revision);
 
-    let leftover = core.submit_request(GameplayRequest {
+    // Empty-hand Place DiamondOre is the shared rejected_place fixture shape
+    // (integration copies live in tests/common/rejected_place.rs).
+    let rejected = core.submit_request(GameplayRequest {
         request_id: 101,
         client_sequence: 1,
         session_id: 7,
@@ -1436,7 +1438,7 @@ fn sessions_in_multiple_dimensions_tick_and_dispatch_independently() {
         },
     });
     assert!(matches!(
-        leftover.outcome,
+        rejected.outcome,
         GameplayOutcome::Rejected {
             reason: RejectReason::InvalidState
         }

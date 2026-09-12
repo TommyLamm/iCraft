@@ -2,6 +2,12 @@ use super::*;
 use crate::world::BlockType;
 use std::collections::HashSet;
 
+fn named_stack(item: Item, count: u32, name: &str) -> ItemStack {
+    let mut stack = ItemStack::new(item, count);
+    stack.custom_name.set(name);
+    stack
+}
+
 #[test]
 fn fishing_rod_starts_with_authority_durability() {
     assert_eq!(ItemStack::new(Item::FishingRod, 1).durability, 64);

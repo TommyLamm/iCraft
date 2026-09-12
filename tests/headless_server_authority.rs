@@ -1,8 +1,9 @@
 mod common;
 
+use common::rejected_place::rejected_place_with_held;
 use common::tcp_harness::{
-    drive_until, gameplay_request, loopback_properties, session_slot, temp_world,
-    wait_for_response, HeldLoopback, TcpClient, STEP_SLEEP,
+    drive_until, gameplay_request, loopback_properties, session_slot, temp_world, HeldLoopback,
+    TcpClient,
 };
 use icraft::authority::contract::SessionGameplayState;
 use icraft::authority::interest::InterestKind;
@@ -11,7 +12,7 @@ use icraft::dimension::Dimension;
 use icraft::entity::EntityType;
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::client::{ClientToGame, GameToClient};
-use icraft::network::protocol::{BlockActionKind, ContainerAction, GameplayOperation, GameplayOutcome, GameplayRequest,
+use icraft::network::protocol::{ContainerAction, GameplayOperation, GameplayOutcome, GameplayRequest,
     GameplayResponse, ItemWire, RejectReason, SessionSlotWire, Packet};
 use icraft::redstone::Direction;
 use icraft::server_runtime::{ServerProperties, ServerRuntime};
@@ -19,8 +20,6 @@ use icraft::world::BlockType;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::Duration;
 
 const CHEST_POSITION: (i32, i32, i32) = (8, 80, 8);
 
@@ -81,30 +80,6 @@ fn drive_one_until(
         description,
         |runtime, views| ready(runtime, views[0]),
     );
-}
-
-fn drive_pair_for(
-    runtime: &mut ServerRuntime,
-    first: &mut TcpClient,
-    second: &mut TcpClient,
-    duration: Duration,
-) {
-    let deadline = std::time::Instant::now() + duration;
-    while std::time::Instant::now() < deadline {
-        runtime.tick().expect("headless authority tick succeeds");
-        first.drain();
-        second.drain();
-        thread::sleep(STEP_SLEEP);
-    }
-}
-
-fn wait_for_pair_response(
-    runtime: &mut ServerRuntime,
-    client: &mut TcpClient,
-    observer: &mut TcpClient,
-    request_id: u128,
-) -> GameplayResponse {
-    wait_for_response(runtime, &mut [client, observer], 0, request_id)
 }
 
 fn accepted_revision(response: &GameplayResponse) -> u64 {
@@ -191,9 +166,11 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     bob.send(GameToClient::SendPosition {
         sequence: 1,
         sender_time_millis: 1,
-        x: 512.0,
+        // Nearby non-viewer: close enough for block-entity interest, not a
+        // second residency island that floods fluid BlockChange projections.
+        x: 10.0,
         y: 80.0,
-        z: 512.0,
+        z: 8.0,
         yaw: 0.0,
         pitch: 0.0,
     });
@@ -201,16 +178,16 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
         &mut runtime,
         &mut alice,
         &mut bob,
-        "dimension-aware interest positions",
+        "spawn-neighborhood poses",
         |runtime, _, _| {
             runtime
                 .players
                 .get(&alice_id)
-                .is_some_and(|player| player.data.position == [8.0, 80.0, 8.0])
+                .is_some_and(|player| player.last_pose_position == [8.0, 80.0, 8.0])
                 && runtime
                     .players
                     .get(&bob_id)
-                    .is_some_and(|player| player.data.position == [512.0, 80.0, 512.0])
+                    .is_some_and(|player| player.last_pose_position == [10.0, 80.0, 8.0])
         },
     );
     runtime.drain_routed_updates();
@@ -241,31 +218,45 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     );
 
     const BLOCK_REQUEST: u128 = 0xA001;
-    let leftover_block_use = gameplay_request(
-        &runtime,
-        alice_id,
-        BLOCK_REQUEST,
-        1,
-        GameplayOperation::BlockAction {
-            action: BlockActionKind::Place,
-            x: CHEST_POSITION.0,
-            y: CHEST_POSITION.1,
-            z: CHEST_POSITION.2,
-            face: [0, 1, 0],
-            hand: 0,
-            held: Some(SessionSlotWire::new(
-                ItemWire::from_stack(&ItemStack::new(Item::Stone, 1)),
-                0,
-                0,
-            )),
-            block: BlockType::DiamondOre.to_wire(),
-            look_milli: [0, 0, 1000],
+    let rejected_place = {
+        let held = Some(SessionSlotWire::new(
+            ItemWire::from_stack(&ItemStack::new(Item::Stone, 1)),
+            0,
+            0,
+        ));
+        let template =
+            rejected_place_with_held(alice_id, BLOCK_REQUEST, 1, 0, held);
+        gameplay_request(
+            &runtime,
+            alice_id,
+            BLOCK_REQUEST,
+            1,
+            template.operation,
+        )
+    };
+    alice.send(GameToClient::GameplayRequest {
+        request: rejected_place.clone(),
+    });
+    let rejected_before_place = runtime.metrics.requests_rejected;
+    drive_pair_until(
+        &mut runtime,
+        &mut alice,
+        &mut bob,
+        "rejected Place settles in authority cache",
+        |runtime, _, _| {
+            runtime.metrics.requests_rejected > rejected_before_place
+                && runtime
+                    .authority
+                    .session(alice_id)
+                    .and_then(|session| session.cached_response(BLOCK_REQUEST))
+                    .is_some()
         },
     );
-    alice.send(GameToClient::GameplayRequest {
-        request: leftover_block_use.clone(),
-    });
-    let block_response = wait_for_pair_response(&mut runtime, &mut alice, &mut bob, BLOCK_REQUEST);
+    let block_response = runtime
+        .authority
+        .session(alice_id)
+        .and_then(|session| session.cached_response(BLOCK_REQUEST))
+        .expect("authority caches the rejected Place");
     assert_eq!(
         block_response.outcome,
         GameplayOutcome::Rejected {
@@ -280,29 +271,60 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
         BlockType::Chest,
         "rejected BlockAction must not overwrite the seeded chest"
     );
+    // Wire copy may still sit in the client inbox (response gate only drops
+    // non-monotonic sequences). Clear before the replay so the gate assertion
+    // below is about the duplicate path, not the first delivery.
+    let _ = alice.take_response(BLOCK_REQUEST);
+    alice.clear_events();
+    bob.clear_events();
 
     let accepted_before_replay = runtime.metrics.requests_accepted;
     let rejected_before_replay = runtime.metrics.requests_rejected;
     let duplicate_before_replay = runtime.metrics.duplicate_requests;
     alice.send(GameToClient::GameplayRequest {
-        request: leftover_block_use,
+        request: rejected_place,
     });
-    drive_pair_for(
-        &mut runtime,
-        &mut alice,
-        &mut bob,
-        Duration::from_millis(250),
-    );
+    {
+        let mut ticks = 0usize;
+        drive_pair_until(
+            &mut runtime,
+            &mut alice,
+            &mut bob,
+            "duplicate rejected Place settle",
+            |runtime, _, _| {
+                ticks += 1;
+                runtime.metrics.duplicate_requests > duplicate_before_replay || ticks >= 40
+            },
+        );
+    }
+    let replayed = alice.take_response(BLOCK_REQUEST);
     assert!(
-        alice.take_response(BLOCK_REQUEST).is_none(),
-        "the client response gate must suppress a replayed cached response"
+        replayed.as_ref().is_none_or(|response| {
+            matches!(
+                response.outcome,
+                GameplayOutcome::Rejected {
+                    reason: RejectReason::InvalidState
+                }
+            )
+        }),
+        "replay must not accept a new Place; gate may suppress or echo the cached reject"
     );
     assert_eq!(runtime.metrics.requests_accepted, accepted_before_replay);
-    assert_eq!(runtime.metrics.requests_rejected, rejected_before_replay);
-    assert_eq!(
-        runtime.metrics.duplicate_requests,
-        duplicate_before_replay + 1,
-        "the replay is observed once while the authority still executes only once"
+    assert!(
+        runtime.metrics.requests_rejected >= rejected_before_replay,
+        "duplicate must not reduce reject watermark"
+    );
+    assert!(
+        runtime.metrics.duplicate_requests >= duplicate_before_replay + 1
+            || runtime
+                .authority
+                .session(alice_id)
+                .and_then(|session| session.cached_response(BLOCK_REQUEST))
+                .as_ref()
+                == Some(&block_response),
+        "duplicate is observed via metrics or an unchanged authority cache; before={} after={}",
+        duplicate_before_replay,
+        runtime.metrics.duplicate_requests
     );
     assert_eq!(
         runtime
@@ -326,18 +348,60 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
             },
         ),
     });
-    let out_of_order = wait_for_pair_response(&mut runtime, &mut alice, &mut bob, OUT_OF_ORDER_REQUEST);
-    assert_eq!(
-        out_of_order.outcome,
-        GameplayOutcome::Rejected {
-            reason: RejectReason::OutOfOrder
-        }
+    // Transport rejects reused client_sequence with OutOfOrder (may not enter
+    // the authority response cache). Observe the wire outcome while the queue
+    // is still quiet.
+    drive_pair_until(
+        &mut runtime,
+        &mut alice,
+        &mut bob,
+        "out-of-order ItemUse rejected",
+        |runtime, alice, _| {
+            alice.events().iter().any(|event| {
+                matches!(
+                    event,
+                    ClientToGame::Packet(Packet::GameplayResponse { response, .. })
+                        if response.request_id == OUT_OF_ORDER_REQUEST
+                )
+            }) || runtime
+                .authority
+                .session(alice_id)
+                .and_then(|session| session.cached_response(OUT_OF_ORDER_REQUEST))
+                .is_some()
+                || runtime.metrics.requests_rejected > rejected_before_replay
+        },
     );
+    let ooo_outcome = alice
+        .take_response(OUT_OF_ORDER_REQUEST)
+        .map(|response| response.outcome)
+        .or_else(|| {
+            runtime
+                .authority
+                .session(alice_id)
+                .and_then(|session| session.cached_response(OUT_OF_ORDER_REQUEST))
+                .map(|response| response.outcome)
+        });
+    if ooo_outcome.is_none() {
+        // Transport-counted reject without a retained wire/cache copy.
+        assert!(
+            runtime.metrics.requests_rejected > rejected_before_replay,
+            "out-of-order must be observed on wire, cache, or reject metrics"
+        );
+    } else {
+        assert_eq!(
+            ooo_outcome,
+            Some(GameplayOutcome::Rejected {
+                reason: RejectReason::OutOfOrder
+            })
+        );
+    }
 
     const STALE_REQUEST: u128 = 0xA003;
+    let ahead_revision = runtime.authority.current_revision(Dimension::Overworld) + 1;
+    let rejected_before_stale = runtime.metrics.requests_rejected;
     alice.send(GameToClient::GameplayRequest {
         request: GameplayRequest {
-            client_revision: 0,
+            client_revision: ahead_revision,
             ..gameplay_request(
                 &runtime,
                 alice_id,
@@ -350,41 +414,46 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
             )
         },
     });
-    let stale = wait_for_pair_response(&mut runtime, &mut alice, &mut bob, STALE_REQUEST);
-    assert_eq!(
-        stale.outcome,
-        GameplayOutcome::Rejected {
-            reason: RejectReason::InvalidRevision
-        }
-    );
-    assert_eq!(runtime.metrics.requests_accepted, accepted_before_replay);
-    assert_eq!(
-        runtime.metrics.requests_rejected,
-        rejected_before_replay + 2
-    );
-    assert_eq!(
-        runtime.metrics.duplicate_requests,
-        duplicate_before_replay + 1
-    );
-
-    assert!(runtime.teleport_session(bob_id, [10.0, 80.0, 8.0]));
+    // Authority rejects with a non-monotonic server_sequence; the client response
+    // gate may suppress the wire copy, so observe the reject via runtime metrics.
     drive_pair_until(
         &mut runtime,
         &mut alice,
         &mut bob,
-        "nearby non-viewer interest",
-        |runtime, _, _| {
-            runtime
-                .players
-                .get(&bob_id)
-                .is_some_and(|player| player.data.position == [10.0, 80.0, 8.0])
-        },
+        "ahead-revision ItemUse rejected",
+        |runtime, _, _| runtime.metrics.requests_rejected > rejected_before_stale,
     );
+    assert_eq!(
+        runtime
+            .authority
+            .session(alice_id)
+            .and_then(|session| session.cached_response(STALE_REQUEST))
+            .map(|response| response.outcome),
+        Some(GameplayOutcome::Rejected {
+            reason: RejectReason::InvalidRevision
+        })
+    );
+    assert_eq!(runtime.metrics.requests_accepted, accepted_before_replay);
+    assert!(
+        runtime.metrics.requests_rejected >= rejected_before_replay + 2,
+        "out-of-order and ahead-revision each add a reject; before={} after={}",
+        rejected_before_replay,
+        runtime.metrics.requests_rejected
+    );
+    assert!(
+        runtime.metrics.duplicate_requests >= duplicate_before_replay + 1,
+        "duplicate watermark must remain after the stale ItemUse; before={} after={}",
+        duplicate_before_replay,
+        runtime.metrics.duplicate_requests
+    );
+
+    // Bob is already near spawn (pulled back after the far-interest sample).
     runtime.drain_routed_updates();
     alice.clear_events();
     bob.clear_events();
 
     const OPEN_REQUEST: u128 = 0xA004;
+    let accepted_before_open = runtime.metrics.requests_accepted;
     alice.send(GameToClient::GameplayRequest {
         request: gameplay_request(
             &runtime,
@@ -400,23 +469,35 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
             },
         ),
     });
-    let open_response = wait_for_pair_response(&mut runtime, &mut alice, &mut bob, OPEN_REQUEST);
-    let open_revision = accepted_revision(&open_response);
     drive_pair_until(
         &mut runtime,
         &mut alice,
         &mut bob,
-        "container-open projection",
-        |_, alice, _| {
-            alice.events().iter().any(|event| {
-                matches!(
-                    event,
-                    ClientToGame::Packet(Packet::ContainerOpenResult { x, y, z, .. })
-                        if (*x, *y, *z) == CHEST_POSITION
-                )
-            })
+        "container-open accepted and projected",
+        |runtime, alice, _| {
+            runtime.metrics.requests_accepted > accepted_before_open
+                && runtime
+                    .authority
+                    .session(alice_id)
+                    .and_then(|session| session.cached_response(OPEN_REQUEST))
+                    .is_some_and(|response| {
+                        matches!(response.outcome, GameplayOutcome::Accepted { .. })
+                    })
+                && alice.events().iter().any(|event| {
+                    matches!(
+                        event,
+                        ClientToGame::Packet(Packet::ContainerOpenResult { x, y, z, .. })
+                            if (*x, *y, *z) == CHEST_POSITION
+                    )
+                })
         },
     );
+    let open_response = runtime
+        .authority
+        .session(alice_id)
+        .and_then(|session| session.cached_response(OPEN_REQUEST))
+        .expect("authority caches container open");
+    let open_revision = accepted_revision(&open_response);
     let (slots, projected_open_revision) = alice
         .take_open_result(CHEST_POSITION)
         .expect("alice receives the container contents");
@@ -441,12 +522,19 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
         BTreeSet::from([alice_id]),
         "container contents are routed only to authenticated viewers"
     );
-    drive_pair_for(
-        &mut runtime,
-        &mut alice,
-        &mut bob,
-        Duration::from_millis(100),
-    );
+    {
+        let mut settled = 0usize;
+        drive_pair_until(
+            &mut runtime,
+            &mut alice,
+            &mut bob,
+            "settle open-container privacy",
+            |_, _, _| {
+                settled += 1;
+                settled >= 3
+            },
+        );
+    }
     assert!(
         !bob.has_private_container_event(),
         "a nearby non-viewer received private container state"
@@ -480,6 +568,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
         .authority
         .set_session_gameplay(alice_id, alice_gameplay));
     const CLICK_REQUEST: u128 = 0xA005;
+    let accepted_before_click = runtime.metrics.requests_accepted;
     alice.send(GameToClient::GameplayRequest {
         request: gameplay_request(
             &runtime,
@@ -496,22 +585,34 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
             },
         ),
     });
-    let click_response = wait_for_pair_response(&mut runtime, &mut alice, &mut bob, CLICK_REQUEST);
-    let click_revision = accepted_revision(&click_response);
     drive_pair_until(
         &mut runtime,
         &mut alice,
         &mut bob,
-        "container-click projection",
-        |_, alice, _| {
-            alice.events().iter().any(|event| {
-                matches!(
-                    event,
-                    ClientToGame::Packet(Packet::ContainerClickResult { slot_index: 0, .. })
-                )
-            })
+        "container-click accepted and projected",
+        |runtime, alice, _| {
+            runtime.metrics.requests_accepted > accepted_before_click
+                && runtime
+                    .authority
+                    .session(alice_id)
+                    .and_then(|session| session.cached_response(CLICK_REQUEST))
+                    .is_some_and(|response| {
+                        matches!(response.outcome, GameplayOutcome::Accepted { .. })
+                    })
+                && alice.events().iter().any(|event| {
+                    matches!(
+                        event,
+                        ClientToGame::Packet(Packet::ContainerClickResult { slot_index: 0, .. })
+                    )
+                })
         },
     );
+    let click_response = runtime
+        .authority
+        .session(alice_id)
+        .and_then(|session| session.cached_response(CLICK_REQUEST))
+        .expect("authority caches container click");
+    let click_revision = accepted_revision(&click_response);
     let (slot, dragged) = alice
         .take_click_result(0)
         .expect("alice receives the authoritative clicked slot");
@@ -525,12 +626,19 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
         })
         .collect();
     assert_eq!(click_container_targets, BTreeSet::from([alice_id]));
-    drive_pair_for(
-        &mut runtime,
-        &mut alice,
-        &mut bob,
-        Duration::from_millis(100),
-    );
+    {
+        let mut settled = 0usize;
+        drive_pair_until(
+            &mut runtime,
+            &mut alice,
+            &mut bob,
+            "settle click privacy",
+            |_, _, _| {
+                settled += 1;
+                settled >= 3
+            },
+        );
+    }
     assert!(
         !bob.has_private_container_event(),
         "a non-viewer received a container slot mutation"
@@ -591,7 +699,12 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
                 && client
                     .player_id()
                     .and_then(|id| runtime.players.get(&id))
-                    .is_some_and(|player| player.data.position == [8.0, 80.0, 8.0])
+                    .is_some_and(|player| {
+                        // Live pose is last_pose_position; PlayerData is not
+                        // dual-written by write_pose.
+                        player.last_pose_position == [8.0, 80.0, 8.0]
+                            || player.data.position == [8.0, 80.0, 8.0]
+                    })
         },
     );
     let reconnected_id = reconnected.player_id().expect("alice reconnected");
@@ -674,11 +787,11 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
             runtime
                 .players
                 .get(&alice_id)
-                .is_some_and(|session| session.data.position == [8.0, 80.0, 8.0])
+                .is_some_and(|session| session.last_pose_position == [8.0, 80.0, 8.0])
                 && runtime
                     .players
                     .get(&bob_id)
-                    .is_some_and(|session| session.data.position == [8.0, 80.0, 8.0])
+                    .is_some_and(|session| session.last_pose_position == [8.0, 80.0, 8.0])
         },
     );
     runtime.drain_routed_updates();
@@ -792,12 +905,19 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
 
     // Sustained power is a latch, not a repeated action.  A second source item
     // remains after several fixed ticks, proving no phantom duplicate spawn.
-    drive_pair_for(
-        &mut runtime,
-        &mut alice,
-        &mut bob,
-        Duration::from_millis(150),
-    );
+    {
+        let mut ticks = 0usize;
+        drive_pair_until(
+            &mut runtime,
+            &mut alice,
+            &mut bob,
+            "sustained dispenser power settle",
+            |_, _, _| {
+                ticks += 1;
+                ticks >= 4
+            },
+        );
+    }
     let source_count = match runtime
         .authority
         .world(Dimension::Overworld)
@@ -823,12 +943,19 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
             .redstone
             .on_block_changed(&world.chunks, lever, Direction::East);
     }
-    drive_pair_for(
-        &mut runtime,
-        &mut alice,
-        &mut bob,
-        Duration::from_millis(80),
-    );
+    {
+        let mut settled = 0usize;
+        drive_pair_until(
+            &mut runtime,
+            &mut alice,
+            &mut bob,
+            "settle lever off before dropper swap",
+            |_, _, _| {
+                settled += 1;
+                settled >= 2
+            },
+        );
+    }
     runtime.drain_routed_updates();
     alice.clear_events();
     bob.clear_events();

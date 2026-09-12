@@ -13,9 +13,8 @@ use super::format::{
 };
 use super::region::{ATOMIC_WRITE_FAILPOINT, COMPRESS_FAILPOINT};
 
-#[test]
-fn test_serialization_roundtrips() {
-    let level = LevelData {
+fn sample_level() -> LevelData {
+    LevelData {
         seed: 12345,
         time: 6000,
         spawn_x: 8,
@@ -25,13 +24,11 @@ fn test_serialization_roundtrips() {
         spawn_yaw: 0.0,
         version: 2,
         ..LevelData::default()
-    };
-    let encoded_level = bincode::serialize(&level).unwrap();
-    let decoded_level: LevelData = bincode::deserialize(&encoded_level).unwrap();
-    assert_eq!(level.seed, decoded_level.seed);
-    assert_eq!(level.time, decoded_level.time);
+    }
+}
 
-    let player = PlayerData {
+fn sample_player() -> PlayerData {
+    PlayerData {
         position: [1.0, 2.0, 3.0],
         velocity: [0.1, 0.2, 0.3],
         yaw: 1.5,
@@ -69,7 +66,19 @@ fn test_serialization_roundtrips() {
         unlocked_recipes: Default::default(),
         bad_omen_level: 0,
         hero_of_the_village_timer: 0.0,
-    };
+    }
+}
+
+
+#[test]
+fn test_serialization_roundtrips() {
+    let level = sample_level();
+    let encoded_level = bincode::serialize(&level).unwrap();
+    let decoded_level: LevelData = bincode::deserialize(&encoded_level).unwrap();
+    assert_eq!(level.seed, decoded_level.seed);
+    assert_eq!(level.time, decoded_level.time);
+
+    let player = sample_player();
     let encoded_player = bincode::serialize(&player).unwrap();
     let decoded_player: PlayerData = bincode::deserialize(&encoded_player).unwrap();
     assert_eq!(player.position, decoded_player.position);
@@ -179,15 +188,7 @@ fn versioned_player_codec_preserves_real_cursor_metadata_and_provenance() {
         hero_of_the_village_timer: 0.0,
     };
 
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let world_dir = std::env::temp_dir().join(format!(
-        "icraft_cursor_player_save_{}_{}",
-        std::process::id(),
-        unique
-    ));
+    let world_dir = unique_test_dir("cursor_player_save");
     let manager = SaveManager::new(&world_dir);
     manager
         .save_player_and_level(
@@ -244,15 +245,7 @@ fn previous_bincode_player_fixture_migrates_without_a_cursor() {
     let legacy_fixture = bincode::serialize(&previous).unwrap();
     assert!(!legacy_fixture.starts_with(PLAYER_SAVE_MAGIC));
 
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let world_dir = std::env::temp_dir().join(format!(
-        "icraft_previous_player_save_{}_{}",
-        std::process::id(),
-        unique
-    ));
+    let world_dir = unique_test_dir("previous_player_save");
     fs::create_dir_all(&world_dir).unwrap();
     fs::write(
         world_dir.join("level.dat"),
@@ -286,15 +279,7 @@ fn previous_bincode_player_fixture_migrates_without_a_cursor() {
 
 #[test]
 fn saved_chunk_restores_player_placed_blocks() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let world_dir = std::env::temp_dir().join(format!(
-        "icraft_chunk_save_{}_{}",
-        std::process::id(),
-        unique
-    ));
+    let world_dir = unique_test_dir("chunk_save");
 
     let mut original = Chunk::new(0, 0);
     original.set_block_local(8, 100, 8, BlockType::Brick);
@@ -442,15 +427,7 @@ fn automation_block_entities_roundtrip() {
 
 #[test]
 fn dimension_chunk_namespaces_are_independent() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let world_dir = std::env::temp_dir().join(format!(
-        "icraft_dimension_save_{}_{}",
-        std::process::id(),
-        unique
-    ));
+    let world_dir = unique_test_dir("dimension_save");
     let mut manager = SaveManager::new(&world_dir);
     let cases = [
         (crate::dimension::Dimension::Overworld, BlockType::Brick),
@@ -487,15 +464,7 @@ fn dimension_chunk_namespaces_are_independent() {
 
 #[test]
 fn current_dimension_sidecar_roundtrips_and_defaults_to_overworld() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let world_dir = std::env::temp_dir().join(format!(
-        "icraft_dimension_state_{}_{}",
-        std::process::id(),
-        unique
-    ));
+    let world_dir = unique_test_dir("dimension_state");
     let manager = SaveManager::new(&world_dir);
     assert_eq!(
         manager.load_current_dimension(),
@@ -513,15 +482,7 @@ fn current_dimension_sidecar_roundtrips_and_defaults_to_overworld() {
 
 #[test]
 fn redstone_metadata_sidecar_roundtrips_through_save_and_load() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let world_dir = std::env::temp_dir().join(format!(
-        "icraft_redstone_sidecar_{}_{}",
-        std::process::id(),
-        unique
-    ));
+    let world_dir = unique_test_dir("redstone_sidecar");
 
     let chunk = Chunk::new(-2, 5);
     let metadata = vec![crate::redstone::RedstoneComponentMetadata {
@@ -638,15 +599,7 @@ fn chunk_saved_without_redstone_sidecar_loads_as_empty_metadata() {
         fluid_levels: Vec<u8>,
     }
 
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let world_dir = std::env::temp_dir().join(format!(
-        "icraft_redstone_legacy_{}_{}",
-        std::process::id(),
-        unique
-    ));
+    let world_dir = unique_test_dir("redstone_legacy");
 
     let chunk = Chunk::new(0, 0);
     let mut manager = SaveManager::new(&world_dir);
@@ -1473,15 +1426,7 @@ fn offhand_save_roundtrip_and_legacy_migration() {
 
 #[test]
 fn migration_fixture_legacy_0_to_255_preserves_data_and_creates_backup() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let world_dir = std::env::temp_dir().join(format!(
-        "icraft_migration_test_{}_{}",
-        std::process::id(),
-        unique
-    ));
+    let world_dir = unique_test_dir("migration_test");
 
     // 1. Create a legacy 256-height format ChunkSaveData fixture (data_version = 0)
     // representing a historical save at chunk (0, 0).
@@ -1580,15 +1525,7 @@ fn migration_fixture_legacy_0_to_255_preserves_data_and_creates_backup() {
 
 #[test]
 fn test_corrupt_region_file_is_not_overwritten_on_save_failure() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let world_dir = std::env::temp_dir().join(format!(
-        "icraft_corrupt_save_test_{}_{}",
-        std::process::id(),
-        unique
-    ));
+    let world_dir = unique_test_dir("corrupt_save_test");
 
     let mut manager = SaveManager::new(&world_dir);
     let region_path = world_dir.join("regions").join("r.0.0.bin");

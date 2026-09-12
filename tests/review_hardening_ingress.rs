@@ -6,7 +6,7 @@
 mod common;
 
 use common::tcp_harness::{
-    drive_until, gameplay_request, temp_world, wait_for_response, HeldLoopback, TcpClient,
+    connect_loopback_std, drive_until, gameplay_request, temp_world, HeldLoopback, TcpClient,
 };
 use icraft::inventory::Item;
 use icraft::network::client::ClientToGame;
@@ -14,7 +14,7 @@ use icraft::network::protocol::{GameplayOperation, Packet, PROTOCOL_VERSION};
 use icraft::server_runtime::{ServerProperties, ServerRuntime};
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const POSITION: [f32; 3] = [8.0, 80.0, 8.0];
 
@@ -49,16 +49,7 @@ fn read_packet(stream: &mut TcpStream) -> Packet {
 }
 
 fn handshake(address: &str, username: &str) -> (TcpStream, u64) {
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let mut stream = loop {
-        match TcpStream::connect(address) {
-            Ok(stream) => break stream,
-            Err(_) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(error) => panic!("flooder could not connect to {address}: {error}"),
-        }
-    };
+    let mut stream = connect_loopback_std(address);
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
@@ -148,11 +139,24 @@ fn pose_and_oversized_chat_flood_does_not_block_peer_gameplay() {
             count: 1,
         },
     );
+    let accepted_before = runtime.metrics.requests_accepted;
+    let rejected_before = runtime.metrics.requests_rejected;
     peer.send_request(gameplay);
-    let _response = {
+    {
         let mut refs: Vec<&mut TcpClient> = vec![&mut peer];
-        wait_for_response(&mut runtime, &mut refs, 0, 12)
-    };
+        // Empty-hand ItemUse rejects with a non-monotonic server_sequence, so the
+        // client response gate may suppress the wire copy. Observe processing via
+        // runtime metrics instead of wait_for_response.
+        drive_until(
+            &mut runtime,
+            &mut refs,
+            "peer gameplay processed under flood",
+            |runtime, _| {
+                runtime.metrics.requests_accepted > accepted_before
+                    || runtime.metrics.requests_rejected > rejected_before
+            },
+        );
+    }
 
     peer.drain();
     assert!(

@@ -328,6 +328,33 @@ pub fn wait_for_response(
     }
 }
 
+/// Prefer authority cache over the wire when HOST_EVENT_QUEUE floods can drop
+/// GameplayResponse ACKs. Domain acceptance is what Plan30 locks.
+pub fn wait_for_cached_response(
+    runtime: &mut ServerRuntime,
+    clients: &mut [&mut TcpClient],
+    player_id: u64,
+    request_id: u128,
+) -> GameplayResponse {
+    drive_until(
+        runtime,
+        clients,
+        &format!("authority cache for request {request_id}"),
+        |runtime, _| {
+            runtime
+                .authority
+                .session(player_id)
+                .and_then(|session| session.cached_response(request_id))
+                .is_some()
+        },
+    );
+    runtime
+        .authority
+        .session(player_id)
+        .and_then(|session| session.cached_response(request_id))
+        .expect("authority response cache must retain the request")
+}
+
 /// Isolated temp world directory. `prefix` is the stem after `icraft-`,
 /// e.g. `plan30-listen` → `icraft-plan30-listen-{nanos}`.
 pub fn temp_world(prefix: &str) -> PathBuf {

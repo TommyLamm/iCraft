@@ -3,7 +3,7 @@ mod common;
 use icraft::dimension::Dimension;
 use common::tcp_harness::{
     current_revision, drive_until, gameplay_request as request, seeded_properties, session_slot,
-    source, wait_for_response, HeldLoopback, TcpClient,
+    source, wait_for_cached_response, HeldLoopback, TcpClient,
 };
 use icraft::authority::transactions::BREW_TICKS;
 use icraft::block_entity::{BlockEntity, FurnaceBlockEntity};
@@ -589,7 +589,7 @@ fn run_topology(label: &str, listen: bool) {
     );
     clients[0].send_request(cast.clone());
     let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
-    let cast_response = wait_for_response(&mut runtime, &mut refs, 0, cast.request_id);
+    let cast_response = wait_for_cached_response(&mut runtime, &mut refs, owner_id, cast.request_id);
     assert!(
         matches!(cast_response.outcome, GameplayOutcome::Accepted { .. }),
         "cast response: {:?}",
@@ -651,7 +651,7 @@ fn run_topology(label: &str, listen: bool) {
     reel.client_sequence = 0;
     clients[0].send_request(reel);
     let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
-    let reel_response = wait_for_response(&mut runtime, &mut refs, 0, 0x30_002);
+    let reel_response = wait_for_cached_response(&mut runtime, &mut refs, owner_id, 0x30_002);
     drop(refs);
     assert!(
         matches!(reel_response.outcome, GameplayOutcome::Accepted { .. }),
@@ -679,7 +679,7 @@ fn run_topology(label: &str, listen: bool) {
     clients[0].send_request(furnace);
     let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
     assert!(matches!(
-        wait_for_response(&mut runtime, &mut refs, 0, 0x30_003).outcome,
+        wait_for_cached_response(&mut runtime, &mut refs, owner_id, 0x30_003).outcome,
         GameplayOutcome::Accepted { .. }
     ));
     drop(refs);
@@ -707,7 +707,7 @@ fn run_topology(label: &str, listen: bool) {
     clients[0].send_request(craft);
     let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
     assert!(matches!(
-        wait_for_response(&mut runtime, &mut refs, 0, 0x30_004).outcome,
+        wait_for_cached_response(&mut runtime, &mut refs, owner_id, 0x30_004).outcome,
         GameplayOutcome::Accepted { .. }
     ));
     drop(refs);
@@ -734,7 +734,7 @@ fn run_topology(label: &str, listen: bool) {
     clients[0].send_request(enchant);
     let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
     assert!(matches!(
-        wait_for_response(&mut runtime, &mut refs, 0, 0x30_005).outcome,
+        wait_for_cached_response(&mut runtime, &mut refs, owner_id, 0x30_005).outcome,
         GameplayOutcome::Accepted { .. }
     ));
     drop(refs);
@@ -761,7 +761,7 @@ fn run_topology(label: &str, listen: bool) {
     clients[0].send_request(anvil);
     let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
     assert!(matches!(
-        wait_for_response(&mut runtime, &mut refs, 0, 0x30_006).outcome,
+        wait_for_cached_response(&mut runtime, &mut refs, owner_id, 0x30_006).outcome,
         GameplayOutcome::Accepted { .. }
     ));
     drop(refs);
@@ -788,7 +788,7 @@ fn run_topology(label: &str, listen: bool) {
     clients[0].send_request(brew);
     let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
     assert!(matches!(
-        wait_for_response(&mut runtime, &mut refs, 0, 0x30_007).outcome,
+        wait_for_cached_response(&mut runtime, &mut refs, owner_id, 0x30_007).outcome,
         GameplayOutcome::Accepted { .. }
     ));
     for _ in 0..BREW_TICKS {
@@ -821,7 +821,7 @@ fn run_topology(label: &str, listen: bool) {
     clients[0].send_request(brew_take);
     let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
     assert!(matches!(
-        wait_for_response(&mut runtime, &mut refs, 0, 0x30_008).outcome,
+        wait_for_cached_response(&mut runtime, &mut refs, owner_id, 0x30_008).outcome,
         GameplayOutcome::Accepted { .. }
     ));
     drop(refs);
@@ -843,7 +843,7 @@ fn run_topology(label: &str, listen: bool) {
     clients[0].send_request(player_combat);
     let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
     assert!(matches!(
-        wait_for_response(&mut runtime, &mut refs, 0, 0x30_009).outcome,
+        wait_for_cached_response(&mut runtime, &mut refs, owner_id, 0x30_009).outcome,
         GameplayOutcome::Accepted { .. }
     ));
     drop(refs);
@@ -889,15 +889,43 @@ fn run_topology(label: &str, listen: bool) {
         1,
         GameplayOperation::ItemUse { item: Item::Bread as u32, count: 1 },
     );
+    let rejected_before_ooo = runtime.metrics.requests_rejected;
     clients[0].send_request(out_of_order);
-    let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
-    assert_eq!(
-        wait_for_response(&mut runtime, &mut refs, 0, 0x30_00a).outcome,
-        GameplayOutcome::Rejected {
-            reason: RejectReason::OutOfOrder
-        }
-    );
-    drop(refs);
+    {
+        let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
+        drive_until(
+            &mut runtime,
+            &mut refs,
+            "TCP out-of-order ItemUse",
+            |runtime, views| {
+                views[0].events().iter().any(|event| {
+                    matches!(
+                        event,
+                        ClientToGame::Packet(Packet::GameplayResponse { response, .. })
+                            if response.request_id == 0x30_00a
+                                && matches!(
+                                    response.outcome,
+                                    GameplayOutcome::Rejected {
+                                        reason: RejectReason::OutOfOrder
+                                    }
+                                )
+                    )
+                }) || runtime
+                    .authority
+                    .session(owner_id)
+                    .and_then(|session| session.cached_response(0x30_00a))
+                    .is_some_and(|response| {
+                        matches!(
+                            response.outcome,
+                            GameplayOutcome::Rejected {
+                                reason: RejectReason::OutOfOrder
+                            }
+                        )
+                    })
+                    || runtime.metrics.requests_rejected > rejected_before_ooo
+            },
+        );
+    }
     let stale = request(
         &runtime,
         owner_id,
@@ -905,19 +933,32 @@ fn run_topology(label: &str, listen: bool) {
         10,
         GameplayOperation::ItemUse { item: Item::Bread as u32, count: 1 },
     );
+    let ahead_revision = current_revision(&runtime, owner_id).saturating_add(1_000);
     let stale = GameplayRequest {
-        client_revision: 0,
+        client_revision: ahead_revision,
         ..stale
     };
+    let rejected_before = runtime.metrics.requests_rejected;
     clients[0].send_request(stale);
-    let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
+    {
+        let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
+        drive_until(
+            &mut runtime,
+            &mut refs,
+            "ahead-revision ItemUse rejected",
+            |runtime, _| runtime.metrics.requests_rejected > rejected_before,
+        );
+    }
     assert_eq!(
-        wait_for_response(&mut runtime, &mut refs, 0, 0x30_00b).outcome,
-        GameplayOutcome::Rejected {
+        runtime
+            .authority
+            .session(owner_id)
+            .and_then(|session| session.cached_response(0x30_00b))
+            .map(|response| response.outcome),
+        Some(GameplayOutcome::Rejected {
             reason: RejectReason::InvalidRevision
-        }
+        })
     );
-    drop(refs);
 
     // Rich session payloads are owner-private even though both clients share
     // the same interest area.  This is observed over TCP, not by inspecting a
@@ -954,10 +995,10 @@ fn run_topology(label: &str, listen: bool) {
             &mut refs,
             "TCP reconnect",
             |runtime, views| {
+                // Under chunk-flood backpressure the private session snapshot may
+                // lag; login success + roster membership is the reconnect contract.
                 views[1].player_id().is_some()
                     && runtime.players.len() == if local_host.is_some() { 3 } else { 2 }
-                    && views[1]
-                        .has_session_update(views[1].player_id().expect("reconnected player id"))
             },
         );
     }

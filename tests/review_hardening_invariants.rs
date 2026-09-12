@@ -5,6 +5,7 @@
 
 mod common;
 
+use common::rejected_place::rejected_place;
 use common::tcp_harness::HeldLoopback;
 use icraft::authority::contract::{SessionContract, SessionGameplayState, SessionInventorySlot};
 use icraft::authority::{AuthorityConfig, AuthorityCore};
@@ -37,27 +38,6 @@ fn register(core: &mut AuthorityCore, id: u64, name: &str, dimension: Dimension)
         true,
     ))
     .expect("register fixture session");
-}
-
-fn leftover_block_use(session_id: u64, request_id: u128, client_sequence: u64) -> GameplayRequest {
-    GameplayRequest {
-        request_id,
-        client_sequence,
-        session_id,
-        dimension: Dimension::Overworld as u8,
-        client_revision: 0,
-        operation: GameplayOperation::BlockAction {
-            action: BlockActionKind::Place,
-            x: 8,
-            y: 80,
-            z: 8,
-            face: [0, 1, 0],
-            hand: 0,
-            held: None,
-            block: BlockType::Stone.to_wire(),
-            look_milli: [0, 0, 1000],
-        },
-    }
 }
 
 fn stone_wire() -> SessionSlotWire {
@@ -146,10 +126,11 @@ fn checksum_after_inbound(order: [u64; 2]) -> u64 {
         .entities
         .spawn(EntityType::Zombie, glam::Vec3::new(10.0, 80.0, 10.0));
     for (index, id) in order.iter().copied().enumerate() {
-        let response = core.submit_request(leftover_block_use(
+        let response = core.submit_request(rejected_place(
             id,
             u128::from(id) * 10 + index as u128,
             1,
+            0,
         ));
         assert!(
             matches!(

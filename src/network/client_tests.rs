@@ -192,7 +192,6 @@ fn receives_targeted_chunk_catchup_and_time_sync() {
     let _ = server_rx
         .recv_timeout(Duration::from_secs(3))
         .expect("join event missing");
-    std::thread::sleep(Duration::from_millis(50));
 
     host_tx
         .try_send(HostToServer::project_broadcast(Packet::BlockChange {
@@ -1405,7 +1404,8 @@ fn non_local_player_session_update_is_not_enqueued() {
                 })
                 .await
                 .unwrap();
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            // Keep the socket open until the client disconnects after asserting.
+            let _ = connection.recv().await;
         });
     });
 

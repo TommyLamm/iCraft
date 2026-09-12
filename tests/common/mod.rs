@@ -8,4 +8,6 @@
 #[allow(dead_code)]
 pub mod authority_harness;
 #[allow(dead_code)]
+pub mod rejected_place;
+#[allow(dead_code)]
 pub mod tcp_harness;

@@ -83,7 +83,7 @@
 | 25 | [結構生成 helper 與雙 End City](25_structure_gen_helpers_and_end_city.md) | P2 | ~-450 行 box／chest／start 樣板；一套 End City 放置 | 無 | 已完成 |
 | 26 | [`ChunkManager` 拆 presentation／authority，dense chunk grid](26_chunk_manager_split_and_dense_grid.md) | P2 | 權威 `set_block` 不再維護兩個無人 drain 的 mesh set；每 `get_block` 少 hash | 15、17 | 已完成 |
 | 27 | [巨檔機械切分：server_world／server_runtime／dispatch／network／mesh／block／redstone／catalog／state](27_giant_file_splits.md) | P2 | 導航與編譯隔離；~9,000 行 inline 測試移出 | 01–06 | 已完成 |
-| 28 | [測試瘦身：拓撲三重跑、leftover fixture、sleep、roundtrip 表、存檔 fixture](28_test_slimming.md) | P2 | ~-1,500 行測試；少 50–300 ms sleep padding | 09 波 02、16 | 未開始 |
+| 28 | [測試瘦身：拓撲三重跑、leftover fixture、sleep、roundtrip 表、存檔 fixture](28_test_slimming.md) | P2 | ~-1,500 行測試；少 50–300 ms sleep padding | 09 波 02、16 | 已完成 |
 
 ---
 
