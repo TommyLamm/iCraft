@@ -93,17 +93,17 @@ impl Chunk {
     }
 
     pub fn new_with_seed(chunk_x: i32, chunk_z: i32, world_seed: u32) -> Self {
-        // Dense full-height block array for the signed overworld range.
-        // Indexed [x][local_y][z] where local_y = world_y - min_y.
         let height = crate::dimension::WorldHeight::OVERWORLD;
         let min_y = height.min_y();
-        let total_height = height.height() as usize;
-        let mut blocks: Vec<Vec<[BlockType; CHUNK_DEPTH]>> =
-            vec![vec![[BlockType::Air; CHUNK_DEPTH]; total_height]; CHUNK_WIDTH];
+        let mut chunk = Self::empty_in_dimension(
+            crate::dimension::Dimension::Overworld,
+            chunk_x,
+            chunk_z,
+        );
 
         let ctx = crate::worldgen::WorldGenContext::new(world_seed);
 
-        // Fill terrain density.
+        // Fill terrain density and carve caves directly into paletted sections.
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
                 let wx = chunk_x * CHUNK_WIDTH as i32 + x as i32;
@@ -112,11 +112,12 @@ impl Chunk {
                 let biome = ctx.biome_at(wx, wz);
 
                 for wy in min_y..height.max_y_exclusive() {
-                    let ly = (wy - min_y) as usize;
                     let block = ctx
                         .block_at_sampled(wx, wy, wz, surface_y, biome)
                         .unwrap_or(BlockType::Air);
-                    blocks[x][ly][z] = block;
+                    if block != BlockType::Air {
+                        chunk.set_block_local(x, wy, z, block);
+                    }
                 }
 
                 // Carve caves after surface generation. Density fill only places
@@ -124,125 +125,33 @@ impl Chunk {
                 // above `surface_y`.
                 let carve_top = surface_y.min(height.max_y_exclusive() - 1);
                 for wy in min_y..=carve_top {
-                    let ly = (wy - min_y) as usize;
-                    let current = blocks[x][ly][z];
+                    let current = chunk.get_block_local(x, wy, z);
                     if current == BlockType::Air || current == BlockType::Water {
                         continue;
                     }
                     if ctx.carver.is_carved(wx, wy, wz, surface_y) {
                         if ctx.carver.is_lava_lake(wx, wy, wz) {
-                            blocks[x][ly][z] = BlockType::Lava;
+                            chunk.set_block_local(x, wy, z, BlockType::Lava);
                         } else {
-                            blocks[x][ly][z] = BlockType::Air;
+                            chunk.set_block_local(x, wy, z, BlockType::Air);
                         }
                     }
                 }
             }
         }
 
-        // Place ore veins.
-        ctx.ore.place_ores(
-            &mut blocks,
-            chunk_x,
-            chunk_z,
-            (min_y as i32).unsigned_abs() as usize,
-        );
-
-        // Place trees and plants.
+        ctx.ore.place_ores(&mut chunk, chunk_x, chunk_z);
         crate::worldgen::feature::FeaturePlacer::new(world_seed).place_features(
-            &ctx,
-            &mut blocks,
-            chunk_x,
-            chunk_z,
-            (min_y as i32).unsigned_abs() as usize,
+            &ctx, &mut chunk, chunk_x, chunk_z,
         );
-
-        // Compute sky/block light and heightmap.
-        let mut sky_light: Vec<Vec<[u8; CHUNK_DEPTH]>> =
-            vec![vec![[0u8; CHUNK_DEPTH]; total_height]; CHUNK_WIDTH];
-        let mut block_light: Vec<Vec<[u8; CHUNK_DEPTH]>> =
-            vec![vec![[0u8; CHUNK_DEPTH]; total_height]; CHUNK_WIDTH];
-        let mut heightmap: Box<[[i16; CHUNK_DEPTH]; CHUNK_WIDTH]> =
-            vec![[NO_HEIGHT; CHUNK_DEPTH]; CHUNK_WIDTH]
-                .try_into()
-                .unwrap();
 
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
-                let mut direct_sky = 15u8;
-                let mut found_h = false;
-                for wy in (min_y..height.max_y_exclusive()).rev() {
-                    let ly = (wy - min_y) as usize;
-                    let block = blocks[x][ly][z];
-                    if !found_h && block != BlockType::Air {
-                        heightmap[x][z] = wy.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-                        found_h = true;
-                    }
-                    if block.properties().render_type == crate::world::RenderType::Opaque {
-                        direct_sky = 0;
-                    }
-                    sky_light[x][ly][z] = direct_sky;
-                    block_light[x][ly][z] = block.properties().light_emission;
-                }
+                chunk.update_heightmap(x, z);
             }
         }
-
-        // Convert dense array to signed sections.
-        let mut sections = Vec::with_capacity(height.section_count());
-        for sec_idx in 0..height.section_count() {
-            let sec_y = height.section_y_at_index(sec_idx);
-            let mut sec_b = [BlockType::Air; 4096];
-            let mut sec_sk = [0u8; 4096];
-            let mut sec_bl = [0u8; 4096];
-            for ly in 0..SECTION_SIZE {
-                let wy = section_and_local_y_to_world_y(sec_y, ly as u8);
-                if height.contains_y(wy) {
-                    let arr_ly = (wy - min_y) as usize;
-                    for z in 0..CHUNK_DEPTH {
-                        for x in 0..CHUNK_WIDTH {
-                            let idx = (ly << 8) | (z << 4) | x;
-                            sec_b[idx] = blocks[x][arr_ly][z];
-                            sec_sk[idx] = sky_light[x][arr_ly][z];
-                            sec_bl[idx] = block_light[x][arr_ly][z];
-                        }
-                    }
-                }
-            }
-            let sec = ChunkSection::from_dense(&sec_b, &sec_sk, &sec_bl, None, None);
-            if sec.non_air_count() == 0
-                && sec_sk.iter().all(|&l| l == 0)
-                && sec_bl.iter().all(|&l| l == 0)
-            {
-                sections.push(None);
-            } else {
-                sections.push(Some(sec));
-            }
-        }
-
-        let torch_positions =
-            Self::build_torch_index_from_sections(height.min_section_y(), &sections);
-        let redstone_positions =
-            Self::build_redstone_index_from_sections(height.min_section_y(), &sections);
-        let furnace_positions =
-            Self::build_furnace_index_from_sections(height.min_section_y(), &sections);
-        let hopper_positions =
-            Self::build_hopper_index_from_sections(height.min_section_y(), &sections);
-        let random_tick_sections =
-            Self::build_random_tick_index_from_sections(height.min_section_y(), &sections);
-
-        Self {
-            chunk_x,
-            chunk_z,
-            min_section_y: height.min_section_y(),
-            sections,
-            heightmap,
-            torch_positions,
-            redstone_positions,
-            furnace_positions,
-            hopper_positions,
-            random_tick_sections,
-            block_entities: std::collections::HashMap::new(),
-        }
+        chunk.recompute_direct_column_lighting();
+        chunk
     }
 
     fn encode_torch_position(x: usize, y: i32, z: usize) -> u32 {

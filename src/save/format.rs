@@ -830,7 +830,6 @@ struct FlattenedVoxels {
 fn flatten_column_voxels(chunk: &Chunk, include_light: bool) -> FlattenedVoxels {
     let section_count = chunk.sections.len();
     let total_height = section_count * 16;
-    let min_y = chunk.min_section_y as i32 * 16;
     let voxels = 16 * total_height * 16;
 
     let mut blocks = Vec::with_capacity(voxels);
@@ -847,20 +846,42 @@ fn flatten_column_voxels(chunk: &Chunk, include_light: bool) -> FlattenedVoxels 
     };
     let mut fluid_levels = Vec::with_capacity(voxels);
 
+    // Output order is x → world-Y (bottom→top) → z. Walk each section's
+    // paletted storage once per (x, ly, z) instead of hashing world Y to a
+    // section on every voxel via get_block_local / get_*_light.
     for x in 0..16 {
-        for h in 0..total_height {
-            let wy = min_y + h as i32;
-            for z in 0..16 {
-                blocks.push(chunk.get_block_local(x, wy, z) as u8);
-                block_states.push(chunk.get_block_state(x as i32, wy, z as i32));
-                if include_light {
-                    sky_light.push(chunk.get_sky_light(x, wy, z));
-                    block_light.push(chunk.get_block_light(x, wy, z));
+        for section in chunk.sections.iter() {
+            for ly in 0..16 {
+                for z in 0..16 {
+                    let idx = (ly << 8) | (z << 4) | x;
+                    match section {
+                        Some(sec) => {
+                            blocks.push(sec.get_block(idx) as u8);
+                            block_states.push(sec.get_block_state(idx));
+                            if include_light {
+                                sky_light.push(sec.light.get_sky(idx));
+                                block_light.push(sec.light.get_block(idx));
+                            }
+                            fluid_levels.push(sec.get_fluid_level(idx));
+                        }
+                        None => {
+                            // Missing sections match Chunk::get_* defaults:
+                            // Air / 0 state / 0 light / 0 fluid.
+                            blocks.push(0);
+                            block_states.push(0);
+                            if include_light {
+                                sky_light.push(0);
+                                block_light.push(0);
+                            }
+                            fluid_levels.push(0);
+                        }
+                    }
                 }
-                fluid_levels.push(chunk.get_fluid_level(x, wy, z));
             }
         }
     }
+
+    debug_assert_eq!(blocks.len(), voxels);
 
     FlattenedVoxels {
         blocks,
@@ -1591,6 +1612,72 @@ impl From<LegacyPlayerData> for PlayerData {
             unlocked_recipes: Default::default(),
             bad_omen_level: 0,
             hero_of_the_village_timer: 0.0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod flatten_tests {
+    use super::*;
+    use crate::world::Chunk;
+
+    /// Oracle matching the pre-Plan-16 x→Y→z get_* walk. Kept only to lock
+    /// SoA flatten byte-identity against the disk / network layout.
+    fn flatten_column_voxels_oracle(chunk: &Chunk, include_light: bool) -> FlattenedVoxels {
+        let section_count = chunk.sections.len();
+        let total_height = section_count * 16;
+        let min_y = chunk.min_section_y as i32 * 16;
+        let voxels = 16 * total_height * 16;
+
+        let mut blocks = Vec::with_capacity(voxels);
+        let mut block_states = Vec::with_capacity(voxels);
+        let mut sky_light = if include_light {
+            Vec::with_capacity(voxels)
+        } else {
+            Vec::new()
+        };
+        let mut block_light = if include_light {
+            Vec::with_capacity(voxels)
+        } else {
+            Vec::new()
+        };
+        let mut fluid_levels = Vec::with_capacity(voxels);
+
+        for x in 0..16 {
+            for h in 0..total_height {
+                let wy = min_y + h as i32;
+                for z in 0..16 {
+                    blocks.push(chunk.get_block_local(x, wy, z) as u8);
+                    block_states.push(chunk.get_block_state(x as i32, wy, z as i32));
+                    if include_light {
+                        sky_light.push(chunk.get_sky_light(x, wy, z));
+                        block_light.push(chunk.get_block_light(x, wy, z));
+                    }
+                    fluid_levels.push(chunk.get_fluid_level(x, wy, z));
+                }
+            }
+        }
+
+        FlattenedVoxels {
+            blocks,
+            block_states,
+            sky_light,
+            block_light,
+            fluid_levels,
+        }
+    }
+
+    #[test]
+    fn flatten_soa_matches_per_voxel_get_oracle() {
+        let chunk = Chunk::new_with_seed(2, -3, 424242);
+        for include_light in [true, false] {
+            let soa = flatten_column_voxels(&chunk, include_light);
+            let oracle = flatten_column_voxels_oracle(&chunk, include_light);
+            assert_eq!(soa.blocks, oracle.blocks);
+            assert_eq!(soa.block_states, oracle.block_states);
+            assert_eq!(soa.sky_light, oracle.sky_light);
+            assert_eq!(soa.block_light, oracle.block_light);
+            assert_eq!(soa.fluid_levels, oracle.fluid_levels);
         }
     }
 }

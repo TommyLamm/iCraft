@@ -109,6 +109,39 @@ pub enum BlockStorage {
     Global(Box<[BlockType; 4096]>),
 }
 
+/// Bits-per-index helpers shared by Paletted1/2/4 packed `u64` storages.
+fn palette_word_bit(idx: usize, bits: u32) -> (usize, usize, u64) {
+    let shift = idx * bits as usize;
+    let mask = (1u64 << bits) - 1;
+    (shift >> 6, shift & 63, mask)
+}
+
+fn palette_get_index(data: &[u64], idx: usize, bits: u32) -> usize {
+    let (word, bit, mask) = palette_word_bit(idx, bits);
+    ((data[word] >> bit) & mask) as usize
+}
+
+fn palette_set_index(data: &mut [u64], idx: usize, bits: u32, value: usize) {
+    let (word, bit, mask) = palette_word_bit(idx, bits);
+    data[word] = (data[word] & !(mask << bit)) | ((value as u64 & mask) << bit);
+}
+
+fn promote_palette_bits_to_array<const N: usize>(
+    old_data: &[u64],
+    old_bits: u32,
+    new_bits: u32,
+    new_index_at: usize,
+    new_index_value: usize,
+) -> Box<[u64; N]> {
+    let mut new_data = Box::new([0u64; N]);
+    for i in 0..4096 {
+        let old_idx = palette_get_index(old_data, i, old_bits);
+        palette_set_index(&mut new_data[..], i, new_bits, old_idx);
+    }
+    palette_set_index(&mut new_data[..], new_index_at, new_bits, new_index_value);
+    new_data
+}
+
 impl BlockStorage {
     /// Collapse an allocated representation whose values are all identical.
     ///
@@ -170,23 +203,15 @@ impl BlockStorage {
             BlockStorage::Empty => BlockType::Air,
             BlockStorage::Uniform(b) => *b,
             BlockStorage::Paletted1 { palette, data } => {
-                let word = idx >> 6;
-                let bit = idx & 63;
-                let p_idx = ((data[word] >> bit) & 1) as usize;
+                let p_idx = palette_get_index(&data[..], idx, 1);
                 palette.get(p_idx).copied().unwrap_or(BlockType::Air)
             }
             BlockStorage::Paletted2 { palette, data } => {
-                let bit_idx = idx << 1;
-                let word = bit_idx >> 6;
-                let bit = bit_idx & 63;
-                let p_idx = ((data[word] >> bit) & 3) as usize;
+                let p_idx = palette_get_index(&data[..], idx, 2);
                 palette.get(p_idx).copied().unwrap_or(BlockType::Air)
             }
             BlockStorage::Paletted4 { palette, data } => {
-                let bit_idx = idx << 2;
-                let word = bit_idx >> 6;
-                let bit = bit_idx & 63;
-                let p_idx = ((data[word] >> bit) & 15) as usize;
+                let p_idx = palette_get_index(&data[..], idx, 4);
                 palette.get(p_idx).copied().unwrap_or(BlockType::Air)
             }
             BlockStorage::Paletted8 { palette, data } => {
@@ -194,6 +219,30 @@ impl BlockStorage {
                 palette.get(p_idx).copied().unwrap_or(BlockType::Air)
             }
             BlockStorage::Global(data) => data[idx],
+        }
+    }
+
+    fn set_paletted_bits(
+        palette: &mut Vec<BlockType>,
+        data: &mut [u64],
+        idx: usize,
+        bits: u32,
+        capacity: usize,
+        block: BlockType,
+    ) -> Option<(Vec<BlockType>, u32, usize, usize)> {
+        if let Some(pos) = palette.iter().position(|&b| b == block) {
+            palette_set_index(data, idx, bits, pos);
+            None
+        } else if palette.len() < capacity {
+            let pos = palette.len();
+            palette.push(block);
+            palette_set_index(data, idx, bits, pos);
+            None
+        } else {
+            let mut new_palette = palette.clone();
+            new_palette.push(block);
+            let new_index_value = capacity;
+            Some((new_palette, bits, idx, new_index_value))
         }
     }
 
@@ -207,108 +256,45 @@ impl BlockStorage {
             BlockStorage::Empty => {
                 let palette = vec![BlockType::Air, block];
                 let mut data = Box::new([0u64; 64]);
-                data[idx >> 6] |= 1u64 << (idx & 63);
+                palette_set_index(&mut data[..], idx, 1, 1);
                 *self = BlockStorage::Paletted1 { palette, data };
             }
             BlockStorage::Uniform(old_b) => {
                 let old_b = *old_b;
                 let palette = vec![old_b, block];
                 let mut data = Box::new([0u64; 64]);
-                data[idx >> 6] |= 1u64 << (idx & 63);
+                palette_set_index(&mut data[..], idx, 1, 1);
                 *self = BlockStorage::Paletted1 { palette, data };
             }
             BlockStorage::Paletted1 { palette, data } => {
-                if let Some(pos) = palette.iter().position(|&b| b == block) {
-                    let word = idx >> 6;
-                    let bit = idx & 63;
-                    data[word] = (data[word] & !(1u64 << bit)) | ((pos as u64 & 1) << bit);
-                } else if palette.len() < 2 {
-                    let pos = palette.len();
-                    palette.push(block);
-                    let word = idx >> 6;
-                    let bit = idx & 63;
-                    data[word] = (data[word] & !(1u64 << bit)) | ((pos as u64 & 1) << bit);
-                } else {
-                    let mut new_palette = palette.clone();
-                    new_palette.push(block);
-                    let mut new_data = Box::new([0u64; 128]);
-                    for i in 0..4096 {
-                        let w1 = i >> 6;
-                        let b1 = i & 63;
-                        let old_idx = (data[w1] >> b1) & 1;
-                        let bit2 = (i << 1) & 63;
-                        let word2 = (i << 1) >> 6;
-                        new_data[word2] |= old_idx << bit2;
-                    }
-                    let bit_idx = idx << 1;
-                    let word2 = bit_idx >> 6;
-                    let bit2 = bit_idx & 63;
-                    new_data[word2] = (new_data[word2] & !(3u64 << bit2)) | (2u64 << bit2);
+                if let Some((new_palette, _, at, value)) =
+                    Self::set_paletted_bits(palette, &mut data[..], idx, 1, 2, block)
+                {
                     *self = BlockStorage::Paletted2 {
                         palette: new_palette,
-                        data: new_data,
+                        data: promote_palette_bits_to_array::<128>(&data[..], 1, 2, at, value),
                     };
                 }
             }
             BlockStorage::Paletted2 { palette, data } => {
-                if let Some(pos) = palette.iter().position(|&b| b == block) {
-                    let bit_idx = idx << 1;
-                    let word = bit_idx >> 6;
-                    let bit = bit_idx & 63;
-                    data[word] = (data[word] & !(3u64 << bit)) | ((pos as u64 & 3) << bit);
-                } else if palette.len() < 4 {
-                    let pos = palette.len();
-                    palette.push(block);
-                    let bit_idx = idx << 1;
-                    let word = bit_idx >> 6;
-                    let bit = bit_idx & 63;
-                    data[word] = (data[word] & !(3u64 << bit)) | ((pos as u64 & 3) << bit);
-                } else {
-                    let mut new_palette = palette.clone();
-                    new_palette.push(block);
-                    let mut new_data = Box::new([0u64; 256]);
-                    for i in 0..4096 {
-                        let bit2 = (i << 1) & 63;
-                        let word2 = (i << 1) >> 6;
-                        let old_idx = (data[word2] >> bit2) & 3;
-                        let bit4 = (i << 2) & 63;
-                        let word4 = (i << 2) >> 6;
-                        new_data[word4] |= old_idx << bit4;
-                    }
-                    let bit_idx = idx << 2;
-                    let word4 = bit_idx >> 6;
-                    let bit4 = bit_idx & 63;
-                    new_data[word4] = (new_data[word4] & !(15u64 << bit4)) | (4u64 << bit4);
+                if let Some((new_palette, _, at, value)) =
+                    Self::set_paletted_bits(palette, &mut data[..], idx, 2, 4, block)
+                {
                     *self = BlockStorage::Paletted4 {
                         palette: new_palette,
-                        data: new_data,
+                        data: promote_palette_bits_to_array::<256>(&data[..], 2, 4, at, value),
                     };
                 }
             }
             BlockStorage::Paletted4 { palette, data } => {
-                if let Some(pos) = palette.iter().position(|&b| b == block) {
-                    let bit_idx = idx << 2;
-                    let word = bit_idx >> 6;
-                    let bit = bit_idx & 63;
-                    data[word] = (data[word] & !(15u64 << bit)) | ((pos as u64 & 15) << bit);
-                } else if palette.len() < 16 {
-                    let pos = palette.len();
-                    palette.push(block);
-                    let bit_idx = idx << 2;
-                    let word = bit_idx >> 6;
-                    let bit = bit_idx & 63;
-                    data[word] = (data[word] & !(15u64 << bit)) | ((pos as u64 & 15) << bit);
-                } else {
-                    let mut new_palette = palette.clone();
-                    new_palette.push(block);
+                if let Some((new_palette, _, at, value)) =
+                    Self::set_paletted_bits(palette, &mut data[..], idx, 4, 16, block)
+                {
                     let mut new_data = Box::new([0u8; 4096]);
                     for i in 0..4096 {
-                        let bit4 = (i << 2) & 63;
-                        let word4 = (i << 2) >> 6;
-                        let old_idx = (data[word4] >> bit4) & 15;
-                        new_data[i] = old_idx as u8;
+                        new_data[i] = palette_get_index(&data[..], i, 4) as u8;
                     }
-                    new_data[idx] = 16;
+                    new_data[at] = value as u8;
                     *self = BlockStorage::Paletted8 {
                         palette: new_palette,
                         data: new_data,
@@ -480,38 +466,38 @@ impl LightStorage {
         }
     }
 
-    pub fn set_sky(&mut self, idx: usize, val: u8) {
+    fn set_nibble(&mut self, sky_nibble: bool, idx: usize, val: u8) {
         let val = val & 0x0F;
         match self {
             LightStorage::Uniform { sky, block } => {
-                if *sky == val {
+                let current = if sky_nibble { *sky } else { *block };
+                if current == val {
                     return;
                 }
                 let mut data = Box::new([(*sky << 4) | (*block & 0x0F); 4096]);
-                data[idx] = (val << 4) | (*block & 0x0F);
+                if sky_nibble {
+                    data[idx] = (val << 4) | (*block & 0x0F);
+                } else {
+                    data[idx] = (data[idx] & 0xF0) | val;
+                }
                 *self = LightStorage::Packed(data);
             }
             LightStorage::Packed(data) => {
-                data[idx] = (val << 4) | (data[idx] & 0x0F);
+                if sky_nibble {
+                    data[idx] = (val << 4) | (data[idx] & 0x0F);
+                } else {
+                    data[idx] = (data[idx] & 0xF0) | val;
+                }
             }
         }
     }
 
+    pub fn set_sky(&mut self, idx: usize, val: u8) {
+        self.set_nibble(true, idx, val);
+    }
+
     pub fn set_block(&mut self, idx: usize, val: u8) {
-        let val = val & 0x0F;
-        match self {
-            LightStorage::Uniform { sky, block } => {
-                if *block == val {
-                    return;
-                }
-                let mut data = Box::new([(*sky << 4) | (*block & 0x0F); 4096]);
-                data[idx] = (data[idx] & 0xF0) | val;
-                *self = LightStorage::Packed(data);
-            }
-            LightStorage::Packed(data) => {
-                data[idx] = (data[idx] & 0xF0) | val;
-            }
-        }
+        self.set_nibble(false, idx, val);
     }
 
     pub fn from_dense(sky_dense: &[u8; 4096], block_dense: &[u8; 4096]) -> Self {

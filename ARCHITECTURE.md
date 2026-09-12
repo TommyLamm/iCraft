@@ -333,7 +333,15 @@ A chunk is a 16×16 column of sparse 16-high paletted `ChunkSection`s. Block
 entities live in the owning chunk. Use signed-Y helpers in `src/world/`
 (`world_y_to_section_y`, `section_and_local_y_to_world_y`,
 `Chunk::world_y_range()`, `Dimension::height()`), not hard-coded `0..256`.
-Nether and End generation allocate `height().section_count()` sections.
+Nether and End generation fill paletted `ChunkSection`s directly (no
+full-column dense scratch). Overworld and Superflat do the same via
+`set_block_local`; Superflat starts from `Chunk::empty_in_dimension` instead
+of running full Overworld gen. Nether block light uses
+`recompute_direct_column_lighting` plus `propagate_chunk_lighting`.
+`WorldHeight` fields are private; callers use `min_y()` /
+`max_y_exclusive()` / `section_count()`. Column save/network flatten walks
+section storage in SoA order (byte-identical to the old per-voxel `get_*`
+walk).
 
 | Dimension | `WorldHeight` |
 | --- | --- |

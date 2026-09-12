@@ -1,4 +1,4 @@
-use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_WIDTH};
+use crate::world::{BlockType, Chunk, CHUNK_DEPTH, CHUNK_WIDTH};
 use crate::worldgen::hash_coord;
 
 /// Ore distribution configuration.
@@ -67,18 +67,10 @@ impl OreGenerator {
         &self.configs
     }
 
-    /// Places ore veins into a chunk's dense block array.
-    ///
-    /// `blocks[x][local_y][z]` where `local_y = world_y + min_y_offset`
-    /// (same conversion as `Chunk::new_with_seed`: `local_y = world_y - min_y`
-    /// and `min_y_offset = -min_y` for Overworld).
-    pub fn place_ores(
-        &self,
-        blocks: &mut [Vec<[BlockType; CHUNK_DEPTH]>],
-        chunk_x: i32,
-        chunk_z: i32,
-        min_y_offset: usize,
-    ) {
+    /// Places ore veins directly into paletted chunk sections.
+    pub fn place_ores(&self, chunk: &mut Chunk, chunk_x: i32, chunk_z: i32) {
+        let min_y = chunk.min_world_y();
+        let max_y = chunk.max_world_y_exclusive();
         for (ci, config) in self.configs.iter().enumerate() {
             for attempt in 0..config.frequency {
                 let h = hash_coord(
@@ -90,27 +82,23 @@ impl OreGenerator {
                 );
                 let lx = (h & 0xF) as usize;
                 let lz = ((h >> 4) & 0xF) as usize;
-                if lx >= blocks.len() || lz >= CHUNK_DEPTH {
+                if lx >= CHUNK_WIDTH || lz >= CHUNK_DEPTH {
                     continue;
                 }
 
-                // Y in the config range, mapped to local array index.
                 let range = (config.max_y - config.min_y + 1).max(1) as u32;
                 let wy = config.min_y + ((h >> 8) % range) as i32;
-                let ly = wy + min_y_offset as i32;
-                if ly < 0 || (ly as usize) >= blocks[lx].len() {
-                    continue;
-                }
-                let ly = ly as usize;
-
-                if blocks[lx][ly][lz] != BlockType::Stone {
+                if wy < min_y || wy >= max_y {
                     continue;
                 }
 
-                // Breadth-first vein with deterministic direction.
+                if chunk.get_block_local(lx, wy, lz) != BlockType::Stone {
+                    continue;
+                }
+
                 let mut seed2 = h;
-                let mut queue = vec![(lx, ly, lz)];
-                blocks[lx][ly][lz] = config.block;
+                let mut queue = vec![(lx as i32, wy, lz as i32)];
+                chunk.set_block_local(lx, wy, lz, config.block);
                 let mut placed = 1;
                 let mut head = 0;
 
@@ -122,20 +110,23 @@ impl OreGenerator {
                     let dir = ((seed2 >> 16) % 6) as usize;
                     let neighbors = [
                         (cx + 1, cy, cz),
-                        (cx.wrapping_sub(1), cy, cz),
+                        (cx - 1, cy, cz),
                         (cx, cy + 1, cz),
-                        (cx, cy.wrapping_sub(1), cz),
+                        (cx, cy - 1, cz),
                         (cx, cy, cz + 1),
-                        (cx, cy, cz.wrapping_sub(1)),
+                        (cx, cy, cz - 1),
                     ];
                     let (nx, ny, nz) = neighbors[dir];
 
-                    if nx < CHUNK_WIDTH
-                        && nz < CHUNK_DEPTH
-                        && ny < blocks[nx].len()
-                        && blocks[nx][ny][nz] == BlockType::Stone
+                    if nx >= 0
+                        && nx < CHUNK_WIDTH as i32
+                        && nz >= 0
+                        && nz < CHUNK_DEPTH as i32
+                        && ny >= min_y
+                        && ny < max_y
+                        && chunk.get_block_local(nx as usize, ny, nz as usize) == BlockType::Stone
                     {
-                        blocks[nx][ny][nz] = config.block;
+                        chunk.set_block_local(nx as usize, ny, nz as usize, config.block);
                         queue.push((nx, ny, nz));
                         placed += 1;
                     }
@@ -148,6 +139,7 @@ impl OreGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dimension::Dimension;
 
     #[test]
     fn ore_configs_cover_negative_y() {
@@ -162,23 +154,33 @@ mod tests {
             .any(|c| c.block == BlockType::RedstoneOre && c.min_y < 0));
     }
 
-    fn stone_column() -> Vec<Vec<[BlockType; CHUNK_DEPTH]>> {
-        vec![vec![[BlockType::Stone; CHUNK_DEPTH]; 384]; CHUNK_WIDTH]
+    fn stone_chunk(cx: i32, cz: i32) -> Chunk {
+        let mut chunk = Chunk::empty_in_dimension(Dimension::Overworld, cx, cz);
+        for x in 0..CHUNK_WIDTH {
+            for z in 0..CHUNK_DEPTH {
+                for y in chunk.world_y_range() {
+                    chunk.set_block_local(x, y, z, BlockType::Stone);
+                }
+            }
+        }
+        chunk
     }
 
     #[test]
     fn ore_placement_is_deterministic() {
         let a = OreGenerator::new(12345);
         let b = OreGenerator::new(12345);
-        let min_y_offset = 64usize;
-        let mut blocks_a = stone_column();
-        let mut blocks_b = stone_column();
-        a.place_ores(&mut blocks_a, 3, -2, min_y_offset);
-        b.place_ores(&mut blocks_b, 3, -2, min_y_offset);
+        let mut chunk_a = stone_chunk(3, -2);
+        let mut chunk_b = stone_chunk(3, -2);
+        a.place_ores(&mut chunk_a, 3, -2);
+        b.place_ores(&mut chunk_b, 3, -2);
         for x in 0..CHUNK_WIDTH {
-            for y in 0..384 {
+            for y in chunk_a.world_y_range() {
                 for z in 0..CHUNK_DEPTH {
-                    assert_eq!(blocks_a[x][y][z], blocks_b[x][y][z]);
+                    assert_eq!(
+                        chunk_a.get_block_local(x, y, z),
+                        chunk_b.get_block_local(x, y, z)
+                    );
                 }
             }
         }
@@ -187,42 +189,41 @@ mod tests {
     #[test]
     fn ores_place_at_configured_world_y() {
         let gen = OreGenerator::new(12345);
-        let min_y_offset = 64i32;
-        let mut blocks = stone_column();
-        for cx in 0..8 {
-            for cz in 0..8 {
-                gen.place_ores(&mut blocks, cx, cz, min_y_offset as usize);
-            }
-        }
-
         let mut diamond_below_16 = false;
         let mut coal_near_sea = false;
         let mut diamond_count = 0usize;
         let mut diamond_only_in_wrong_local_band = true;
 
-        for x in 0..CHUNK_WIDTH {
-            for ly in 0..384 {
-                let wy = ly as i32 - min_y_offset;
-                for z in 0..CHUNK_DEPTH {
-                    match blocks[x][ly][z] {
-                        BlockType::DiamondOre => {
-                            diamond_count += 1;
-                            // Vein growth can spill a few blocks past max_y=16.
-                            assert!(
-                                wy >= -64 && wy <= 16 + 8,
-                                "diamond at world Y={wy} (local {ly}) outside config band"
-                            );
-                            if wy < 16 {
-                                diamond_below_16 = true;
-                            }
-                            if ly >= 16 {
-                                diamond_only_in_wrong_local_band = false;
+        for cx in 0..8 {
+            for cz in 0..8 {
+                let mut chunk = stone_chunk(cx, cz);
+                gen.place_ores(&mut chunk, cx, cz);
+                for x in 0..CHUNK_WIDTH {
+                    for y in chunk.world_y_range() {
+                        for z in 0..CHUNK_DEPTH {
+                            match chunk.get_block_local(x, y, z) {
+                                BlockType::DiamondOre => {
+                                    diamond_count += 1;
+                                    assert!(
+                                        y >= -64 && y <= 16 + 8,
+                                        "diamond at world Y={y} outside config band"
+                                    );
+                                    if y < 16 {
+                                        diamond_below_16 = true;
+                                    }
+                                    // local band for world Y -64..-49 is section-local 0..16
+                                    // at the bottom of the column; diamonds must not only
+                                    // appear there.
+                                    if y >= -48 {
+                                        diamond_only_in_wrong_local_band = false;
+                                    }
+                                }
+                                BlockType::CoalOre if (40..=80).contains(&y) => {
+                                    coal_near_sea = true;
+                                }
+                                _ => {}
                             }
                         }
-                        BlockType::CoalOre if (40..=80).contains(&wy) => {
-                            coal_near_sea = true;
-                        }
-                        _ => {}
                     }
                 }
             }
@@ -245,13 +246,22 @@ mod tests {
     #[test]
     fn ore_hash_includes_chunk_z() {
         let gen = OreGenerator::new(1);
-        let min_y_offset = 64usize;
-        let mut a = stone_column();
-        let mut b = stone_column();
-        gen.place_ores(&mut a, 3, 0, min_y_offset);
-        gen.place_ores(&mut b, 3, 1, min_y_offset);
-        assert_ne!(
-            a, b,
+        let mut a = stone_chunk(3, 0);
+        let mut b = stone_chunk(3, 1);
+        gen.place_ores(&mut a, 3, 0);
+        gen.place_ores(&mut b, 3, 1);
+        let mut differs = false;
+        for x in 0..CHUNK_WIDTH {
+            for y in a.world_y_range() {
+                for z in 0..CHUNK_DEPTH {
+                    if a.get_block_local(x, y, z) != b.get_block_local(x, y, z) {
+                        differs = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            differs,
             "identical X with different Z must not share the ore hash"
         );
     }

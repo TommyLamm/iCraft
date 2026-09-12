@@ -154,7 +154,7 @@ pub fn spawn_mobs(
     if let Some(solid_y) = chunk_manager.highest_solid_y(spawn_x, spawn_z) {
         let spawn_y = solid_y + 1;
         let height = chunk_manager.dimension.height();
-        if spawn_y >= height.min_y && spawn_y < height.max_y_exclusive() - 1 {
+        if spawn_y >= height.min_y() && spawn_y < height.max_y_exclusive() - 1 {
             if chunk_manager.get_block(spawn_x, spawn_y, spawn_z) == crate::world::BlockType::Air
                 && chunk_manager.get_block(spawn_x, spawn_y + 1, spawn_z)
                     == crate::world::BlockType::Air

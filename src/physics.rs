@@ -430,9 +430,9 @@ impl PlayerPhysics {
         let neighborhood = chunk_manager.column_neighborhood_view(cx, cz);
         let height = neighborhood.height;
         let min_y =
-            (check_aabb.min.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
+            (check_aabb.min.y.floor() as i32).clamp(height.min_y(), height.max_y_exclusive() - 1);
         let max_y =
-            (check_aabb.max.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
+            (check_aabb.max.y.floor() as i32).clamp(height.min_y(), height.max_y_exclusive() - 1);
         let min_z = check_aabb.min.z.floor() as i32;
         let max_z = check_aabb.max.z.floor() as i32;
         let sample = |x: i32, y: i32, z: i32| neighborhood.get_block(x, y, z);
@@ -475,8 +475,8 @@ pub fn resolve_axis_box_collision(
     // 檢測周圍可能相交的方塊
     let min_x = body_aabb.min.x.floor() as i32;
     let max_x = body_aabb.max.x.floor() as i32;
-    let min_y = (body_aabb.min.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
-    let max_y = (body_aabb.max.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
+    let min_y = (body_aabb.min.y.floor() as i32).clamp(height.min_y(), height.max_y_exclusive() - 1);
+    let max_y = (body_aabb.max.y.floor() as i32).clamp(height.min_y(), height.max_y_exclusive() - 1);
     let min_z = body_aabb.min.z.floor() as i32;
     let max_z = body_aabb.max.z.floor() as i32;
     let sample = |x: i32, y: i32, z: i32| neighborhood.get_block(x, y, z);
