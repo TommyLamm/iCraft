@@ -232,7 +232,7 @@ pub fn execute_furnace_take_output(
     context: WorkstationContext,
     count: u16,
 ) -> Result<FurnaceReceipt, RejectReason> {
-    context.require_block(|block| matches!(block, BlockType::Furnace | BlockType::FurnaceLit))?;
+    context.require_block(|block| matches!(block, BlockType::Furnace))?;
     if count == 0 {
         return Err(RejectReason::InvalidState);
     }

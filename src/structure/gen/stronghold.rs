@@ -40,6 +40,7 @@ pub fn generate_stronghold(
                     world_y: wy,
                     world_z: wz,
                     block_type: block,
+                    block_state: 0,
                     block_entity: None,
                 });
             }
@@ -59,6 +60,7 @@ pub fn generate_stronghold(
         world_y: origin_y + 1,
         world_z: origin_z + 2,
         block_type: BlockType::Chest,
+        block_state: 0,
         block_entity: Some(chest_entity1),
     });
 
@@ -85,6 +87,7 @@ pub fn generate_stronghold(
                     world_y: wy,
                     world_z: wz,
                     block_type: block,
+                    block_state: 0,
                     block_entity: None,
                 });
             }
@@ -99,6 +102,7 @@ pub fn generate_stronghold(
                 world_y: origin_y + dy,
                 world_z: origin_z + 10,
                 block_type: BlockType::Air,
+                block_state: 0,
                 block_entity: None,
             });
             blocks.push(BlockPlacement {
@@ -106,6 +110,7 @@ pub fn generate_stronghold(
                 world_y: origin_y + dy,
                 world_z: origin_z + 11,
                 block_type: BlockType::Air,
+                block_state: 0,
                 block_entity: None,
             });
         }
@@ -123,6 +128,7 @@ pub fn generate_stronghold(
                 world_y: p_center_y - 1,
                 world_z: p_center_z + dz,
                 block_type: BlockType::Lava,
+                block_state: 0,
                 block_entity: None,
             });
         }
@@ -151,17 +157,15 @@ pub fn generate_stronghold(
 
         // ~10% chance to be pre-filled with Eye of Ender
         let pre_filled = (seed.wrapping_add((i * 17 + dx.abs() as usize) as u32)) % 10 == 0;
-        let block_type = if pre_filled {
-            BlockType::EndPortalFrameFilled
-        } else {
-            BlockType::EndPortalFrame
-        };
+        let mut frame_state = crate::world::BlockState::default();
+        frame_state.is_open = pre_filled;
 
         blocks.push(BlockPlacement {
             world_x: frame_x,
             world_y: frame_y,
             world_z: frame_z,
-            block_type,
+            block_type: BlockType::EndPortalFrame,
+            block_state: frame_state.encode(),
             block_entity: None,
         });
     }
@@ -172,6 +176,7 @@ pub fn generate_stronghold(
         world_y: p_center_y,
         world_z: p_center_z - 3,
         block_type: BlockType::Spawner,
+        block_state: 0,
         block_entity: Some(BlockEntity::Spawner(SpawnerBlockEntity {
             entity_type: EntityType::Zombie,
             spawn_delay: 150,

@@ -415,6 +415,7 @@ fn append_end_portal_frame_mesh(
     indices: &mut Vec<u32>,
     origin: [f32; 3],
     block: BlockType,
+    state: BlockState,
     sky_light: u8,
     block_light: u8,
     region_coord: (i32, i32),
@@ -442,7 +443,7 @@ fn append_end_portal_frame_mesh(
             ];
             local_uvs[corner_idx] = *uv;
         }
-        let fallback_tile = block.get_face_tex_index(face_idx);
+        let fallback_tile = block.face_tex_for(state, face_idx);
         let atlas_tile = registry.map_or(fallback_tile, |registry| {
             registry.atlas_tile_for_block(block, fallback_tile)
         });
@@ -662,12 +663,9 @@ fn is_greedy_cube(block: BlockType) -> bool {
                 | BlockType::Lava
                 | BlockType::SnowLayer
                 | BlockType::OakDoor
-                | BlockType::OakDoorOpen
                 | BlockType::OakTrapdoor
-                | BlockType::OakTrapdoorOpen
                 | BlockType::Cactus
                 | BlockType::EndPortalFrame
-                | BlockType::EndPortalFrameFilled
                 | BlockType::OakSlab
                 | BlockType::CobblestoneSlab
                 | BlockType::OakStair
@@ -827,7 +825,7 @@ impl Chunk {
                         BlockType::Torch => Some(registry.map_or(TORCH_ATLAS_TILE, |registry| {
                             registry.atlas_tile_for_block(block, TORCH_ATLAS_TILE)
                         })),
-                        BlockType::RedstoneTorch | BlockType::RedstoneTorchOff => {
+                        BlockType::RedstoneTorch => {
                             Some(registry.map_or(REDSTONE_TORCH_ATLAS_TILE, |registry| {
                                 registry.atlas_tile_for_block(block, REDSTONE_TORCH_ATLAS_TILE)
                             }))
@@ -847,7 +845,7 @@ impl Chunk {
                         continue;
                     }
 
-                    if matches!(block, BlockType::OakDoor | BlockType::OakDoorOpen) {
+                    if matches!(block, BlockType::OakDoor) {
                         let state = BlockState::decode(voxel.state);
                         append_door_mesh(
                             &mut opaque_vertices,
@@ -864,7 +862,7 @@ impl Chunk {
                         continue;
                     }
 
-                    if matches!(block, BlockType::OakTrapdoor | BlockType::OakTrapdoorOpen) {
+                    if matches!(block, BlockType::OakTrapdoor) {
                         let state = BlockState::decode(voxel.state);
                         append_trapdoor_mesh(
                             &mut opaque_vertices,
@@ -896,15 +894,13 @@ impl Chunk {
                         continue;
                     }
 
-                    if matches!(
-                        block,
-                        BlockType::EndPortalFrame | BlockType::EndPortalFrameFilled
-                    ) {
+                    if matches!(block, BlockType::EndPortalFrame) {
                         append_end_portal_frame_mesh(
                             &mut opaque_vertices,
                             &mut opaque_indices,
                             [world_x as f32, world_y as f32, world_z as f32],
                             block,
+                            BlockState::decode(voxel.state),
                             voxel.sky,
                             voxel.block_light,
                             region_coord,
@@ -1017,7 +1013,8 @@ impl Chunk {
                                 (&mut opaque_vertices, &mut opaque_indices)
                             };
 
-                            let fallback_tile = block.get_face_tex_index(face_idx);
+                            let state = BlockState::decode(voxel.state);
+                            let fallback_tile = block.face_tex_for(state, face_idx);
                             let atlas_tile = registry.map_or(fallback_tile, |registry| {
                                 registry.atlas_tile_for_block(block, fallback_tile)
                             });
@@ -1629,13 +1626,13 @@ mod tests {
 
     #[test]
     fn end_portal_frames_use_distinct_top_side_and_filled_top_tiles() {
-        for block in [BlockType::EndPortalFrame, BlockType::EndPortalFrameFilled] {
-            assert_eq!(block.get_face_tex_index(0), (9, 4));
-            assert_eq!(block.get_face_tex_index(5), (9, 4));
-        }
+        assert_eq!(BlockType::EndPortalFrame.get_face_tex_index(0), (9, 4));
+        assert_eq!(BlockType::EndPortalFrame.get_face_tex_index(5), (9, 4));
         assert_eq!(BlockType::EndPortalFrame.get_face_tex_index(4), (15, 15));
+        let mut filled = crate::world::BlockState::default();
+        filled.is_open = true;
         assert_eq!(
-            BlockType::EndPortalFrameFilled.get_face_tex_index(4),
+            BlockType::EndPortalFrame.face_tex_for(filled, 4),
             (6, 4)
         );
     }
@@ -2481,7 +2478,7 @@ mod tests {
             TORCH_BOTTOM_UV,
         ];
 
-        for block in [BlockType::RedstoneTorch, BlockType::RedstoneTorchOff] {
+        for block in [BlockType::RedstoneTorch] {
             let (vertices, indices, transparent_vertices, transparent_indices) =
                 single_torch_mesh(block, 15, block.properties().light_emission);
 
@@ -2605,7 +2602,7 @@ mod tests {
 
     #[test]
     fn end_portal_frame_and_surface_use_lower_minecraft_heights() {
-        for block in [BlockType::EndPortalFrame, BlockType::EndPortalFrameFilled] {
+        for block in [BlockType::EndPortalFrame, BlockType::EndPortalFrame] {
             let (opaque_v, opaque_i, trans_v, trans_i) = single_torch_mesh(block, 15, 0);
             assert!(trans_v.is_empty() && trans_i.is_empty());
             assert_eq!(opaque_v.len(), 24);

@@ -75,7 +75,7 @@
 | 17 | [lighting BFS 去重、鄰域快取、載入只 seed 邊界](17_lighting_bfs_dedupe_and_neighborhood.md) | P1 | 放／破方塊光照少 2 次 HashMap／cell；載入少 1–8 ms | 無 | 已完成 |
 | 18 | [frame 熱路徑：只走 visible set、上傳批次、字型快取、刪 entity LOS worker](18_frame_hot_path.md) | P1 | 每 frame 少 O(sections) AABB、~17 次 `write_buffer`、一條 LOS 執行緒 | 09 波 04 | 已完成 |
 | 19 | [`BlockType` 靜態屬性表](19_block_type_static_property_table.md) | P2 | ~-1,200 行 match；lighting／mesh 每 voxel 不再 121 臂 | 無 | 已完成 |
-| 20 | [13 對 powered／open `BlockType` 折進 `BlockState`](20_fold_powered_open_variants_into_block_state.md) | P2 | 少 13 discriminant × 6 張表的 match 臂 | 19 | 未開始 |
+| 20 | [13 對 powered／open `BlockType` 折進 `BlockState`](20_fold_powered_open_variants_into_block_state.md) | P2 | 少 13 discriminant × 6 張表的 match 臂 | 19 | 已完成 |
 | 21 | [`catalog.rs`／`recipes.rs` 資料表化](21_item_catalog_and_recipes_tables.md) | P2 | ~-2,000 行 match 與 `add_shaped` | 無 | 未開始 |
 | 22 | [渲染資料表：mob 部件、atlas paint-on-miss、單一 cube emitter、shader 殘留](22_render_data_tables_mob_texture_cube.md) | P2 | ~-2,500 行；啟動不再畫兩次 atlas | 無 | 未開始 |
 | 23 | [`menu.rs` widget 表、共用 `GpuContext`、controls 單表](23_menu_widget_table_and_shared_gpu.md) | P2 | ~-1,500 行；menu↔game 不再重建 device | 無 | 未開始 |

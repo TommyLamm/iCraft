@@ -701,10 +701,13 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
         .world_mut(Dimension::Overworld).unwrap()
         .set_block(front.0, front.1, front.2, BlockType::Air, 0)
         .expect("clear dispenser front");
+    let mut lever_on = icraft::world::BlockState::default();
+    lever_on.is_open = true;
+    let lever_on = lever_on.encode();
     runtime
         .authority
         .world_mut(Dimension::Overworld).unwrap()
-        .set_block(lever.0, lever.1, lever.2, BlockType::LeverOn, 0)
+        .set_block(lever.0, lever.1, lever.2, BlockType::Lever, lever_on)
         .expect("place powered lever fixture");
     let mut stack = ItemStack::new(Item::Stone, 2)
         .with_can_break(BlockType::Dirt)
@@ -881,7 +884,11 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
     runtime
         .authority
         .world_mut(Dimension::Overworld).unwrap()
-        .set_block(lever.0, lever.1, lever.2, BlockType::LeverOn, 0)
+        .set_block(lever.0, lever.1, lever.2, BlockType::Lever, {
+            let mut state = icraft::world::BlockState::default();
+            state.is_open = true;
+            state.encode()
+        })
         .expect("raise dropper fixture edge");
     {
         let world = runtime.authority.world_mut(Dimension::Overworld).unwrap();

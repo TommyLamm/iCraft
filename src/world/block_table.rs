@@ -820,7 +820,7 @@ pub static BLOCK_TABLE: [BlockDef; BLOCK_TYPE_COUNT] = [
         min_harvest: None,
         is_cross_model: false,
     },
-    // RedstoneTorchOff = 50
+    // Reserved50 = 50 (was RedstoneTorchOff)
     BlockDef {
         properties: BlockProperties {
             name: "Redstone Torch",
@@ -852,7 +852,7 @@ pub static BLOCK_TABLE: [BlockDef; BLOCK_TYPE_COUNT] = [
         min_harvest: None,
         is_cross_model: false,
     },
-    // RepeaterPowered = 52
+    // Reserved52 = 52 (was RepeaterPowered)
     BlockDef {
         properties: BlockProperties {
             name: "Redstone Repeater",
@@ -884,7 +884,7 @@ pub static BLOCK_TABLE: [BlockDef; BLOCK_TYPE_COUNT] = [
         min_harvest: None,
         is_cross_model: false,
     },
-    // ComparatorPowered = 54
+    // Reserved54 = 54 (was ComparatorPowered)
     BlockDef {
         properties: BlockProperties {
             name: "Redstone Comparator",
@@ -916,7 +916,7 @@ pub static BLOCK_TABLE: [BlockDef; BLOCK_TYPE_COUNT] = [
         min_harvest: None,
         is_cross_model: false,
     },
-    // StoneButtonPressed = 56
+    // Reserved56 = 56 (was StoneButtonPressed)
     BlockDef {
         properties: BlockProperties {
             name: "Stone Button",
@@ -948,7 +948,7 @@ pub static BLOCK_TABLE: [BlockDef; BLOCK_TYPE_COUNT] = [
         min_harvest: None,
         is_cross_model: false,
     },
-    // LeverOn = 58
+    // Reserved58 = 58 (was LeverOn)
     BlockDef {
         properties: BlockProperties {
             name: "Lever",
@@ -980,7 +980,7 @@ pub static BLOCK_TABLE: [BlockDef; BLOCK_TYPE_COUNT] = [
         min_harvest: None,
         is_cross_model: false,
     },
-    // PressurePlatePowered = 60
+    // Reserved60 = 60 (was PressurePlatePowered)
     BlockDef {
         properties: BlockProperties {
             name: "Stone Pressure Plate",
@@ -1012,7 +1012,7 @@ pub static BLOCK_TABLE: [BlockDef; BLOCK_TYPE_COUNT] = [
         min_harvest: None,
         is_cross_model: false,
     },
-    // PistonExtended = 62
+    // Reserved62 = 62 (was PistonExtended)
     BlockDef {
         properties: BlockProperties {
             name: "Piston",
@@ -1044,7 +1044,7 @@ pub static BLOCK_TABLE: [BlockDef; BLOCK_TYPE_COUNT] = [
         min_harvest: None,
         is_cross_model: false,
     },
-    // StickyPistonExtended = 64
+    // Reserved64 = 64 (was StickyPistonExtended)
     BlockDef {
         properties: BlockProperties {
             name: "Sticky Piston",
@@ -1076,7 +1076,7 @@ pub static BLOCK_TABLE: [BlockDef; BLOCK_TYPE_COUNT] = [
         min_harvest: None,
         is_cross_model: false,
     },
-    // RedstoneLampLit = 66
+    // Reserved66 = 66 (was RedstoneLampLit)
     BlockDef {
         properties: BlockProperties {
             name: "Redstone Lamp",
@@ -1108,7 +1108,7 @@ pub static BLOCK_TABLE: [BlockDef; BLOCK_TYPE_COUNT] = [
         min_harvest: None,
         is_cross_model: false,
     },
-    // OakDoorOpen = 68
+    // Reserved68 = 68 (was OakDoorOpen)
     BlockDef {
         properties: BlockProperties {
             name: "Oak Door",
@@ -1140,7 +1140,7 @@ pub static BLOCK_TABLE: [BlockDef; BLOCK_TYPE_COUNT] = [
         min_harvest: None,
         is_cross_model: false,
     },
-    // OakTrapdoorOpen = 70
+    // Reserved70 = 70 (was OakTrapdoorOpen)
     BlockDef {
         properties: BlockProperties {
             name: "Oak Trapdoor",
@@ -1332,7 +1332,7 @@ pub static BLOCK_TABLE: [BlockDef; BLOCK_TYPE_COUNT] = [
         min_harvest: None,
         is_cross_model: false,
     },
-    // EndPortalFrameFilled = 82
+    // Reserved82 = 82 (was EndPortalFrameFilled)
     BlockDef {
         properties: BlockProperties {
             name: "End Portal Frame",
@@ -1460,7 +1460,7 @@ pub static BLOCK_TABLE: [BlockDef; BLOCK_TYPE_COUNT] = [
         min_harvest: None,
         is_cross_model: false,
     },
-    // FurnaceLit = 90
+    // Reserved90 = 90 (was FurnaceLit)
     BlockDef {
         properties: BlockProperties {
             name: "Furnace",

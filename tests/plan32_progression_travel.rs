@@ -718,7 +718,8 @@ fn generated_end_city_loot_is_lazy_revisioned_and_persistent() {
         fortress_origin.2 + 2,
     );
     runtime.authority.with_world(Dimension::Nether, |world| {
-        world.ensure_chunk(
+        // ensure_chunk is async after spawn; materialize so block entities exist.
+        world.materialize_chunk(
             fortress_chest.0.div_euclid(16),
             fortress_chest.2.div_euclid(16),
         );
@@ -735,7 +736,7 @@ fn generated_end_city_loot_is_lazy_revisioned_and_persistent() {
     });
     let chest_pos = (1035, 89, 11);
     runtime.authority.with_world(Dimension::End, |world| {
-        world.ensure_chunk(64, 0);
+        world.materialize_chunk(64, 0);
         assert_eq!(
             world.get_block(chest_pos.0, chest_pos.1, chest_pos.2),
             BlockType::Chest

@@ -45,7 +45,7 @@ impl RaycastTargetPolicy {
 fn is_explicit_interaction_target(block: BlockType) -> bool {
     // Open doors and trapdoors are passable for collision, but right-click
     // raycasts must still be able to select them so they can be closed again.
-    matches!(block, BlockType::OakDoorOpen | BlockType::OakTrapdoorOpen)
+    matches!(block, BlockType::OakDoor | BlockType::OakTrapdoor)
 }
 
 fn is_explicit_breakable_decoration(block: BlockType) -> bool {
@@ -58,17 +58,11 @@ fn is_explicit_breakable_decoration(block: BlockType) -> bool {
             | BlockType::SugarCane
             | BlockType::RedstoneWire
             | BlockType::RedstoneTorch
-            | BlockType::RedstoneTorchOff
             | BlockType::Repeater
-            | BlockType::RepeaterPowered
             | BlockType::Comparator
-            | BlockType::ComparatorPowered
             | BlockType::StoneButton
-            | BlockType::StoneButtonPressed
             | BlockType::Lever
-            | BlockType::LeverOn
             | BlockType::PressurePlate
-            | BlockType::PressurePlatePowered
             | BlockType::SnowLayer
             | BlockType::WitherSkeletonSkull
             | BlockType::EndPortal
@@ -274,7 +268,7 @@ mod tests {
 
     #[test]
     fn place_raycast_can_target_open_door_and_trapdoor_for_interaction() {
-        for block in [BlockType::OakDoorOpen, BlockType::OakTrapdoorOpen] {
+        for block in [BlockType::OakDoor, BlockType::OakTrapdoor] {
             let mut chunk_manager = ChunkManager::new(8);
             let mut chunk = Chunk::new(0, 0);
             chunk.set_block_local(8, 72, 8, block);

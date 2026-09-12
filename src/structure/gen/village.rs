@@ -24,6 +24,7 @@ pub fn generate_village(origin_x: i32, origin_y: i32, origin_z: i32, seed: u32) 
             world_y: origin_y,
             world_z: origin_z + 8,
             block_type: BlockType::DirtPath,
+            block_state: 0,
             block_entity: None,
         });
         blocks.push(BlockPlacement {
@@ -31,6 +32,7 @@ pub fn generate_village(origin_x: i32, origin_y: i32, origin_z: i32, seed: u32) 
             world_y: origin_y,
             world_z: origin_z + p,
             block_type: BlockType::DirtPath,
+            block_state: 0,
             block_entity: None,
         });
     }
@@ -67,6 +69,7 @@ pub fn generate_village(origin_x: i32, origin_y: i32, origin_z: i32, seed: u32) 
                     world_y: wy,
                     world_z: wz,
                     block_type: block,
+                    block_state: 0,
                     block_entity: None,
                 });
             }
@@ -79,6 +82,7 @@ pub fn generate_village(origin_x: i32, origin_y: i32, origin_z: i32, seed: u32) 
         world_y: origin_y + 1,
         world_z: origin_z,
         block_type: BlockType::OakDoor,
+        block_state: 0,
         block_entity: None,
     });
     blocks.push(BlockPlacement {
@@ -86,6 +90,7 @@ pub fn generate_village(origin_x: i32, origin_y: i32, origin_z: i32, seed: u32) 
         world_y: origin_y + 2,
         world_z: origin_z,
         block_type: BlockType::OakDoor,
+        block_state: 0,
         block_entity: None,
     });
 
@@ -95,6 +100,7 @@ pub fn generate_village(origin_x: i32, origin_y: i32, origin_z: i32, seed: u32) 
         world_y: origin_y + 1,
         world_z: origin_z + 5,
         block_type: BlockType::Bed,
+        block_state: 0,
         block_entity: None,
     });
 
@@ -111,6 +117,7 @@ pub fn generate_village(origin_x: i32, origin_y: i32, origin_z: i32, seed: u32) 
         world_y: origin_y + 1,
         world_z: origin_z + 5,
         block_type: BlockType::Chest,
+        block_state: 0,
         block_entity: Some(chest_entity),
     });
 

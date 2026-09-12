@@ -836,9 +836,15 @@ where
 
 /// Recognizes the twelve filled frame blocks around a horizontal 3x3 End
 /// portal and returns the nine interior positions.
-pub fn detect_completed_end_portal<F>(changed: BlockPos, mut getter: F) -> Option<Vec<BlockPos>>
+///
+/// `is_filled_frame` must return true only for End Portal Frames whose
+/// `BlockState.is_open` (filled) bit is set.
+pub fn detect_completed_end_portal<F>(
+    changed: BlockPos,
+    mut is_filled_frame: F,
+) -> Option<Vec<BlockPos>>
 where
-    F: FnMut(i32, i32, i32) -> BlockType,
+    F: FnMut(i32, i32, i32) -> bool,
 {
     let y = changed.1;
     for x_offset in 0..=4 {
@@ -847,12 +853,10 @@ where
             let base_z = changed.2 - z_offset;
             let mut complete = true;
             for offset in 1..=3 {
-                complete &= getter(base_x + offset, y, base_z) == BlockType::EndPortalFrameFilled;
-                complete &=
-                    getter(base_x + offset, y, base_z + 4) == BlockType::EndPortalFrameFilled;
-                complete &= getter(base_x, y, base_z + offset) == BlockType::EndPortalFrameFilled;
-                complete &=
-                    getter(base_x + 4, y, base_z + offset) == BlockType::EndPortalFrameFilled;
+                complete &= is_filled_frame(base_x + offset, y, base_z);
+                complete &= is_filled_frame(base_x + offset, y, base_z + 4);
+                complete &= is_filled_frame(base_x, y, base_z + offset);
+                complete &= is_filled_frame(base_x + 4, y, base_z + offset);
             }
             if complete {
                 let mut interior = Vec::with_capacity(9);
@@ -1057,9 +1061,7 @@ mod tests {
                     for wy in chunk.world_y_range() {
                         for z in 0..CHUNK_DEPTH {
                             let block = chunk.get_block_local(x, wy, z);
-                            if block == BlockType::EndPortalFrame
-                                || block == BlockType::EndPortalFrameFilled
-                            {
+                            if block == BlockType::EndPortalFrame {
                                 frames += 1;
                             }
                         }
@@ -1173,37 +1175,25 @@ mod tests {
 
     #[test]
     fn recognizes_twelve_filled_end_frames() {
-        let mut blocks = HashMap::new();
+        let mut filled = HashMap::new();
         let (base_x, y, base_z) = (5, 64, -11);
         for offset in 1..=3 {
-            blocks.insert(
-                (base_x + offset, y, base_z),
-                BlockType::EndPortalFrameFilled,
-            );
-            blocks.insert(
-                (base_x + offset, y, base_z + 4),
-                BlockType::EndPortalFrameFilled,
-            );
-            blocks.insert(
-                (base_x, y, base_z + offset),
-                BlockType::EndPortalFrameFilled,
-            );
-            blocks.insert(
-                (base_x + 4, y, base_z + offset),
-                BlockType::EndPortalFrameFilled,
-            );
+            filled.insert((base_x + offset, y, base_z), true);
+            filled.insert((base_x + offset, y, base_z + 4), true);
+            filled.insert((base_x, y, base_z + offset), true);
+            filled.insert((base_x + 4, y, base_z + offset), true);
         }
         let interior = detect_completed_end_portal((base_x + 2, y, base_z), |x, y, z| {
-            blocks.get(&(x, y, z)).copied().unwrap_or(BlockType::Air)
+            filled.get(&(x, y, z)).copied().unwrap_or(false)
         })
         .expect("completed End portal");
         assert_eq!(interior.len(), 9);
         assert!(interior.contains(&(base_x + 2, y, base_z + 2)));
 
-        blocks.remove(&(base_x + 2, y, base_z));
+        filled.remove(&(base_x + 2, y, base_z));
         assert!(
             detect_completed_end_portal((base_x + 2, y, base_z), |x, y, z| {
-                blocks.get(&(x, y, z)).copied().unwrap_or(BlockType::Air)
+                filled.get(&(x, y, z)).copied().unwrap_or(false)
             })
             .is_none()
         );

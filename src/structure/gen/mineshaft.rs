@@ -33,6 +33,7 @@ pub fn generate_mineshaft(
                     world_y: wy,
                     world_z: wz,
                     block_type: BlockType::Air,
+                    block_state: 0,
                     block_entity: None,
                 });
             }
@@ -45,6 +46,7 @@ pub fn generate_mineshaft(
                 world_y: origin_y,
                 world_z: origin_z,
                 block_type: BlockType::OakLog,
+                block_state: 0,
                 block_entity: None,
             });
             blocks.push(BlockPlacement {
@@ -52,6 +54,7 @@ pub fn generate_mineshaft(
                 world_y: origin_y + 1,
                 world_z: origin_z,
                 block_type: BlockType::OakLog,
+                block_state: 0,
                 block_entity: None,
             });
             blocks.push(BlockPlacement {
@@ -59,6 +62,7 @@ pub fn generate_mineshaft(
                 world_y: origin_y + 2,
                 world_z: origin_z,
                 block_type: BlockType::OakPlanks,
+                block_state: 0,
                 block_entity: None,
             });
             blocks.push(BlockPlacement {
@@ -66,6 +70,7 @@ pub fn generate_mineshaft(
                 world_y: origin_y + 2,
                 world_z: origin_z + 1,
                 block_type: BlockType::OakPlanks,
+                block_state: 0,
                 block_entity: None,
             });
             blocks.push(BlockPlacement {
@@ -73,6 +78,7 @@ pub fn generate_mineshaft(
                 world_y: origin_y + 2,
                 world_z: origin_z + 2,
                 block_type: BlockType::OakPlanks,
+                block_state: 0,
                 block_entity: None,
             });
             blocks.push(BlockPlacement {
@@ -80,6 +86,7 @@ pub fn generate_mineshaft(
                 world_y: origin_y + 1,
                 world_z: origin_z + 2,
                 block_type: BlockType::OakLog,
+                block_state: 0,
                 block_entity: None,
             });
             blocks.push(BlockPlacement {
@@ -87,6 +94,7 @@ pub fn generate_mineshaft(
                 world_y: origin_y,
                 world_z: origin_z + 2,
                 block_type: BlockType::OakLog,
+                block_state: 0,
                 block_entity: None,
             });
         }
@@ -108,6 +116,7 @@ pub fn generate_mineshaft(
         world_y: cy,
         world_z: cz,
         block_type: BlockType::Chest,
+        block_state: 0,
         block_entity: Some(chest_entity),
     });
 

@@ -111,6 +111,14 @@ impl StructureManager {
 
                                 // Set block in chunk
                                 chunk.set_block_local(lx, wy, lz, block.block_type);
+                                if block.block_state != 0 {
+                                    chunk.set_block_state(
+                                        lx as i32,
+                                        wy,
+                                        lz as i32,
+                                        block.block_state,
+                                    );
+                                }
 
                                 // Add block entity if present
                                 if let Some(entity) = &block.block_entity {

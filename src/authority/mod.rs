@@ -1496,8 +1496,11 @@ mod tests {
         let mut core = core();
         let lever = (7, 80, 8);
         let source = (8, 80, 8);
+        let mut lever_on = crate::world::BlockState::default();
+        lever_on.is_open = true;
+        let lever_on = lever_on.encode();
         core.world_mut(Dimension::Overworld).unwrap()
-            .set_block(lever.0, lever.1, lever.2, BlockType::LeverOn, 0)
+            .set_block(lever.0, lever.1, lever.2, BlockType::Lever, lever_on)
             .unwrap();
         core.world_mut(Dimension::Overworld).unwrap()
             .set_block(source.0, source.1, source.2, BlockType::Dispenser, 0)
@@ -1574,7 +1577,7 @@ mod tests {
         }
         let _ = core.tick();
         core.world_mut(Dimension::Overworld).unwrap()
-            .set_block(lever.0, lever.1, lever.2, BlockType::LeverOn, 0)
+            .set_block(lever.0, lever.1, lever.2, BlockType::Lever, lever_on)
             .unwrap();
         {
             let world = core.world_mut(Dimension::Overworld).unwrap();

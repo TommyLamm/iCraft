@@ -27,7 +27,7 @@ impl std::fmt::Display for BlockEntityError {
 impl std::error::Error for BlockEntityError {}
 
 fn is_furnace_block(block: BlockType) -> bool {
-    matches!(block, BlockType::Furnace | BlockType::FurnaceLit)
+    matches!(block, BlockType::Furnace)
 }
 
 fn is_hopper_block(block: BlockType) -> bool {
@@ -904,7 +904,7 @@ mod tests {
         assert_eq!(Chunk::decode_torch_position(encoded), (3, 40, 5));
         chunk.set_block_local(3, 40, 5, BlockType::Furnace);
         assert_eq!(chunk.furnace_positions().len(), 1);
-        chunk.set_block_local(3, 40, 5, BlockType::FurnaceLit);
+        chunk.set_block_local(3, 40, 5, BlockType::Furnace);
         assert_eq!(chunk.furnace_positions().len(), 1);
         chunk.set_block_local(3, 40, 5, BlockType::Stone);
         assert!(chunk.furnace_positions().is_empty());

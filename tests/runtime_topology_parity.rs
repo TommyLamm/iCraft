@@ -300,7 +300,11 @@ fn prepare_dispenser_fixture(harness: &mut TopologyHarness) -> ItemWire {
         .runtime
         .authority
         .world_mut(Dimension::Overworld).unwrap()
-        .set_block(lever.0, lever.1, lever.2, BlockType::LeverOn, 0)
+        .set_block(lever.0, lever.1, lever.2, BlockType::Lever, {
+            let mut state = icraft::world::BlockState::default();
+            state.is_open = true;
+            state.encode()
+        })
         .unwrap();
 
     let mut stack = icraft::inventory::ItemStack::new(icraft::inventory::Item::Stone, 2)

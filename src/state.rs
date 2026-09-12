@@ -7135,7 +7135,7 @@ impl State {
                     y,
                     z,
                     face,
-                    BlockType::EndPortalFrameFilled,
+                    BlockType::EndPortalFrame,
                 );
             }
             WorldClickIntent::Sleep { x, y, z } => {
@@ -7263,7 +7263,7 @@ impl State {
         // 4. Container slots (if chest or furnace is open)
         if let Some(pos) = self.container_target {
             let block = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
-            if matches!(block, BlockType::Furnace | BlockType::FurnaceLit) {
+            if matches!(block, BlockType::Furnace) {
                 let in_x0 = -0.15;
                 let in_y0 = 0.10;
                 slots.push((

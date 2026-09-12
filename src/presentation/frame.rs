@@ -1575,7 +1575,7 @@ impl State {
                     }
                     if let Some(pos) = self.container_target {
                         let block = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
-                        if matches!(block, BlockType::Furnace | BlockType::FurnaceLit) {
+                        if matches!(block, BlockType::Furnace) {
                             let furnace = self.translate("inventory.furnace");
                             add_string_lines(
                                 &furnace,

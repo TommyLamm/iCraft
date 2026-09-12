@@ -30,6 +30,7 @@ pub fn generate_nether_fortress(
                 world_y: origin_y,
                 world_z: origin_z + dz,
                 block_type: BlockType::NetherBrick,
+                block_state: 0,
                 block_entity: None,
             });
         }
@@ -41,6 +42,7 @@ pub fn generate_nether_fortress(
                     world_y: origin_y + dy,
                     world_z: origin_z,
                     block_type: BlockType::NetherBrick,
+                    block_state: 0,
                     block_entity: None,
                 });
                 blocks.push(BlockPlacement {
@@ -48,6 +50,7 @@ pub fn generate_nether_fortress(
                     world_y: origin_y + dy,
                     world_z: origin_z + 4,
                     block_type: BlockType::NetherBrick,
+                    block_state: 0,
                     block_entity: None,
                 });
             }
@@ -64,6 +67,7 @@ pub fn generate_nether_fortress(
                 world_y: origin_y,
                 world_z: farm_z + dz,
                 block_type: BlockType::SoulSand,
+                block_state: 0,
                 block_entity: None,
             });
             blocks.push(BlockPlacement {
@@ -71,6 +75,7 @@ pub fn generate_nether_fortress(
                 world_y: origin_y + 1,
                 world_z: farm_z + dz,
                 block_type: BlockType::NetherWartCrop,
+                block_state: 0,
                 block_entity: None,
             });
         }
@@ -84,6 +89,7 @@ pub fn generate_nether_fortress(
         world_y: origin_y + 1,
         world_z: spawner_z,
         block_type: BlockType::Spawner,
+        block_state: 0,
         block_entity: Some(BlockEntity::Spawner(SpawnerBlockEntity {
             entity_type: EntityType::Blaze,
             spawn_delay: 160,
@@ -103,6 +109,7 @@ pub fn generate_nether_fortress(
         world_y: origin_y + 1,
         world_z: origin_z + 2,
         block_type: BlockType::Chest,
+        block_state: 0,
         block_entity: Some(chest_entity),
     });
 

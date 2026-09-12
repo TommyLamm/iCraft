@@ -85,6 +85,9 @@ pub struct BlockPlacement {
     pub world_y: i32,
     pub world_z: i32,
     pub block_type: BlockType,
+    /// Encoded `BlockState` (open/filled/lit bit, facing, …). Default 0.
+    #[serde(default)]
+    pub block_state: u8,
     pub block_entity: Option<BlockEntity>,
 }
 

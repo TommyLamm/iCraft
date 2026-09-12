@@ -671,12 +671,14 @@ impl AuthorityCore {
                 if !preserves_brew_locks(&session.gameplay, &next_gameplay) {
                     return Err(RejectReason::InvalidState);
                 }
+                let mut filled = crate::world::BlockState::default();
+                filled.is_open = true;
                 let mutation = self.world_mut_expect(dimension).set_block(
                     position.0,
                     position.1,
                     position.2,
-                    crate::world::BlockType::EndPortalFrameFilled,
-                    0,
+                    crate::world::BlockType::EndPortalFrame,
+                    filled.encode(),
                 )?;
                 if mutation.is_none() {
                     return Err(RejectReason::InvalidState);

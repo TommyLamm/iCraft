@@ -702,6 +702,59 @@ fn block_states_roundtrip_and_restore() {
 }
 
 #[test]
+fn legacy_oak_door_open_discriminant_migrates_into_open_bit() {
+    // Old saves stored open doors as discriminant 68 (OakDoorOpen). Load must
+    // map to OakDoor + BlockState.is_open so mesh/redstone share one track.
+    let mut chunk = Chunk::new(2, 2);
+    let (migrated, state) = BlockType::migrate_saved(68, 0b0000_0001); // facing South
+    assert_eq!(migrated, BlockType::OakDoor);
+    assert_ne!(state & crate::world::BLOCK_STATE_OPEN_BIT, 0);
+    chunk.set_block_local(4, 70, 4, migrated);
+    chunk.set_block_state(4, 70, 4, state);
+
+    let save_data = ChunkSaveData::from_chunk(&chunk).unwrap();
+    let mut restored = Chunk::new(2, 2);
+    save_data.restore_to_chunk(&mut restored).unwrap();
+    assert_eq!(restored.get_block(4, 70, 4), BlockType::OakDoor);
+    let decoded = crate::world::BlockState::decode(restored.get_block_state(4, 70, 4));
+    assert!(decoded.is_open);
+    assert_eq!(decoded.facing, crate::redstone::Direction::South);
+
+    // Raw column bytes with legacy id 68 must migrate on restore.
+    let mut raw_blocks = vec![0u8; destination_voxel_count(&chunk)];
+    let min_y = chunk.min_world_y();
+    let total_height = chunk.sections.len() * 16;
+    let flat = |x: usize, wy: i32, z: usize| {
+        let h = (wy - min_y) as usize;
+        (x * total_height + h) * 16 + z
+    };
+    raw_blocks[flat(3, 71, 3)] = 68; // legacy OakDoorOpen
+    use flate2::write::ZlibEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&raw_blocks).unwrap();
+    let compressed = encoder.finish().unwrap();
+    let legacy = ChunkSaveData {
+        chunk_x: 2,
+        chunk_z: 2,
+        blocks: compressed,
+        sky_light: Vec::new(),
+        block_light: Vec::new(),
+        fluid_levels: Vec::new(),
+        redstone_metadata: Vec::new(),
+        block_states: Vec::new(),
+        mutation_revision: 0,
+        block_entities: Vec::new(),
+        data_version: CHUNK_SAVE_DATA_VERSION,
+    };
+    let mut from_legacy = Chunk::new(2, 2);
+    legacy.restore_to_chunk(&mut from_legacy).unwrap();
+    assert_eq!(from_legacy.get_block(3, 71, 3), BlockType::OakDoor);
+    assert!(crate::world::BlockState::decode(from_legacy.get_block_state(3, 71, 3)).is_open);
+}
+
+#[test]
 fn test_entity_save_data_roundtrip() {
     use crate::entity::{Entity, EntityType};
     use glam::Vec3;

@@ -102,27 +102,49 @@ pub enum BlockType {
     Anvil = 47,
     RedstoneWire = 48,
     RedstoneTorch = 49,
-    RedstoneTorchOff = 50,
+    /// Reserved wire/save hole (was RedstoneTorchOff).
+    #[doc(hidden)]
+    Reserved50 = 50,
     Repeater = 51,
-    RepeaterPowered = 52,
+    /// Reserved wire/save hole (was RepeaterPowered).
+    #[doc(hidden)]
+    Reserved52 = 52,
     Comparator = 53,
-    ComparatorPowered = 54,
+    /// Reserved wire/save hole (was ComparatorPowered).
+    #[doc(hidden)]
+    Reserved54 = 54,
     StoneButton = 55,
-    StoneButtonPressed = 56,
+    /// Reserved wire/save hole (was StoneButtonPressed).
+    #[doc(hidden)]
+    Reserved56 = 56,
     Lever = 57,
-    LeverOn = 58,
+    /// Reserved wire/save hole (was LeverOn).
+    #[doc(hidden)]
+    Reserved58 = 58,
     PressurePlate = 59,
-    PressurePlatePowered = 60,
+    /// Reserved wire/save hole (was PressurePlatePowered).
+    #[doc(hidden)]
+    Reserved60 = 60,
     Piston = 61,
-    PistonExtended = 62,
+    /// Reserved wire/save hole (was PistonExtended).
+    #[doc(hidden)]
+    Reserved62 = 62,
     StickyPiston = 63,
-    StickyPistonExtended = 64,
+    /// Reserved wire/save hole (was StickyPistonExtended).
+    #[doc(hidden)]
+    Reserved64 = 64,
     RedstoneLamp = 65,
-    RedstoneLampLit = 66,
+    /// Reserved wire/save hole (was RedstoneLampLit).
+    #[doc(hidden)]
+    Reserved66 = 66,
     OakDoor = 67,
-    OakDoorOpen = 68,
+    /// Reserved wire/save hole (was OakDoorOpen).
+    #[doc(hidden)]
+    Reserved68 = 68,
     OakTrapdoor = 69,
-    OakTrapdoorOpen = 70,
+    /// Reserved wire/save hole (was OakTrapdoorOpen).
+    #[doc(hidden)]
+    Reserved70 = 70,
     Dispenser = 71,
     Dropper = 72,
     NoteBlock = 73,
@@ -134,7 +156,9 @@ pub enum BlockType {
     NetherPortal = 79,
     EndStone = 80,
     EndPortalFrame = 81,
-    EndPortalFrameFilled = 82,
+    /// Reserved wire/save hole (was EndPortalFrameFilled).
+    #[doc(hidden)]
+    Reserved82 = 82,
     EndPortal = 83,
     Purpur = 84,
     DragonEgg = 85,
@@ -142,7 +166,9 @@ pub enum BlockType {
     NetherBrick = 87,
     EndCityChest = 88,
     Bed = 89,
-    FurnaceLit = 90,
+    /// Reserved wire/save hole (was FurnaceLit).
+    #[doc(hidden)]
+    Reserved90 = 90,
     Farmland = 91,
     WheatCrop = 92,
     CarrotCrop = 93,
@@ -218,9 +244,15 @@ pub struct BlockState {
     pub facing: Direction,
     pub is_top: bool,
     pub is_right_hinge: bool,
+    /// Shared bit 4: door/trapdoor/chest open; lamp/furnace lit; piston extended;
+    /// end-portal frame filled; lever/button/plate/repeater/comparator powered;
+    /// redstone torch **extinguished** (clear bit = lit, matching legacy id 49).
     pub is_open: bool,
     pub chest_type: ChestType,
 }
+
+/// BlockState bit 4 — open / powered / lit / extended / filled (see `is_open`).
+pub const BLOCK_STATE_OPEN_BIT: u8 = 1 << 4;
 
 impl Default for BlockState {
     fn default() -> Self {
@@ -244,7 +276,11 @@ impl BlockState {
         };
         let half_bit = if self.is_top { 1 << 2 } else { 0 };
         let hinge_bit = if self.is_right_hinge { 1 << 3 } else { 0 };
-        let open_bit = if self.is_open { 1 << 4 } else { 0 };
+        let open_bit = if self.is_open {
+            BLOCK_STATE_OPEN_BIT
+        } else {
+            0
+        };
         let chest_type_bits = match self.chest_type {
             ChestType::Single => 0b00,
             ChestType::Left => 0b01,
@@ -263,7 +299,7 @@ impl BlockState {
         };
         let is_top = (val & (1 << 2)) != 0;
         let is_right_hinge = (val & (1 << 3)) != 0;
-        let is_open = (val & (1 << 4)) != 0;
+        let is_open = (val & BLOCK_STATE_OPEN_BIT) != 0;
         let chest_type = match (val >> 5) & 0b11 {
             0 => ChestType::Single,
             1 => ChestType::Left,
@@ -337,7 +373,8 @@ impl BlockState {
 impl BlockType {
     pub fn from_u8(val: u8) -> Self {
         if val <= BlockType::Observer as u8 {
-            unsafe { std::mem::transmute(val) }
+            let raw: Self = unsafe { std::mem::transmute(val) };
+            raw.canonicalize()
         } else {
             BlockType::Air
         }
@@ -350,17 +387,138 @@ impl BlockType {
     /// variant is allowed (append a new value), but never reuse an existing
     /// wire value for a different block: older clients would misdecode it.
     pub fn to_wire(&self) -> u32 {
-        *self as u32
+        self.canonicalize() as u32
     }
 
-    /// Inverse of `to_wire`. Returns `None` for values that do not map to a
-    /// known variant so unknown (newer) blocks are dropped gracefully instead
-    /// of corrupting world state.
+    /// Inverse of `to_wire`. Reserved holes alias to their live base type.
+    /// Returns `None` for values that do not map to a known discriminant.
     pub fn from_wire(val: u32) -> Option<Self> {
-        if val <= BlockType::Observer as u32 {
-            Some(unsafe { std::mem::transmute(val as u8) })
-        } else {
-            None
+        if val > BlockType::Observer as u32 {
+            return None;
+        }
+        let raw: Self = unsafe { std::mem::transmute(val as u8) };
+        Some(raw.canonicalize())
+    }
+
+    /// Map a saved/wire `(block_id, state)` into the live pair.
+    ///
+    /// The 13 legacy powered/open/lit/extended/filled discriminants become the
+    /// base type with `BLOCK_STATE_OPEN_BIT` set. Live base ids keep their state
+    /// bytes unchanged (redstone torch lit = bit clear).
+    pub fn migrate_saved(block_id: u8, state: u8) -> (Self, u8) {
+        match block_id {
+            50 => (Self::RedstoneTorch, state | BLOCK_STATE_OPEN_BIT),
+            52 => (Self::Repeater, state | BLOCK_STATE_OPEN_BIT),
+            54 => (Self::Comparator, state | BLOCK_STATE_OPEN_BIT),
+            56 => (Self::StoneButton, state | BLOCK_STATE_OPEN_BIT),
+            58 => (Self::Lever, state | BLOCK_STATE_OPEN_BIT),
+            60 => (Self::PressurePlate, state | BLOCK_STATE_OPEN_BIT),
+            62 => (Self::Piston, state | BLOCK_STATE_OPEN_BIT),
+            64 => (Self::StickyPiston, state | BLOCK_STATE_OPEN_BIT),
+            66 => (Self::RedstoneLamp, state | BLOCK_STATE_OPEN_BIT),
+            68 => (Self::OakDoor, state | BLOCK_STATE_OPEN_BIT),
+            70 => (Self::OakTrapdoor, state | BLOCK_STATE_OPEN_BIT),
+            82 => (Self::EndPortalFrame, state | BLOCK_STATE_OPEN_BIT),
+            90 => (Self::Furnace, state | BLOCK_STATE_OPEN_BIT),
+            _ => (Self::from_u8(block_id), state),
+        }
+    }
+
+    /// Collapse reserved holes to their live base type.
+    pub const fn canonicalize(self) -> Self {
+        match self {
+            Self::Reserved50 => Self::RedstoneTorch,
+            Self::Reserved52 => Self::Repeater,
+            Self::Reserved54 => Self::Comparator,
+            Self::Reserved56 => Self::StoneButton,
+            Self::Reserved58 => Self::Lever,
+            Self::Reserved60 => Self::PressurePlate,
+            Self::Reserved62 => Self::Piston,
+            Self::Reserved64 => Self::StickyPiston,
+            Self::Reserved66 => Self::RedstoneLamp,
+            Self::Reserved68 => Self::OakDoor,
+            Self::Reserved70 => Self::OakTrapdoor,
+            Self::Reserved82 => Self::EndPortalFrame,
+            Self::Reserved90 => Self::Furnace,
+            other => other,
+        }
+    }
+
+    pub const fn is_reserved_hole(self) -> bool {
+        matches!(
+            self,
+            Self::Reserved50
+                | Self::Reserved52
+                | Self::Reserved54
+                | Self::Reserved56
+                | Self::Reserved58
+                | Self::Reserved60
+                | Self::Reserved62
+                | Self::Reserved64
+                | Self::Reserved66
+                | Self::Reserved68
+                | Self::Reserved70
+                | Self::Reserved82
+                | Self::Reserved90
+        )
+    }
+
+    /// State-aware light emission (lamp/furnace/torch/end-frame).
+    pub fn light_emission_for(self, state: BlockState) -> u8 {
+        match self.canonicalize() {
+            Self::RedstoneTorch => {
+                if state.is_open {
+                    0
+                } else {
+                    7
+                }
+            }
+            Self::RedstoneLamp => {
+                if state.is_open {
+                    15
+                } else {
+                    0
+                }
+            }
+            Self::Furnace => {
+                if state.is_open {
+                    13
+                } else {
+                    0
+                }
+            }
+            Self::EndPortalFrame => {
+                if state.is_open {
+                    2
+                } else {
+                    0
+                }
+            }
+            other => other.def().properties.light_emission,
+        }
+    }
+
+    /// State-aware face atlas tile (lit lamp / filled end-frame top).
+    pub fn face_tex_for(self, state: BlockState, face_idx: usize) -> (u32, u32) {
+        let face = face_idx.min(5);
+        match self.canonicalize() {
+            Self::RedstoneLamp if state.is_open => (8, 14),
+            Self::EndPortalFrame if state.is_open && face == 4 => (6, 4),
+            other => other.get_face_tex_index(face),
+        }
+    }
+
+    pub fn is_solid_for(self, state: BlockState) -> bool {
+        match self.canonicalize() {
+            Self::OakDoor | Self::OakTrapdoor => !state.is_open,
+            other => other.properties().is_solid,
+        }
+    }
+
+    pub fn is_passable_for(self, state: BlockState) -> bool {
+        match self.canonicalize() {
+            Self::OakDoor | Self::OakTrapdoor => state.is_open,
+            other => other.properties().is_passable,
         }
     }
 
@@ -373,7 +531,7 @@ impl BlockType {
 
     #[inline]
     pub fn def(self) -> &'static BlockDef {
-        &BLOCK_TABLE[self as usize]
+        &BLOCK_TABLE[self.canonicalize() as usize]
     }
 
     #[inline]
@@ -382,7 +540,7 @@ impl BlockType {
     }
 
     pub fn can_stay_on(self, below: BlockType) -> bool {
-        match self {
+        match self.canonicalize() {
             BlockType::WheatCrop | BlockType::CarrotCrop | BlockType::PotatoCrop => {
                 below == BlockType::Farmland
             }
@@ -404,14 +562,10 @@ impl BlockType {
             BlockType::SnowLayer => below.properties().is_solid,
             BlockType::Torch
             | BlockType::RedstoneTorch
-            | BlockType::RedstoneTorchOff
             | BlockType::RedstoneWire
             | BlockType::Repeater
-            | BlockType::RepeaterPowered
             | BlockType::Comparator
-            | BlockType::ComparatorPowered
-            | BlockType::PressurePlate
-            | BlockType::PressurePlatePowered => below.properties().is_solid,
+            | BlockType::PressurePlate => below.properties().is_solid,
             _ => true,
         }
     }
@@ -551,14 +705,10 @@ impl BlockType {
             | BlockType::SnowLayer
             | BlockType::Torch
             | BlockType::RedstoneTorch
-            | BlockType::RedstoneTorchOff
             | BlockType::RedstoneWire
             | BlockType::Repeater
-            | BlockType::RepeaterPowered
             | BlockType::Comparator
-            | BlockType::ComparatorPowered
-            | BlockType::PressurePlate
-            | BlockType::PressurePlatePowered => {
+            | BlockType::PressurePlate => {
                 if y <= 0 {
                     BlockSupportStatus::Unsupported
                 } else {
@@ -613,12 +763,15 @@ mod tests {
 
     #[test]
     fn block_type_wire_roundtrip_covers_all_variants() {
-        // Walk every discriminant in `0..=EndCityChest` and confirm the
-        // wire helpers are exact inverses. This also guards against future
-        // reordering of the enum: any renumbering would surface here.
-        for raw in 0..=BlockType::FurnaceLit as u32 {
+        // Live discriminants round-trip; reserved holes alias to their base.
+        for raw in 0..=BlockType::Observer as u32 {
             let block = BlockType::from_wire(raw).expect("valid discriminant");
-            assert_eq!(block.to_wire(), raw);
+            if BlockType::migrate_saved(raw as u8, 0).0 as u32 == raw {
+                assert_eq!(block.to_wire(), raw);
+            } else {
+                assert_eq!(block.to_wire(), block as u32);
+                assert_ne!(block as u32, raw, "hole {raw} must alias away");
+            }
         }
     }
 
@@ -737,9 +890,51 @@ mod tests {
         assert_eq!(BlockType::from_u8(74), BlockType::Fire);
         assert_eq!(BlockType::from_u8(75), BlockType::SnowLayer);
         for id in 0..=BlockType::Observer as u8 {
-            assert_eq!(BlockType::from_u8(id) as u8, id);
+            let block = BlockType::from_u8(id);
+            let (migrated, _) = BlockType::migrate_saved(id, 0);
+            assert_eq!(block, migrated);
+            if block as u8 == id {
+                assert_eq!(block as u8, id);
+            }
         }
         assert_eq!(BlockType::from_u8(255), BlockType::Air);
+    }
+
+    #[test]
+    fn legacy_powered_open_holes_migrate_into_state_bits() {
+        let cases = [
+            (50u8, BlockType::RedstoneTorch),
+            (52, BlockType::Repeater),
+            (54, BlockType::Comparator),
+            (56, BlockType::StoneButton),
+            (58, BlockType::Lever),
+            (60, BlockType::PressurePlate),
+            (62, BlockType::Piston),
+            (64, BlockType::StickyPiston),
+            (66, BlockType::RedstoneLamp),
+            (68, BlockType::OakDoor),
+            (70, BlockType::OakTrapdoor),
+            (82, BlockType::EndPortalFrame),
+            (90, BlockType::Furnace),
+        ];
+        for (raw, base) in cases {
+            let (block, state) = BlockType::migrate_saved(raw, 0);
+            assert_eq!(block, base);
+            assert_ne!(state & BLOCK_STATE_OPEN_BIT, 0);
+            let decoded = BlockState::decode(state);
+            assert!(decoded.is_open);
+        }
+        // Live torch id keeps clear bit (= lit).
+        let (torch, state) = BlockType::migrate_saved(49, 0);
+        assert_eq!(torch, BlockType::RedstoneTorch);
+        assert_eq!(state & BLOCK_STATE_OPEN_BIT, 0);
+        assert_eq!(
+            BlockType::RedstoneTorch.light_emission_for(BlockState::default()),
+            7
+        );
+        let mut off = BlockState::default();
+        off.is_open = true;
+        assert_eq!(BlockType::RedstoneTorch.light_emission_for(off), 0);
     }
 
     #[test]
@@ -758,10 +953,16 @@ mod tests {
         assert_eq!(BLOCK_TABLE.len(), BLOCK_TYPE_COUNT);
         assert_eq!(BLOCK_TYPE_COUNT, BlockType::Observer as usize + 1);
         for id in 0..BLOCK_TYPE_COUNT as u8 {
+            let raw: BlockType = unsafe { std::mem::transmute(id) };
+            if raw.is_reserved_hole() {
+                // Hole rows stay for discriminant density; gameplay indexes the base.
+                let base = raw.canonicalize();
+                assert_eq!(base.def() as *const _, &BLOCK_TABLE[base as usize] as *const _);
+                continue;
+            }
             let block = BlockType::from_u8(id);
             assert_eq!(block as usize, id as usize);
             let def = block.def();
-            // Every discriminant maps to exactly one table row.
             assert!(
                 std::ptr::eq(def, &BLOCK_TABLE[id as usize]),
                 "variant {block:?} must index its own row"
@@ -771,10 +972,13 @@ mod tests {
 
     #[test]
     fn block_static_property_snapshot_is_byte_identical() {
-        // Locked dump of every static field for every discriminant. Changing a
-        // gameplay number here is intentional and must update this golden string.
+        // Locked dump of every static field for every live discriminant.
         let mut lines = Vec::with_capacity(BLOCK_TYPE_COUNT);
         for id in 0..BLOCK_TYPE_COUNT as u8 {
+            let raw: BlockType = unsafe { std::mem::transmute(id) };
+            if raw.is_reserved_hole() {
+                continue;
+            }
             let b = BlockType::from_u8(id);
             let d = b.def();
             let p = &d.properties;
@@ -808,8 +1012,11 @@ mod tests {
             snapshot, expected,
             "BlockDef table drifted from the locked snapshot"
         );
-        // Thin accessors must agree with the table row.
         for id in 0..BLOCK_TYPE_COUNT as u8 {
+            let raw: BlockType = unsafe { std::mem::transmute(id) };
+            if raw.is_reserved_hole() {
+                continue;
+            }
             let b = BlockType::from_u8(id);
             let d = b.def();
             assert_eq!(b.properties().name, d.properties.name);

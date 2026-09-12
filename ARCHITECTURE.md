@@ -337,9 +337,19 @@ entities live in the owning chunk. Use signed-Y helpers in `src/world/`
 `Chunk::world_y_range()`, `Dimension::height()`), not hard-coded `0..256`.
 `BlockType` is `#[repr(u8)]` with stable wire/save discriminants; static
 gameplay/render fields live in `BLOCK_TABLE` (`src/world/block_table.rs`),
-indexed by discriminant. `BlockType::def()` / `properties()` return
-`&'static` rows (no per-voxel struct rebuild). Behavioral helpers
-(`can_stay_on`, `support_status_at`) stay as code.
+indexed by discriminant after `canonicalize()`. `BlockType::def()` /
+`properties()` return `&'static` rows (no per-voxel struct rebuild).
+Behavioral helpers (`can_stay_on`, `support_status_at`) stay as code.
+
+Open / powered / lit / extended / filled no longer use paired `BlockType`
+variants. Bit 4 of `BlockState` (`is_open` / `BLOCK_STATE_OPEN_BIT`) carries
+that flag for doors, trapdoors, lamps, furnaces, pistons, end-portal frames,
+levers, buttons, plates, repeaters, and comparators. Redstone torches invert
+the bit (set = extinguished) so legacy id 49 stays lit. The thirteen former
+variant discriminants remain as `Reserved50`…`Reserved90` holes;
+`from_wire` / `migrate_saved` map them to the base type plus the open bit.
+State-aware helpers: `light_emission_for`, `face_tex_for`, `is_solid_for`,
+`is_passable_for`.
 Nether and End generation fill paletted `ChunkSection`s directly (no
 full-column dense scratch). Overworld and Superflat do the same via
 `set_block_local`; Superflat starts from `Chunk::empty_in_dimension` instead

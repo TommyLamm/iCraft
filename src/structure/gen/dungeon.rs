@@ -43,6 +43,7 @@ pub fn generate_dungeon(origin_x: i32, origin_y: i32, origin_z: i32, seed: u32) 
                         world_y: wy,
                         world_z: wz,
                         block_type: block,
+                        block_state: 0,
                         block_entity: None,
                     });
                 } else {
@@ -51,6 +52,7 @@ pub fn generate_dungeon(origin_x: i32, origin_y: i32, origin_z: i32, seed: u32) 
                         world_y: wy,
                         world_z: wz,
                         block_type: BlockType::Air,
+                        block_state: 0,
                         block_entity: None,
                     });
                 }
@@ -69,6 +71,7 @@ pub fn generate_dungeon(origin_x: i32, origin_y: i32, origin_z: i32, seed: u32) 
         world_y: origin_y + 1,
         world_z: origin_z + 3,
         block_type: BlockType::Spawner,
+        block_state: 0,
         block_entity: Some(BlockEntity::Spawner(SpawnerBlockEntity {
             entity_type: spawner_entity_type,
             spawn_delay: 200,
@@ -94,6 +97,7 @@ pub fn generate_dungeon(origin_x: i32, origin_y: i32, origin_z: i32, seed: u32) 
             world_y: cy,
             world_z: cz,
             block_type: BlockType::Chest,
+            block_state: 0,
             block_entity: Some(chest_entity),
         });
     }

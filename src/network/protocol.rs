@@ -648,7 +648,7 @@ impl GameplayRequest {
                         let expected = match action {
                             BlockActionKind::IgnitePortal => crate::world::BlockType::Fire,
                             BlockActionKind::InsertEnderEye => {
-                                crate::world::BlockType::EndPortalFrameFilled
+                                crate::world::BlockType::EndPortalFrame
                             }
                             _ => unreachable!(),
                         };

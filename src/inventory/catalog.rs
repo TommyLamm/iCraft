@@ -2430,7 +2430,7 @@ impl Item {
     }
 
     pub fn from_block(b: BlockType) -> Self {
-        match b {
+        match b.canonicalize() {
             BlockType::Air => Item::Air,
             BlockType::Grass => Item::Grass,
             BlockType::Dirt => Item::Dirt,
@@ -2457,7 +2457,7 @@ impl Item {
             BlockType::Sandstone => Item::Sandstone,
             BlockType::Obsidian => Item::Obsidian,
             BlockType::CraftingTable => Item::CraftingTable,
-            BlockType::Furnace | BlockType::FurnaceLit => Item::Furnace,
+            BlockType::Furnace => Item::Furnace,
             BlockType::Chest => Item::Chest,
             BlockType::TNT => Item::TNT,
             BlockType::Bookshelf => Item::Bookshelf,
@@ -2486,17 +2486,17 @@ impl Item {
             BlockType::BrewingStand => Item::BrewingStand,
             BlockType::Anvil => Item::Anvil,
             BlockType::RedstoneWire => Item::RedstoneWire,
-            BlockType::RedstoneTorch | BlockType::RedstoneTorchOff => Item::RedstoneTorch,
-            BlockType::Repeater | BlockType::RepeaterPowered => Item::Repeater,
-            BlockType::Comparator | BlockType::ComparatorPowered => Item::Comparator,
-            BlockType::StoneButton | BlockType::StoneButtonPressed => Item::StoneButton,
-            BlockType::Lever | BlockType::LeverOn => Item::Lever,
-            BlockType::PressurePlate | BlockType::PressurePlatePowered => Item::PressurePlate,
-            BlockType::Piston | BlockType::PistonExtended => Item::Piston,
-            BlockType::StickyPiston | BlockType::StickyPistonExtended => Item::StickyPiston,
-            BlockType::RedstoneLamp | BlockType::RedstoneLampLit => Item::RedstoneLamp,
-            BlockType::OakDoor | BlockType::OakDoorOpen => Item::OakDoor,
-            BlockType::OakTrapdoor | BlockType::OakTrapdoorOpen => Item::OakTrapdoor,
+            BlockType::RedstoneTorch => Item::RedstoneTorch,
+            BlockType::Repeater => Item::Repeater,
+            BlockType::Comparator => Item::Comparator,
+            BlockType::StoneButton => Item::StoneButton,
+            BlockType::Lever => Item::Lever,
+            BlockType::PressurePlate => Item::PressurePlate,
+            BlockType::Piston => Item::Piston,
+            BlockType::StickyPiston => Item::StickyPiston,
+            BlockType::RedstoneLamp => Item::RedstoneLamp,
+            BlockType::OakDoor => Item::OakDoor,
+            BlockType::OakTrapdoor => Item::OakTrapdoor,
             BlockType::Dispenser => Item::Dispenser,
             BlockType::Dropper => Item::Dropper,
             BlockType::NoteBlock => Item::NoteBlock,
@@ -2509,7 +2509,7 @@ impl Item {
             BlockType::Glowstone => Item::Glowstone,
             BlockType::NetherPortal => Item::Air,
             BlockType::EndStone => Item::EndStone,
-            BlockType::EndPortalFrame | BlockType::EndPortalFrameFilled => Item::EndPortalFrame,
+            BlockType::EndPortalFrame => Item::EndPortalFrame,
             BlockType::EndPortal => Item::Air,
             BlockType::Purpur => Item::Purpur,
             BlockType::DragonEgg => Item::DragonEgg,
@@ -2538,6 +2538,20 @@ impl Item {
             BlockType::EndStoneBrick => Item::EndStone,
             BlockType::RespawnAnchor => Item::Obsidian,
             BlockType::EndGateway => Item::Air,
+            // Reserved wire holes — unreachable after canonicalize(), kept for exhaustiveness.
+            BlockType::Reserved50
+            | BlockType::Reserved52
+            | BlockType::Reserved54
+            | BlockType::Reserved56
+            | BlockType::Reserved58
+            | BlockType::Reserved60
+            | BlockType::Reserved62
+            | BlockType::Reserved64
+            | BlockType::Reserved66
+            | BlockType::Reserved68
+            | BlockType::Reserved70
+            | BlockType::Reserved82
+            | BlockType::Reserved90 => Item::Air,
         }
     }
 }

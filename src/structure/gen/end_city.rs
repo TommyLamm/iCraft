@@ -24,6 +24,7 @@ pub fn generate_end_city(origin_x: i32, origin_y: i32, origin_z: i32, seed: u32)
                 world_y: origin_y,
                 world_z: origin_z + dz,
                 block_type: BlockType::EndStoneBrick,
+                block_state: 0,
                 block_entity: None,
             });
         }
@@ -44,6 +45,7 @@ pub fn generate_end_city(origin_x: i32, origin_y: i32, origin_z: i32, seed: u32)
                     world_y: origin_y + dy,
                     world_z: origin_z + dz,
                     block_type: block,
+                    block_state: 0,
                     block_entity: None,
                 });
             }
@@ -59,6 +61,7 @@ pub fn generate_end_city(origin_x: i32, origin_y: i32, origin_z: i32, seed: u32)
                 world_y: top_y,
                 world_z: origin_z + dz,
                 block_type: BlockType::Purpur,
+                block_state: 0,
                 block_entity: None,
             });
         }
@@ -81,6 +84,7 @@ pub fn generate_end_city(origin_x: i32, origin_y: i32, origin_z: i32, seed: u32)
         world_y: chest_y,
         world_z: chest_z,
         block_type: BlockType::Chest,
+        block_state: 0,
         block_entity: Some(chest_entity),
     });
 

@@ -278,6 +278,8 @@ impl ServerWorld {
             chest.ensure_loot_generated(self.seed, position);
             chest.revision = revision;
         }
+        self.chunks
+            .mark_block_entity_dirty(position.0, position.2);
         self.set_block_revision(position, revision);
         self.chunk_revisions.insert(
             (position.0.div_euclid(16), position.2.div_euclid(16)),
@@ -875,7 +877,6 @@ impl ServerWorld {
                 BlockType::Chest
                     | BlockType::EndCityChest
                     | BlockType::Furnace
-                    | BlockType::FurnaceLit
                     | BlockType::Hopper
                     | BlockType::Dispenser
                     | BlockType::Dropper
@@ -953,10 +954,11 @@ impl ServerWorld {
                 }
             }
         }
-        if block == BlockType::EndPortalFrameFilled {
+        if crate::world::BlockState::decode(state).is_open && block == BlockType::EndPortalFrame {
             if let Some(interior) =
                 crate::dimension::detect_completed_end_portal((x, y, z), |x, y, z| {
-                    self.get_block(x, y, z)
+                    self.get_block(x, y, z) == BlockType::EndPortalFrame
+                        && crate::world::BlockState::decode(self.get_block_state(x, y, z)).is_open
                 })
             {
                 for pos in interior {
@@ -1006,10 +1008,7 @@ impl ServerWorld {
             return Err(RejectReason::InvalidState);
         };
         if existing != BlockType::Air {
-            if !(block == BlockType::EndPortalFrameFilled && existing == BlockType::EndPortalFrame)
-            {
-                return Err(RejectReason::InvalidState);
-            }
+            return Err(RejectReason::InvalidState);
         }
         let support = (
             x.saturating_sub(i32::from(face[0])),
@@ -1964,12 +1963,11 @@ impl ServerWorld {
             self.redstone
                 .mark_container_changed(&self.chunks, (x, y, z));
             if was_lit != is_lit {
-                let block = if is_lit {
-                    BlockType::FurnaceLit
-                } else {
-                    BlockType::Furnace
-                };
-                if let Ok(Some(event)) = self.set_block(x, y, z, block, 0) {
+                let mut lit_state = crate::world::BlockState::decode(self.get_block_state(x, y, z));
+                lit_state.is_open = is_lit;
+                if let Ok(Some(event)) =
+                    self.set_block(x, y, z, BlockType::Furnace, lit_state.encode())
+                {
                     mutations.push(event);
                 }
             } else {

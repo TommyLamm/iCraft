@@ -61,7 +61,7 @@ impl PoiType {
         match block {
             BlockType::Bed => Some(Self::Bed),
             BlockType::BrewingStand => Some(Self::JobSite(VillagerProfession::Cleric)),
-            BlockType::Furnace | BlockType::FurnaceLit | BlockType::Anvil => {
+            BlockType::Furnace | BlockType::Anvil => {
                 Some(Self::JobSite(VillagerProfession::Armorer))
             }
             BlockType::Bookshelf => Some(Self::JobSite(VillagerProfession::Librarian)),

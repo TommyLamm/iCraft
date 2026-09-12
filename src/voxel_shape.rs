@@ -455,14 +455,10 @@ pub fn block_collision_shape_sampled(
         | BlockType::PotatoCrop
         | BlockType::Torch
         | BlockType::RedstoneTorch
-        | BlockType::RedstoneTorchOff
         | BlockType::OakSign => VoxelShape::EMPTY,
 
-        BlockType::OakDoor | BlockType::OakDoorOpen => {
-            let mut state = BlockState::decode(state_raw);
-            if block == BlockType::OakDoorOpen {
-                state.is_open = true;
-            }
+        BlockType::OakDoor => {
+            let state = BlockState::decode(state_raw);
             const THICKNESS: f32 = 3.0 / 16.0;
             let (min_x, max_x, min_z, max_z) = if !state.is_open {
                 match state.facing {
@@ -489,11 +485,8 @@ pub fn block_collision_shape_sampled(
             VoxelShape::from_box(aabb(min_x, 0.0, min_z, max_x, 1.0, max_z))
         }
 
-        BlockType::OakTrapdoor | BlockType::OakTrapdoorOpen => {
-            let mut state = BlockState::decode(state_raw);
-            if block == BlockType::OakTrapdoorOpen {
-                state.is_open = true;
-            }
+        BlockType::OakTrapdoor => {
+            let state = BlockState::decode(state_raw);
             const THICKNESS: f32 = 3.0 / 16.0;
             if state.is_open {
                 let (min_x, max_x, min_z, max_z) = match state.facing {
@@ -629,11 +622,9 @@ pub fn block_selection_shape(
         }
 
         BlockType::OakDoor
-        | BlockType::OakDoorOpen
-        | BlockType::OakTrapdoor
-        | BlockType::OakTrapdoorOpen => VoxelShape::FULL_CUBE,
+        | BlockType::OakTrapdoor => VoxelShape::FULL_CUBE,
 
-        BlockType::Torch | BlockType::RedstoneTorch | BlockType::RedstoneTorchOff => {
+        BlockType::Torch | BlockType::RedstoneTorch => {
             VoxelShape::from_box(aabb(
                 6.0 * SIXTEENTH,
                 0.0,

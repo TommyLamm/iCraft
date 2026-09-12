@@ -169,7 +169,7 @@ fn is_authority_container(topology: PresentationTopology, block: BlockType) -> b
         BlockType::Chest
             | BlockType::EndCityChest
             | BlockType::Furnace
-            | BlockType::FurnaceLit
+            | BlockType::Furnace
             | BlockType::Hopper
             | BlockType::Dispenser
             | BlockType::Dropper

@@ -1011,9 +1011,16 @@ fn apply_decoded_column(
                     let sec_idx = (ly << 8) | (z << 4) | x;
 
                     if flat_idx < blocks.len() {
-                        sec_b[sec_idx] = BlockType::from_u8(blocks[flat_idx]);
-                    }
-                    if flat_idx < block_states.len() {
+                        let raw_state = if flat_idx < block_states.len() {
+                            block_states[flat_idx]
+                        } else {
+                            0
+                        };
+                        let (block, state) =
+                            BlockType::migrate_saved(blocks[flat_idx], raw_state);
+                        sec_b[sec_idx] = block;
+                        sec_st[sec_idx] = state;
+                    } else if flat_idx < block_states.len() {
                         sec_st[sec_idx] = block_states[flat_idx];
                     }
                     if flat_idx < sky_light.len() {
@@ -1033,7 +1040,7 @@ fn apply_decoded_column(
             &sec_b,
             &sec_sk,
             &sec_bl,
-            if block_states.is_empty() {
+            if block_states.is_empty() && sec_st.iter().all(|&s| s == 0) {
                 None
             } else {
                 Some(&sec_st)

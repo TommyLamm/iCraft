@@ -148,7 +148,12 @@ struct ComponentState {
 
 impl ComponentState {
     fn new(block: BlockType, facing: Direction) -> Self {
-        let power = source_power(block);
+        // New components start from the type's resting state (torch lit / others off).
+        // Live open/powered bits are applied on the next settle from BlockState.
+        let power = match block.canonicalize() {
+            BlockType::RedstoneTorch => 15,
+            _ => 0,
+        };
         Self {
             signal: RedstoneState {
                 power,
@@ -657,16 +662,15 @@ impl RedstoneSystem {
         let mut update = RedstoneUpdate::default();
         match block {
             BlockType::Lever => {
-                set_block_record(manager, pos, BlockType::LeverOn, &mut update.mutations);
+                let open = !block_open_at(manager, pos);
+                set_open_flag(manager, pos, BlockType::Lever, open, &mut update.mutations);
             }
-            BlockType::LeverOn => {
-                set_block_record(manager, pos, BlockType::Lever, &mut update.mutations);
-            }
-            BlockType::StoneButton | BlockType::StoneButtonPressed => {
-                set_block_record(
+            BlockType::StoneButton => {
+                set_open_flag(
                     manager,
                     pos,
-                    BlockType::StoneButtonPressed,
+                    BlockType::StoneButton,
+                    true,
                     &mut update.mutations,
                 );
                 self.scheduled.retain(|scheduled| {
@@ -679,12 +683,12 @@ impl RedstoneSystem {
                 });
                 self.sleeping = false;
             }
-            BlockType::Repeater | BlockType::RepeaterPowered => {
+            BlockType::Repeater => {
                 if let Some(state) = self.components.get_mut(&pos) {
                     state.repeater_delay = state.repeater_delay % 4 + 1;
                 }
             }
-            BlockType::Comparator | BlockType::ComparatorPowered => {
+            BlockType::Comparator => {
                 if let Some(state) = self.components.get_mut(&pos) {
                     state.comparator_mode = match state.comparator_mode {
                         ComparatorMode::Compare => ComparatorMode::Subtract,
@@ -995,11 +999,14 @@ impl RedstoneSystem {
         for scheduled in due {
             match scheduled.kind {
                 ScheduledKind::ReleaseButton => {
-                    if get_block(manager, scheduled.pos) == BlockType::StoneButtonPressed {
-                        set_block_record(
+                    if get_block(manager, scheduled.pos) == BlockType::StoneButton
+                        && block_open_at(manager, scheduled.pos)
+                    {
+                        set_open_flag(
                             manager,
                             scheduled.pos,
                             BlockType::StoneButton,
+                            false,
                             &mut update.mutations,
                         );
                         self.mark_neighbors_dirty(manager, scheduled.pos);
@@ -1007,13 +1014,14 @@ impl RedstoneSystem {
                 }
                 ScheduledKind::Repeater(powered) => {
                     let block = get_block(manager, scheduled.pos);
-                    if matches!(block, BlockType::Repeater | BlockType::RepeaterPowered) {
-                        let target = if powered {
-                            BlockType::RepeaterPowered
-                        } else {
-                            BlockType::Repeater
-                        };
-                        set_block_record(manager, scheduled.pos, target, &mut update.mutations);
+                    if matches!(block, BlockType::Repeater) {
+                        set_open_flag(
+                            manager,
+                            scheduled.pos,
+                            BlockType::Repeater,
+                            powered,
+                            &mut update.mutations,
+                        );
                         self.mark_neighbors_dirty(manager, scheduled.pos);
                     }
                 }
@@ -1110,7 +1118,7 @@ impl RedstoneSystem {
             .filter_map(|(&pos, _)| {
                 matches!(
                     get_block(manager, pos),
-                    BlockType::PressurePlate | BlockType::PressurePlatePowered
+                    BlockType::PressurePlate
                 )
                 .then_some(pos)
             })
@@ -1120,13 +1128,10 @@ impl RedstoneSystem {
                 occupant.0 == pos.0 && occupant.2 == pos.2 && occupant.1 == pos.1 + 1
             });
             let current_block = get_block(manager, pos);
-            let target = if occupied {
-                BlockType::PressurePlatePowered
-            } else {
-                BlockType::PressurePlate
-            };
-            if current_block != target {
-                set_block_record(manager, pos, target, mutations);
+            if current_block == BlockType::PressurePlate
+                && block_open_at(manager, pos) != occupied
+            {
+                set_open_flag(manager, pos, BlockType::PressurePlate, occupied, mutations);
                 self.mark_neighbors_dirty(manager, pos);
             }
         }
@@ -1165,7 +1170,7 @@ impl RedstoneSystem {
                 let new_power = desired_power(manager, &self.components, pos, block, state);
                 let new_charge = if new_power == 0 {
                     ChargeKind::Unpowered
-                } else if is_strong_source(block) {
+                } else if is_strong_source(manager, pos, block) {
                     ChargeKind::Strong
                 } else {
                     ChargeKind::Weak
@@ -1232,20 +1237,21 @@ impl RedstoneSystem {
 
             match block {
                 BlockType::RedstoneTorch
-                | BlockType::RedstoneTorchOff
                 | BlockType::Comparator
-                | BlockType::ComparatorPowered
-                | BlockType::RedstoneLamp
-                | BlockType::RedstoneLampLit => {
-                    if let Some(target) = powered_variant(block, state.signal.power > 0) {
-                        set_block_record(manager, pos, target, &mut update.mutations);
-                    }
+                | BlockType::RedstoneLamp => {
+                    apply_powered_open_state(
+                        manager,
+                        pos,
+                        block,
+                        state.signal.power > 0,
+                        &mut update.mutations,
+                    );
                 }
-                BlockType::Repeater | BlockType::RepeaterPowered => {
+                BlockType::Repeater => {
                     let behind = sub(pos, state.facing.delta());
                     let input = signal_from_position(manager, &self.components, behind, pos, false);
                     let desired = input > 0;
-                    let current = block == BlockType::RepeaterPowered;
+                    let current = block_open_at(manager, pos);
                     let already_scheduled = self.scheduled.iter().any(|scheduled| {
                         scheduled.pos == pos && matches!(scheduled.kind, ScheduledKind::Repeater(_))
                     });
@@ -1257,34 +1263,14 @@ impl RedstoneSystem {
                         });
                     }
                 }
-                BlockType::OakDoor
-                | BlockType::OakDoorOpen
-                | BlockType::OakTrapdoor
-                | BlockType::OakTrapdoorOpen => {
+                BlockType::OakDoor | BlockType::OakTrapdoor => {
                     let is_open = state.signal.power > 0;
-                    if let Some(target) = powered_variant(block, is_open) {
-                        let cur_raw = manager.get_block_state(pos.0, pos.1, pos.2);
-                        let mut bstate = crate::world::BlockState::decode(cur_raw);
-                        if bstate.is_open != is_open {
-                            bstate.is_open = is_open;
-                            set_block_record_with_state(
-                                manager,
-                                pos,
-                                target,
-                                bstate.encode(),
-                                &mut update.mutations,
-                            );
-                        } else {
-                            set_block_record(manager, pos, target, &mut update.mutations);
-                        }
-                    }
+                    set_open_flag(manager, pos, block, is_open, &mut update.mutations);
                 }
-                BlockType::Piston
-                | BlockType::PistonExtended
-                | BlockType::StickyPiston
-                | BlockType::StickyPistonExtended => {
+                BlockType::Piston | BlockType::StickyPiston => {
                     let powered = state.signal.power > 0;
-                    if powered && !state.last_powered {
+                    let extended = block_open_at(manager, pos);
+                    if powered && !state.last_powered && !extended {
                         self.extend_piston(
                             manager,
                             pos,
@@ -1292,7 +1278,7 @@ impl RedstoneSystem {
                             block,
                             &mut update.mutations,
                         );
-                    } else if !powered && state.last_powered {
+                    } else if !powered && state.last_powered && extended {
                         self.retract_piston(
                             manager,
                             pos,
@@ -1354,15 +1340,9 @@ impl RedstoneSystem {
             set_block_record(manager, destination, pushed, mutations);
             set_block_record(manager, front, BlockType::Air, mutations);
         }
-        let target = if matches!(
-            block,
-            BlockType::StickyPiston | BlockType::StickyPistonExtended
-        ) {
-            BlockType::StickyPistonExtended
-        } else {
-            BlockType::PistonExtended
-        };
-        set_block_record(manager, pos, target, mutations);
+        let sticky = matches!(block, BlockType::StickyPiston);
+        let _ = sticky;
+        set_open_flag(manager, pos, block, true, mutations);
     }
 
     fn retract_piston(
@@ -1373,10 +1353,7 @@ impl RedstoneSystem {
         block: BlockType,
         mutations: &mut Vec<BlockMutation>,
     ) {
-        let sticky = matches!(
-            block,
-            BlockType::StickyPiston | BlockType::StickyPistonExtended
-        );
+        let sticky = matches!(block, BlockType::StickyPiston);
         let delta = facing.delta();
         let front = add(pos, delta);
         if sticky && get_block(manager, front) == BlockType::Air {
@@ -1387,54 +1364,43 @@ impl RedstoneSystem {
                 set_block_record(manager, pulled_from, BlockType::Air, mutations);
             }
         }
-        let target = if sticky {
-            BlockType::StickyPiston
-        } else {
-            BlockType::Piston
-        };
-        set_block_record(manager, pos, target, mutations);
+        set_open_flag(manager, pos, block, false, mutations);
     }
 }
 
-fn powered_variant(block: BlockType, powered: bool) -> Option<BlockType> {
-    Some(match block {
-        BlockType::RedstoneTorch | BlockType::RedstoneTorchOff => {
-            if powered {
-                BlockType::RedstoneTorch
-            } else {
-                BlockType::RedstoneTorchOff
-            }
-        }
-        BlockType::Comparator | BlockType::ComparatorPowered => {
-            if powered {
-                BlockType::ComparatorPowered
-            } else {
-                BlockType::Comparator
-            }
-        }
-        BlockType::RedstoneLamp | BlockType::RedstoneLampLit => {
-            if powered {
-                BlockType::RedstoneLampLit
-            } else {
-                BlockType::RedstoneLamp
-            }
-        }
-        BlockType::OakDoor | BlockType::OakDoorOpen => {
-            if powered {
-                BlockType::OakDoorOpen
-            } else {
-                BlockType::OakDoor
-            }
-        }
-        BlockType::OakTrapdoor | BlockType::OakTrapdoorOpen => {
-            if powered {
-                BlockType::OakTrapdoorOpen
-            } else {
-                BlockType::OakTrapdoor
-            }
-        }
-        _ => return None,
-    })
+/// Apply open/powered/lit bit. Redstone torch inverts: clear bit = lit.
+fn apply_powered_open_state(
+    manager: &mut ChunkManager,
+    pos: BlockPos,
+    block: BlockType,
+    powered: bool,
+    mutations: &mut Vec<BlockMutation>,
+) {
+    let open = match block {
+        BlockType::RedstoneTorch => !powered,
+        _ => powered,
+    };
+    set_open_flag(manager, pos, block, open, mutations);
+}
+
+fn block_open_at(manager: &ChunkManager, pos: BlockPos) -> bool {
+    crate::world::BlockState::decode(manager.get_block_state(pos.0, pos.1, pos.2)).is_open
+}
+
+fn set_open_flag(
+    manager: &mut ChunkManager,
+    pos: BlockPos,
+    block: BlockType,
+    is_open: bool,
+    mutations: &mut Vec<BlockMutation>,
+) {
+    let mut bstate =
+        crate::world::BlockState::decode(manager.get_block_state(pos.0, pos.1, pos.2));
+    if get_block(manager, pos) == block && bstate.is_open == is_open {
+        return;
+    }
+    bstate.is_open = is_open;
+    set_block_record_with_state(manager, pos, block, bstate.encode(), mutations);
 }
 
 fn desired_power(
@@ -1444,10 +1410,16 @@ fn desired_power(
     block: BlockType,
     state: ComponentState,
 ) -> u8 {
+    let open = block_open_at(manager, pos);
     match block {
-        BlockType::LeverOn | BlockType::StoneButtonPressed | BlockType::PressurePlatePowered => 15,
-        BlockType::Lever | BlockType::StoneButton | BlockType::PressurePlate => 0,
-        BlockType::RedstoneTorch | BlockType::RedstoneTorchOff => {
+        BlockType::Lever | BlockType::StoneButton | BlockType::PressurePlate => {
+            if open {
+                15
+            } else {
+                0
+            }
+        }
+        BlockType::RedstoneTorch => {
             let support = add(pos, (0, -1, 0));
             if strong_power_into(manager, states, support) > 0 {
                 0
@@ -1456,9 +1428,14 @@ fn desired_power(
             }
         }
         BlockType::RedstoneWire => incoming_power(manager, states, pos, true),
-        BlockType::RepeaterPowered => 15,
-        BlockType::Repeater => 0,
-        BlockType::Comparator | BlockType::ComparatorPowered => {
+        BlockType::Repeater => {
+            if open {
+                15
+            } else {
+                0
+            }
+        }
+        BlockType::Comparator => {
             let rear = sub(pos, state.facing.delta());
             let mut rear_power = signal_from_position(manager, states, rear, pos, false);
             let container_signal =
@@ -1490,20 +1467,15 @@ fn desired_power(
         }
         BlockType::Observer => state.signal.power,
         BlockType::RedstoneLamp
-        | BlockType::RedstoneLampLit
         | BlockType::OakDoor
-        | BlockType::OakDoorOpen
         | BlockType::OakTrapdoor
-        | BlockType::OakTrapdoorOpen
         | BlockType::Piston
-        | BlockType::PistonExtended
         | BlockType::StickyPiston
-        | BlockType::StickyPistonExtended
         | BlockType::TNT
         | BlockType::Dispenser
         | BlockType::Dropper
         | BlockType::NoteBlock => incoming_power(manager, states, pos, false),
-        _ => source_power(block),
+        _ => source_power(manager, pos, block),
     }
 }
 
@@ -1532,7 +1504,13 @@ fn signal_from_position(
 ) -> u8 {
     let block = get_block(manager, source);
     if let Some(state) = states.get(&source) {
-        let mut power = emitted_toward(source, target, block, *state);
+        let mut power = emitted_toward(
+            source,
+            target,
+            block,
+            *state,
+            block_open_at(manager, source),
+        );
         if attenuate_wire && block == BlockType::RedstoneWire {
             power = power.saturating_sub(1);
         }
@@ -1549,27 +1527,24 @@ fn emitted_toward(
     target: BlockPos,
     block: BlockType,
     state: ComponentState,
+    open: bool,
 ) -> u8 {
     match block {
-        BlockType::RepeaterPowered | BlockType::ComparatorPowered => {
-            (add(source, state.facing.delta()) == target)
-                .then_some(state.signal.power)
-                .unwrap_or(0)
+        BlockType::Repeater | BlockType::Comparator => {
+            if open && add(source, state.facing.delta()) == target {
+                state.signal.power
+            } else {
+                0
+            }
         }
-        BlockType::Repeater | BlockType::Comparator => 0,
         BlockType::Observer => (add(source, state.facing.opposite().delta()) == target)
             .then_some(state.signal.power)
             .unwrap_or(0),
         BlockType::RedstoneLamp
-        | BlockType::RedstoneLampLit
         | BlockType::OakDoor
-        | BlockType::OakDoorOpen
         | BlockType::OakTrapdoor
-        | BlockType::OakTrapdoorOpen
         | BlockType::Piston
-        | BlockType::PistonExtended
         | BlockType::StickyPiston
-        | BlockType::StickyPistonExtended
         | BlockType::TNT
         | BlockType::Dispenser
         | BlockType::Dropper
@@ -1589,20 +1564,24 @@ fn strong_power_into(
             let source = add(target, *offset);
             let state = states.get(&source)?;
             let block = get_block(manager, source);
-            is_strong_source(block).then_some(emitted_toward(source, target, block, *state))
+            let open = block_open_at(manager, source);
+            is_strong_source(manager, source, block)
+                .then_some(emitted_toward(source, target, block, *state, open))
         })
         .max()
         .unwrap_or(0)
 }
 
-fn source_power(block: BlockType) -> u8 {
+fn source_power(manager: &ChunkManager, pos: BlockPos, block: BlockType) -> u8 {
+    let open = block_open_at(manager, pos);
     match block {
-        BlockType::LeverOn
-        | BlockType::StoneButtonPressed
-        | BlockType::PressurePlatePowered
-        | BlockType::RedstoneTorch
-        | BlockType::RepeaterPowered => 15,
-        BlockType::ComparatorPowered => 1,
+        BlockType::RedstoneTorch if !open => 15,
+        BlockType::Comparator if open => 1,
+        BlockType::Lever | BlockType::StoneButton | BlockType::PressurePlate | BlockType::Repeater
+            if open =>
+        {
+            15
+        }
         _ => 0,
     }
 }
@@ -1693,16 +1672,16 @@ fn fnv1a(data: &[u8]) -> u64 {
     })
 }
 
-fn is_strong_source(block: BlockType) -> bool {
-    matches!(
-        block,
-        BlockType::LeverOn
-            | BlockType::StoneButtonPressed
-            | BlockType::PressurePlatePowered
-            | BlockType::RedstoneTorch
-            | BlockType::RepeaterPowered
-            | BlockType::ComparatorPowered
-    )
+fn is_strong_source(manager: &ChunkManager, pos: BlockPos, block: BlockType) -> bool {
+    let open = block_open_at(manager, pos);
+    match block {
+        BlockType::Lever | BlockType::StoneButton | BlockType::PressurePlate | BlockType::Repeater => {
+            open
+        }
+        BlockType::RedstoneTorch => !open,
+        BlockType::Comparator => open,
+        _ => false,
+    }
 }
 
 pub fn is_component(block: BlockType) -> bool {
@@ -1710,27 +1689,16 @@ pub fn is_component(block: BlockType) -> bool {
         block,
         BlockType::RedstoneWire
             | BlockType::RedstoneTorch
-            | BlockType::RedstoneTorchOff
             | BlockType::Repeater
-            | BlockType::RepeaterPowered
             | BlockType::Comparator
-            | BlockType::ComparatorPowered
             | BlockType::StoneButton
-            | BlockType::StoneButtonPressed
             | BlockType::Lever
-            | BlockType::LeverOn
             | BlockType::PressurePlate
-            | BlockType::PressurePlatePowered
             | BlockType::Piston
-            | BlockType::PistonExtended
             | BlockType::StickyPiston
-            | BlockType::StickyPistonExtended
             | BlockType::RedstoneLamp
-            | BlockType::RedstoneLampLit
             | BlockType::OakDoor
-            | BlockType::OakDoorOpen
             | BlockType::OakTrapdoor
-            | BlockType::OakTrapdoorOpen
             | BlockType::TNT
             | BlockType::Dispenser
             | BlockType::Dropper
@@ -1745,9 +1713,7 @@ fn is_movable(block: BlockType) -> bool {
         && !matches!(
             block,
             BlockType::Piston
-                | BlockType::PistonExtended
                 | BlockType::StickyPiston
-                | BlockType::StickyPistonExtended
         )
 }
 
@@ -1816,7 +1782,7 @@ fn fill_plate_occupants(
         if components.contains_key(&pos)
             && matches!(
                 get_block(manager, pos),
-                BlockType::PressurePlate | BlockType::PressurePlatePowered
+                BlockType::PressurePlate
             )
         {
             scratch.insert(pos);
@@ -1825,28 +1791,20 @@ fn fill_plate_occupants(
 }
 
 fn is_comparator_block(block: BlockType) -> bool {
-    matches!(block, BlockType::Comparator | BlockType::ComparatorPowered)
+    matches!(block, BlockType::Comparator)
 }
 
 fn is_transition_capable(block: BlockType) -> bool {
     matches!(
         block,
         BlockType::RedstoneTorch
-            | BlockType::RedstoneTorchOff
             | BlockType::Comparator
-            | BlockType::ComparatorPowered
             | BlockType::RedstoneLamp
-            | BlockType::RedstoneLampLit
             | BlockType::Repeater
-            | BlockType::RepeaterPowered
             | BlockType::OakDoor
-            | BlockType::OakDoorOpen
             | BlockType::OakTrapdoor
-            | BlockType::OakTrapdoorOpen
             | BlockType::Piston
-            | BlockType::PistonExtended
             | BlockType::StickyPiston
-            | BlockType::StickyPistonExtended
             | BlockType::TNT
             | BlockType::Dispenser
             | BlockType::Dropper
@@ -2049,7 +2007,8 @@ mod tests {
 
         assert_eq!(system.power_at((1, Y, 0)), 15);
         assert_eq!(system.power_at((2, Y, 0)), 14);
-        assert_eq!(manager.get_block(3, Y, 0), BlockType::RedstoneLampLit);
+        assert_eq!(manager.get_block(3, Y, 0), BlockType::RedstoneLamp);
+        assert_eq!(crate::world::BlockState::decode(manager.get_block_state(3, Y, 0)).is_open, true);
     }
 
     #[test]
@@ -2086,7 +2045,8 @@ mod tests {
         }
         system.tick(&mut manager, &[]);
         assert_eq!(system.power_at((1, Y, 0)), 15);
-        assert_eq!(manager.get_block(2, Y, 0), BlockType::RedstoneLampLit);
+        assert_eq!(manager.get_block(2, Y, 0), BlockType::RedstoneLamp);
+        assert_eq!(crate::world::BlockState::decode(manager.get_block_state(2, Y, 0)).is_open, true);
     }
 
     #[test]
@@ -2120,7 +2080,8 @@ mod tests {
         system.interact(&mut manager, (0, Y, 0));
         system.tick(&mut manager, &[]);
 
-        assert_eq!(manager.get_block(2, Y, 0), BlockType::PistonExtended);
+        assert_eq!(manager.get_block(2, Y, 0), BlockType::Piston);
+        assert_eq!(crate::world::BlockState::decode(manager.get_block_state(2, Y, 0)).is_open, true);
         assert_eq!(manager.get_block(3, Y, 0), BlockType::Air);
         assert_eq!(manager.get_block(4, Y, 0), BlockType::Stone);
     }
@@ -2163,7 +2124,8 @@ mod tests {
         system.interact(&mut manager, (0, Y, 0));
         system.tick(&mut manager, &[]);
 
-        assert_eq!(manager.get_block(2, Y, 0), BlockType::OakDoorOpen);
+        assert_eq!(manager.get_block(2, Y, 0), BlockType::OakDoor);
+        assert_eq!(crate::world::BlockState::decode(manager.get_block_state(2, Y, 0)).is_open, true);
         let toggled_raw = manager.get_block_state(2, Y, 0);
         let toggled_state = BlockState::decode(toggled_raw);
         assert_eq!(toggled_state.facing, Direction::West);
@@ -2191,8 +2153,10 @@ mod tests {
         );
 
         system.tick(&mut manager, &[(0, Y + 1, 0)]);
-        assert_eq!(manager.get_block(0, Y, 0), BlockType::PressurePlatePowered);
-        assert_eq!(manager.get_block(1, Y, 0), BlockType::OakDoorOpen);
+        assert_eq!(manager.get_block(0, Y, 0), BlockType::PressurePlate);
+        assert_eq!(crate::world::BlockState::decode(manager.get_block_state(0, Y, 0)).is_open, true);
+        assert_eq!(manager.get_block(1, Y, 0), BlockType::OakDoor);
+        assert_eq!(crate::world::BlockState::decode(manager.get_block_state(1, Y, 0)).is_open, true);
 
         system.tick(&mut manager, &[]);
         assert_eq!(manager.get_block(0, Y, 0), BlockType::PressurePlate);
@@ -2245,8 +2209,10 @@ mod tests {
         let occupant = (0, Y + 1, 0);
         system.tick(&mut manager, &[occupant]);
         system.tick(&mut manager, &[occupant]);
-        assert_eq!(manager.get_block(0, Y, 0), BlockType::PressurePlatePowered);
-        assert_eq!(manager.get_block(1, Y, 0), BlockType::OakDoorOpen);
+        assert_eq!(manager.get_block(0, Y, 0), BlockType::PressurePlate);
+        assert_eq!(crate::world::BlockState::decode(manager.get_block_state(0, Y, 0)).is_open, true);
+        assert_eq!(manager.get_block(1, Y, 0), BlockType::OakDoor);
+        assert_eq!(crate::world::BlockState::decode(manager.get_block_state(1, Y, 0)).is_open, true);
         assert!(system.is_sleeping());
 
         let scans = system.pressure_plate_scans;
@@ -2317,12 +2283,11 @@ mod tests {
             let occupied = occupants
                 .iter()
                 .any(|&(ox, oy, oz)| ox == x && oz == z && oy == y + 1);
-            let expected = if occupied {
-                BlockType::PressurePlatePowered
-            } else {
-                BlockType::PressurePlate
-            };
-            assert_eq!(manager.get_block(x, y, z), expected);
+            assert_eq!(manager.get_block(x, y, z), BlockType::PressurePlate);
+            assert_eq!(
+                crate::world::BlockState::decode(manager.get_block_state(x, y, z)).is_open,
+                occupied
+            );
         }
     }
 
@@ -2334,9 +2299,15 @@ mod tests {
             &mut system,
             &mut manager,
             0,
-            BlockType::LeverOn,
+            BlockType::Lever,
             Direction::East,
         );
+        {
+            let mut st = crate::world::BlockState::default();
+            st.is_open = true;
+            manager.set_block_state(0, Y, 0, st.encode());
+            system.on_block_changed(&manager, (0, Y, 0), Direction::East);
+        }
         place(
             &mut system,
             &mut manager,
@@ -2344,7 +2315,10 @@ mod tests {
             BlockType::Comparator,
             Direction::East,
         );
-        manager.set_block(1, Y, 1, BlockType::LeverOn);
+        manager.set_block(1, Y, 1, BlockType::Lever);
+        let mut __st = crate::world::BlockState::default();
+        __st.is_open = true;
+        manager.set_block_state(1, Y, 1, __st.encode());
         system.on_block_changed(&manager, (1, Y, 1), Direction::North);
         system.set_comparator_mode((1, Y, 0), ComparatorMode::Subtract);
 
@@ -2401,9 +2375,15 @@ mod tests {
             &mut system,
             &mut manager,
             0,
-            BlockType::LeverOn,
+            BlockType::Lever,
             Direction::East,
         );
+        {
+            let mut st = crate::world::BlockState::default();
+            st.is_open = true;
+            manager.set_block_state(0, Y, 0, st.encode());
+            system.on_block_changed(&manager, (0, Y, 0), Direction::East);
+        }
         place(
             &mut system,
             &mut manager,
@@ -2423,11 +2403,19 @@ mod tests {
         );
         assert!(system.tick(&mut manager, &[]).actions.is_empty());
 
-        manager.set_block(0, Y, 0, BlockType::Lever);
-        system.on_block_changed(&manager, (0, Y, 0), Direction::East);
+        {
+            let mut st = crate::world::BlockState::default();
+            st.is_open = false;
+            manager.set_block_state(0, Y, 0, st.encode());
+            system.on_block_changed(&manager, (0, Y, 0), Direction::East);
+        }
         assert!(system.tick(&mut manager, &[]).actions.is_empty());
-        manager.set_block(0, Y, 0, BlockType::LeverOn);
-        system.on_block_changed(&manager, (0, Y, 0), Direction::East);
+        {
+            let mut st = crate::world::BlockState::default();
+            st.is_open = true;
+            manager.set_block_state(0, Y, 0, st.encode());
+            system.on_block_changed(&manager, (0, Y, 0), Direction::East);
+        }
         let second = system.tick(&mut manager, &[]);
         assert_eq!(second.actions.len(), 1);
     }
@@ -2440,9 +2428,15 @@ mod tests {
             &mut system,
             &mut manager,
             0,
-            BlockType::LeverOn,
+            BlockType::Lever,
             Direction::East,
         );
+        {
+            let mut st = crate::world::BlockState::default();
+            st.is_open = true;
+            manager.set_block_state(0, Y, 0, st.encode());
+            system.on_block_changed(&manager, (0, Y, 0), Direction::East);
+        }
         place(
             &mut system,
             &mut manager,
@@ -2907,14 +2901,14 @@ mod tests {
             block: BlockType,
             _state: ComponentState,
         ) -> u8 {
-            let own_source = matches!(
-                block,
-                BlockType::LeverOn
-                    | BlockType::StoneButtonPressed
-                    | BlockType::PressurePlatePowered
-                    | BlockType::RedstoneTorch
-                    | BlockType::RepeaterPowered
-            );
+            let open = crate::world::BlockState::decode(manager.get_block_state(pos.0, pos.1, pos.2))
+                .is_open;
+            let own_source = match block {
+                BlockType::RedstoneTorch => !open,
+                BlockType::Lever | BlockType::StoneButton | BlockType::PressurePlate => open,
+                BlockType::Repeater => open,
+                _ => false,
+            };
             if own_source {
                 return 15;
             }
@@ -2924,9 +2918,7 @@ mod tests {
             ) {
                 return 0;
             }
-            // Repeater timing is represented by the concrete block variant;
-            // an unpowered repeater emits nothing until its scheduled tick
-            // flips it to RepeaterPowered.
+            // Unpowered repeater emits nothing until its scheduled tick sets the open bit.
             if block == BlockType::Repeater {
                 return 0;
             }
@@ -2938,16 +2930,17 @@ mod tests {
                     continue;
                 };
                 let neighbor_block = get_block(manager, neighbor);
+                let neighbor_open = crate::world::BlockState::decode(
+                    manager.get_block_state(neighbor.0, neighbor.1, neighbor.2),
+                )
+                .is_open;
                 let mut emitted = neighbor_state.signal.power;
-                if matches!(
-                    neighbor_block,
-                    BlockType::RepeaterPowered | BlockType::ComparatorPowered
-                ) && add(neighbor, neighbor_state.facing.delta()) != pos
-                {
-                    emitted = 0;
-                }
                 if matches!(neighbor_block, BlockType::Repeater | BlockType::Comparator) {
-                    emitted = 0;
+                    if !neighbor_open
+                        || add(neighbor, neighbor_state.facing.delta()) != pos
+                    {
+                        emitted = 0;
+                    }
                 }
                 if neighbor_block == BlockType::RedstoneWire
                     && matches!(block, BlockType::RedstoneWire)
@@ -2970,11 +2963,11 @@ mod tests {
                     ChargeKind::Unpowered
                 } else if matches!(
                     block,
-                    BlockType::LeverOn
-                        | BlockType::StoneButtonPressed
-                        | BlockType::PressurePlatePowered
-                        | BlockType::RedstoneTorch
-                        | BlockType::RepeaterPowered
+                    BlockType::RedstoneTorch
+                        | BlockType::Lever
+                        | BlockType::StoneButton
+                        | BlockType::PressurePlate
+                        | BlockType::Repeater
                 ) {
                     ChargeKind::Strong
                 } else {
@@ -3041,10 +3034,12 @@ mod tests {
             );
         }
 
-        // Action 2: Advance ticks for repeater propagation
+        // Action 2: Advance ticks for repeater propagation. After each production
+        // tick the settled component map must be a fixed point of the reference
+        // full-settle evaluator (same power rules, including BlockState.open).
         for _ in 0..5 {
-            let mut ref_comp = system.components.clone();
             system.tick(&mut manager, &[]);
+            let mut ref_comp = system.components.clone();
             reference_full_settle(&mut ref_comp, &manager);
             for (pos, state) in &system.components {
                 let ref_state = ref_comp.get(pos).unwrap();
