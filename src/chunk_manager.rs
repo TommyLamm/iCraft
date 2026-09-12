@@ -239,6 +239,15 @@ impl ChunkManager {
         mark_section_mesh_dependencies(&mut self.pending_section_mesh_invalidations, wx, wy, wz);
     }
 
+    /// Save-dirty + mesh invalidation for a light cell mutated via a temporary
+    /// taken neighborhood (BFS no longer goes through `set_*_light` per hop).
+    pub(crate) fn note_light_cell_change(&mut self, wx: i32, wy: i32, wz: i32) {
+        if let Some(((cx, cz), _)) = self.world_to_local(wx, wy, wz) {
+            self.dirty_chunks.mark_dirty(cx, cz);
+            self.record_mesh_invalidation(wx, wy, wz);
+        }
+    }
+
     pub fn acknowledge_mesh_invalidation(&mut self, coord: &(i32, i32)) {
         self.pending_mesh_invalidations.remove(coord);
     }

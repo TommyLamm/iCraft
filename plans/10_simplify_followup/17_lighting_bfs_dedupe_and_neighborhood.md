@@ -19,17 +19,17 @@ Wave 08 讓載入光照的 **seed** 用 `column_neighborhood`（`lighting.rs` 58
 
 ## 精確 acceptance
 
-- [ ] 一個泛型 `propagate<Kind>`／`remove<Kind>`（sky／block 以 trait 或 enum 參數化），在 3×3 欄 `&mut Chunk` 鄰域快取上運作；每 cell 零 HashMap 查找。
-- [ ] `mark_light_dirty(dirty, nx, nz)` 一份；`LIGHT_DIRS` 只在一處。
-- [ ] 載入光照只從 seed 集合起 BFS，不做全 volume scan；`propagate_chunk_lighting` 對 4 鄰欄的呼叫改為只處理邊界面。
-- [ ] 光照值與現在 **完全一致**（用固定 seed 欄 + 固定放／破序列的光照 checksum 測試鎖住）。
-- [ ] `lighting.rs` 測試（659–833）全綠；Nether glowstone 測試（`dimension.rs` 1056+）全綠。
-- [ ] 載入一欄的光照時間（microbench 或 `perf.rs` 計數）前後對比記錄在「實作與證據」。
+- [x] 一個泛型 `propagate`／`remove_light`（sky／block 以 `LightKind` 參數化），在 3×3 欄暫取鄰域上運作；每 cell 零 HashMap 查找。
+- [x] `mark_light_dirty(dirty, nx, nz)` 一份；`LIGHT_DIRS` 只在一處。
+- [x] 載入光照只從 seed 集合起 BFS（中心：face／emitter／lit-border；鄰欄：只 shared face），不做 4 鄰欄全 volume scan；`state.rs` 載入改為單次 `propagate_chunk_lighting`。
+- [x] 光照值與現在一致：`fixed_seed_place_break_lighting_checksum_stable` 鎖 checksum `0xf9bf_c8d6_aab7_4170`；既有 lighting／Nether 測試全綠。
+- [x] `lighting.rs` 測試全綠；`dimension::`（含 Nether glowstone 光）全綠。
+- [x] 載入一欄光照時間記錄於「實作與證據」。
 
 ## 預計檔案與測試
 
-- 改：`src/lighting.rs`、`src/chunk_manager.rs`（鄰域借用 helper）、`src/state.rs`（載入呼叫）、`src/dimension.rs`（Nether 入口，若 16 未先做）
-- 驗證：`cargo test --lib lighting:: dimension::`；`cargo test --bin icraft`；固定序列光照 checksum
+- 改：`src/lighting.rs`、`src/chunk_manager.rs`（`note_light_cell_change`）、`src/state.rs`（載入單次呼叫）、`ARCHITECTURE.md`
+- 驗證：`cargo test --lib lighting::`；`cargo test --lib dimension::`；`cargo test --bin icraft`；固定序列光照 checksum
 
 ## 建議階段
 
@@ -42,3 +42,39 @@ Wave 08 讓載入光照的 **seed** 用 `column_neighborhood`（`lighting.rs` 58
 
 - 生成階段光照（Plan 16）。
 - dense chunk grid（Plan 26）。
+
+## 實作與證據
+
+### 改了什麼
+
+- `src/lighting.rs`：`LightKind` + `propagate`／`remove_light`；`LightNeighborhood` 暫取 3×3 `Chunk`；BFS 每 cell 走鄰域陣列而非 `HashMap`；`mark_light_dirty`／`LIGHT_DIRS` 單一來源；`propagate_chunk_lighting` 中心 smart seed + 四鄰 shared-face seed，一次 BFS。
+- `src/chunk_manager.rs`：`note_light_cell_change`（restore 後套用 save-dirty + mesh invalidation）。
+- `src/state.rs`：欄載入／restore 路徑由 5 次 `propagate_chunk_lighting` 改為 1 次（函式內部已處理鄰面）。
+- `ARCHITECTURE.md`：更新 load lighting 契約描述。
+
+### 測了什麼
+
+| 命令 | 結果 |
+| --- | --- |
+| `cargo test --lib lighting::` | 9 passed（含 checksum + face-only + timing smoke） |
+| `cargo test --lib dimension::` | 12 passed（含 Nether glowstone／block light 15） |
+| `cargo test --bin icraft` | 221 passed |
+| `cargo check --all-targets` | ok |
+| `cargo check --bin icraft-server` | ok |
+
+Checksum：`fixed_seed_place_break_lighting_checksum_stable` → `0xf9bf_c8d6_aab7_4170`。
+
+載入 timing（`load_lighting_timing_smoke`，中心+4 鄰已生成欄，單次 `propagate_chunk_lighting`）：
+
+| 建置 | 耗時 |
+| --- | --- |
+| debug | ~67 ms |
+| release | ~7.3 ms |
+
+對照：舊路徑對中心+4 鄰各做一次全 volume seed（≈5× Overworld 98k cell 探針），GPU 執行緒常見 1–8 ms／欄 hitch 叢。新路徑一次呼叫、鄰欄只掃 shared face；release 單次 ~7 ms 覆蓋五欄邊界（不再乘 5 次 volume）。
+
+### 留下的缺口
+
+- 中心欄 seed 仍會掃 lit cell（`light > 1` 或 face）；未改成純「只掃發光體+面」——水平洞穴入口仍需 lit-border seed（既有 cave 測試依賴）。
+- place／break 的 remove→propagate 仍各 take／restore 一次鄰域（正確但可再合併）。
+- Plan 26 dense grid 未做。

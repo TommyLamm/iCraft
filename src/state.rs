@@ -5213,25 +5213,15 @@ impl State {
 
                     let mut dirty = std::collections::HashSet::new();
                     let lighting_started = Instant::now();
-                    for (lighting_cx, lighting_cz) in [
-                        (cx, cz),
-                        (cx - 1, cz),
-                        (cx + 1, cz),
-                        (cx, cz - 1),
-                        (cx, cz + 1),
-                    ] {
-                        if self
-                            .chunk_manager
-                            .chunks
-                            .contains_key(&(lighting_cx, lighting_cz))
-                        {
-                            crate::lighting::propagate_chunk_lighting(
-                                &mut self.chunk_manager,
-                                lighting_cx,
-                                lighting_cz,
-                                &mut dirty,
-                            );
-                        }
+                    // Single call seeds the new column plus shared faces of the
+                    // four cardinal neighbors (no per-neighbor volume scan).
+                    if self.chunk_manager.chunks.contains_key(&(cx, cz)) {
+                        crate::lighting::propagate_chunk_lighting(
+                            &mut self.chunk_manager,
+                            cx,
+                            cz,
+                            &mut dirty,
+                        );
                     }
                     let elapsed = lighting_started.elapsed();
                     lighting_elapsed += elapsed;
@@ -6693,28 +6683,17 @@ impl State {
             }
         }
         // Re-seed boundary lighting so neighbors pick up the overwritten
-        // column heights and light values.
+        // column heights and light values. One call covers the column plus
+        // shared faces of loaded cardinal neighbors.
         let mut dirty_chunks = std::collections::HashSet::new();
-        for (lighting_cx, lighting_cz) in [
-            (cx, cz),
-            (cx - 1, cz),
-            (cx + 1, cz),
-            (cx, cz - 1),
-            (cx, cz + 1),
-        ] {
-            if self
-                .chunk_manager
-                .chunks
-                .contains_key(&(lighting_cx, lighting_cz))
-            {
-                crate::lighting::propagate_chunk_lighting(
-                    &mut self.chunk_manager,
-                    lighting_cx,
-                    lighting_cz,
-                    &mut dirty_chunks,
-                );
-                self.invalidate_chunk_mesh((lighting_cx, lighting_cz), DependencyReason::Light);
-            }
+        if self.chunk_manager.chunks.contains_key(&(cx, cz)) {
+            crate::lighting::propagate_chunk_lighting(
+                &mut self.chunk_manager,
+                cx,
+                cz,
+                &mut dirty_chunks,
+            );
+            self.invalidate_chunk_mesh((cx, cz), DependencyReason::Light);
         }
         self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Light);
     }

@@ -352,9 +352,11 @@ walk).
 Unloaded columns are not air: entity physics freezes for a tick if the
 current or predicted AABB touches missing terrain.
 
-Load lighting (`propagate_chunk_lighting`) seeds from the locked column and
-up to eight neighbors (faces, emitters, and local darker neighbors) instead of
-a per-voxel HashMap lookup. Section mesh halos copy from those same column
+Load lighting (`propagate_chunk_lighting`) seeds the center column from faces,
+emitters, and lit cells that border darker neighbors, then seeds only the shared
+faces of the four cardinal neighbors — no per-neighbor volume scan. BFS runs on a
+temporarily taken 3×3 `&mut Chunk` neighborhood so each cell does zero `HashMap`
+lookups. Section mesh halos still copy from the immutable `column_neighborhood`
 refs. Runtime meshing generates only the currently selected LOD; coarser
 LODs are filled the first time the camera selects them.
 
