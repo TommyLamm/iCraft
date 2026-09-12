@@ -308,8 +308,7 @@ pub fn update_dimension_entities(
     dimension: Dimension,
     entities: &mut EntityManager,
     chunks: &ChunkManager,
-    player_pos: Vec3,
-    player_look: Vec3,
+    players: &[(Vec3, Vec3)],
     dt: f32,
     game_mode: GameMode,
 ) -> BossEvents {
@@ -343,6 +342,16 @@ pub fn update_dimension_entities(
         let position_before_update = entity.position;
         entity.action_cooldown = (entity.action_cooldown - dt).max(0.0);
         entity.ai_timer += dt;
+
+        let nearest = players.iter().min_by(|(left, _), (right, _)| {
+            entity
+                .position
+                .distance_squared(*left)
+                .total_cmp(&entity.position.distance_squared(*right))
+        });
+        let (player_pos, player_look) = nearest
+            .copied()
+            .unwrap_or((Vec3::ZERO, Vec3::NEG_Z));
 
         match entity.entity_type {
             EntityType::Blaze => {
@@ -1087,8 +1096,7 @@ mod tests {
             Dimension::End,
             &mut entities,
             &chunks,
-            Vec3::ZERO,
-            Vec3::ZERO,
+            &[(Vec3::ZERO, Vec3::ZERO)],
             0.2,
             GameMode::Survival,
         );
@@ -1134,8 +1142,7 @@ mod tests {
             Dimension::End,
             &mut entities,
             &chunks,
-            Vec3::new(0.0, 80.0, 0.0),
-            Vec3::ZERO,
+            &[(Vec3::new(0.0, 80.0, 0.0), Vec3::ZERO)],
             0.2,
             GameMode::Survival,
         );
@@ -1237,8 +1244,7 @@ mod tests {
             Dimension::End,
             &mut entities,
             &chunks,
-            player,
-            look,
+            &[(player, look)],
             0.2,
             GameMode::Survival,
         );
@@ -1251,8 +1257,7 @@ mod tests {
             Dimension::End,
             &mut entities,
             &chunks,
-            player,
-            look,
+            &[(player, look)],
             0.2,
             GameMode::Survival,
         );
@@ -1271,8 +1276,7 @@ mod tests {
             Dimension::End,
             &mut entities,
             &chunks,
-            Vec3::ZERO,
-            -Vec3::Z,
+            &[(Vec3::ZERO, -Vec3::Z)],
             0.2,
             GameMode::Survival,
         );
@@ -1293,8 +1297,7 @@ mod tests {
             Dimension::End,
             &mut entities,
             &chunks,
-            Vec3::ZERO,
-            -Vec3::Z,
+            &[(Vec3::ZERO, -Vec3::Z)],
             0.1,
             GameMode::Survival,
         );
@@ -1319,8 +1322,7 @@ mod tests {
             Dimension::End,
             &mut entities,
             &chunks,
-            player,
-            look,
+            &[(player, look)],
             0.1,
             GameMode::Survival,
         );
@@ -1356,8 +1358,7 @@ mod tests {
                 Dimension::End,
                 &mut entities,
                 &chunks,
-                player,
-                look,
+                &[(player, look)],
                 0.25,
                 GameMode::Survival,
             );
@@ -1381,8 +1382,7 @@ mod tests {
             Dimension::End,
             &mut entities,
             &chunks,
-            Vec3::ZERO,
-            Vec3::Z,
+            &[(Vec3::ZERO, Vec3::Z)],
             0.1,
             GameMode::Creative,
         );
@@ -1420,8 +1420,7 @@ mod tests {
             Dimension::Overworld,
             &mut entities,
             &chunks,
-            Vec3::ZERO,
-            Vec3::ZERO,
+            &[(Vec3::ZERO, Vec3::ZERO)],
             0.1,
             GameMode::Survival,
         );
@@ -1441,8 +1440,7 @@ mod tests {
             Dimension::Nether,
             &mut entities,
             &chunks,
-            Vec3::ZERO,
-            Vec3::ZERO,
+            &[(Vec3::ZERO, Vec3::ZERO)],
             0.1,
             GameMode::Creative,
         );

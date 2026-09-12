@@ -272,6 +272,9 @@ pub struct RedstoneUpdate {
 pub struct RedstoneSystem {
     components: HashMap<BlockPos, ComponentState>,
     known_chunks: HashSet<(i32, i32)>,
+    /// `ChunkManager::load_generation` observed by the last successful sync.
+    /// `u64::MAX` means never synced, so the first tick always rebuilds.
+    known_load_generation: u64,
     scheduled: Vec<ScheduledTick>,
     tick: u64,
     dirty: HashSet<BlockPos>,
@@ -281,10 +284,20 @@ pub struct RedstoneSystem {
     /// and ordering irrelevant when deciding whether a sleeping system can
     /// return without scanning its pressure plates.
     previous_plate_occupants: HashSet<BlockPos>,
+    /// Scratch set reused by plate-occupant normalization (avoids per-tick alloc).
+    plate_occupant_scratch: HashSet<BlockPos>,
+    /// Comparator positions for container-revision refresh (no full-table filter).
+    comparator_positions: HashSet<BlockPos>,
+    /// Components that participate in `apply_component_transitions`.
+    transition_positions: HashSet<BlockPos>,
+    /// Component positions grouped by resident column for O(column) metadata.
+    column_components: HashMap<(i32, i32), HashSet<BlockPos>>,
     /// Last revision observed behind each comparator.  This dependency map
     /// lets direct container mutations wake a sleeping redstone system without
     /// rescanning every comparator every tick.
     container_revisions: HashMap<BlockPos, u64>,
+    /// Positions whose scheduled ticks fired this tick (transition candidates).
+    due_positions_scratch: Vec<BlockPos>,
     #[cfg(test)]
     pressure_plate_scans: u64,
     #[cfg(test)]
@@ -293,12 +306,17 @@ pub struct RedstoneSystem {
     container_revision_scans: u64,
     #[cfg(test)]
     observer_scans: u64,
+    #[cfg(test)]
+    loaded_chunk_key_probes: u64,
 }
 
 #[allow(dead_code)]
 impl RedstoneSystem {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            known_load_generation: u64::MAX,
+            ..Self::default()
+        }
     }
 
     pub fn is_sleeping(&self) -> bool {
@@ -452,7 +470,13 @@ impl RedstoneSystem {
         let mut metadata = Vec::new();
         let origin_x = cx * CHUNK_WIDTH as i32;
         let origin_z = cz * CHUNK_DEPTH as i32;
-        for (&pos, state) in &self.components {
+        let Some(positions) = self.column_components.get(&(cx, cz)) else {
+            return metadata;
+        };
+        for &pos in positions {
+            let Some(state) = self.components.get(&pos) else {
+                continue;
+            };
             let local_x = pos.0 - origin_x;
             let local_z = pos.2 - origin_z;
             if local_x < 0
@@ -465,8 +489,6 @@ impl RedstoneSystem {
             if !manager.dimension.height().contains_y(pos.1) {
                 continue;
             }
-            // `sync_loaded_chunks` evicts components whose block was replaced,
-            // so any entry still present here corresponds to a live component.
             if !state.has_persistent_metadata() {
                 continue;
             }
@@ -518,6 +540,7 @@ impl RedstoneSystem {
             state.comparator_mode = entry.comparator_mode;
             state.note = entry.note.min(24);
             state.last_powered = entry.last_powered;
+            self.index_component(pos, block);
             self.mark_dirty(pos);
         }
     }
@@ -574,6 +597,42 @@ impl RedstoneSystem {
         self.mark_neighbors_dirty(manager, pos);
     }
 
+    fn column_of(pos: BlockPos) -> (i32, i32) {
+        (
+            pos.0.div_euclid(CHUNK_WIDTH as i32),
+            pos.2.div_euclid(CHUNK_DEPTH as i32),
+        )
+    }
+
+    fn index_component(&mut self, pos: BlockPos, block: BlockType) {
+        self.column_components
+            .entry(Self::column_of(pos))
+            .or_default()
+            .insert(pos);
+        if is_comparator_block(block) {
+            self.comparator_positions.insert(pos);
+        } else {
+            self.comparator_positions.remove(&pos);
+        }
+        if is_transition_capable(block) {
+            self.transition_positions.insert(pos);
+        } else {
+            self.transition_positions.remove(&pos);
+        }
+    }
+
+    fn unindex_component(&mut self, pos: BlockPos) {
+        let column = Self::column_of(pos);
+        if let Some(set) = self.column_components.get_mut(&column) {
+            set.remove(&pos);
+            if set.is_empty() {
+                self.column_components.remove(&column);
+            }
+        }
+        self.comparator_positions.remove(&pos);
+        self.transition_positions.remove(&pos);
+    }
+
     pub fn on_block_changed(&mut self, manager: &ChunkManager, pos: BlockPos, facing: Direction) {
         let block = get_block(manager, pos);
         if is_component(block) {
@@ -581,8 +640,10 @@ impl RedstoneSystem {
                 .entry(pos)
                 .and_modify(|state| state.facing = facing)
                 .or_insert_with(|| ComponentState::new(block, facing));
+            self.index_component(pos, block);
         } else {
             self.components.remove(&pos);
+            self.unindex_component(pos);
             self.scheduled.retain(|scheduled| {
                 scheduled.pos != pos || scheduled.kind == ScheduledKind::Explode
             });
@@ -649,9 +710,32 @@ impl RedstoneSystem {
 
     pub fn tick(&mut self, manager: &mut ChunkManager, occupants: &[BlockPos]) -> RedstoneUpdate {
         self.tick = self.tick.wrapping_add(1);
+
+        // Sleep early-out before sync / plate HashSet work when residency and
+        // plate occupancy are unchanged.
+        if self.sleeping && self.dirty.is_empty() && self.scheduled.is_empty() {
+            if self.known_load_generation == manager.load_generation() {
+                fill_plate_occupants(
+                    &mut self.plate_occupant_scratch,
+                    &self.components,
+                    manager,
+                    occupants,
+                );
+                if self.plate_occupant_scratch == self.previous_plate_occupants {
+                    return RedstoneUpdate::default();
+                }
+            }
+        }
+
         self.sync_loaded_chunks(manager);
         let mut update = RedstoneUpdate::default();
-        let normalized_occupants = normalize_plate_occupants(self, manager, occupants);
+        fill_plate_occupants(
+            &mut self.plate_occupant_scratch,
+            &self.components,
+            manager,
+            occupants,
+        );
+        let normalized_occupants = self.plate_occupant_scratch.clone();
 
         if self.sleeping
             && self.dirty.is_empty()
@@ -664,12 +748,13 @@ impl RedstoneSystem {
         self.refresh_container_revisions(manager);
         self.update_observers(manager, &mut update.block_entity_changes);
 
+        self.due_positions_scratch.clear();
         self.process_scheduled(manager, &mut update);
         self.update_pressure_plates(manager, occupants, &mut update.mutations);
 
-        let converged = self.settle_power(manager);
+        let (converged, power_changed) = self.settle_power(manager);
         update.propagation_overflowed = !converged;
-        self.apply_component_transitions(manager, &mut update);
+        self.apply_component_transitions(manager, &mut update, &power_changed);
         self.reconcile_mutations(manager, &update.mutations);
 
         if self.dirty.is_empty() && self.scheduled.is_empty() {
@@ -685,21 +770,12 @@ impl RedstoneSystem {
         {
             self.container_revision_scans += 1;
         }
-        let mut comparators: Vec<BlockPos> = self
-            .components
-            .iter()
-            .filter_map(|(&pos, _)| {
-                matches!(
-                    get_block(manager, pos),
-                    BlockType::Comparator | BlockType::ComparatorPowered
-                )
-                .then_some(pos)
-            })
-            .collect();
+        let mut comparators: Vec<BlockPos> = self.comparator_positions.iter().copied().collect();
         comparators.sort_unstable();
         let mut seen = HashSet::new();
         for pos in comparators {
             let Some(state) = self.components.get(&pos).copied() else {
+                self.comparator_positions.remove(&pos);
                 continue;
             };
             let rear = sub(pos, state.facing.delta());
@@ -819,12 +895,7 @@ impl RedstoneSystem {
     }
 
     fn sync_loaded_chunks(&mut self, manager: &ChunkManager) {
-        let loaded_chunks_unchanged = self.known_chunks.len() == manager.chunks.len()
-            && self
-                .known_chunks
-                .iter()
-                .all(|chunk_pos| manager.chunks.contains_key(chunk_pos));
-        if loaded_chunks_unchanged {
+        if self.known_load_generation == manager.load_generation() {
             return;
         }
         self.sleeping = false;
@@ -835,11 +906,20 @@ impl RedstoneSystem {
         }
         self.known_chunks
             .retain(|chunk_pos| manager.chunks.contains_key(chunk_pos));
-        self.components.retain(|pos, _| {
-            let cx = pos.0.div_euclid(CHUNK_WIDTH as i32);
-            let cz = pos.2.div_euclid(CHUNK_DEPTH as i32);
-            manager.chunks.contains_key(&(cx, cz)) && is_component(get_block(manager, *pos))
-        });
+        let removed: Vec<BlockPos> = self
+            .components
+            .keys()
+            .copied()
+            .filter(|pos| {
+                let cx = pos.0.div_euclid(CHUNK_WIDTH as i32);
+                let cz = pos.2.div_euclid(CHUNK_DEPTH as i32);
+                !manager.chunks.contains_key(&(cx, cz)) || !is_component(get_block(manager, *pos))
+            })
+            .collect();
+        for pos in removed {
+            self.components.remove(&pos);
+            self.unindex_component(pos);
+        }
         self.dirty.retain(|pos| self.components.contains_key(pos));
 
         for (&(cx, cz), chunk) in &manager.chunks {
@@ -866,10 +946,12 @@ impl RedstoneSystem {
                         }
                     }
                     e.insert(component);
+                    self.index_component(pos, block);
                     self.mark_dirty(pos);
                 }
             }
         }
+        self.known_load_generation = manager.load_generation();
     }
 
     fn reconcile_mutations(&mut self, manager: &ChunkManager, mutations: &[BlockMutation]) {
@@ -878,16 +960,26 @@ impl RedstoneSystem {
                 self.components
                     .entry(mutation.pos)
                     .or_insert_with(|| ComponentState::new(mutation.new_block, Direction::North));
+                self.index_component(mutation.pos, mutation.new_block);
             } else {
                 self.components.remove(&mutation.pos);
+                self.unindex_component(mutation.pos);
                 self.scheduled.retain(|scheduled| {
                     scheduled.pos != mutation.pos || scheduled.kind == ScheduledKind::Explode
                 });
             }
             self.mark_neighbors_dirty(manager, mutation.pos);
         }
-        self.components
-            .retain(|pos, _| is_component(get_block(manager, *pos)));
+        let stale: Vec<BlockPos> = self
+            .components
+            .keys()
+            .copied()
+            .filter(|&pos| !is_component(get_block(manager, pos)))
+            .collect();
+        for pos in stale {
+            self.components.remove(&pos);
+            self.unindex_component(pos);
+        }
     }
 
     fn process_scheduled(&mut self, manager: &mut ChunkManager, update: &mut RedstoneUpdate) {
@@ -895,6 +987,10 @@ impl RedstoneSystem {
             .into_iter()
             .partition(|s| s.due <= self.tick);
         self.scheduled = future;
+        self.due_positions_scratch.clear();
+        for scheduled in &due {
+            self.due_positions_scratch.push(scheduled.pos);
+        }
 
         for scheduled in due {
             match scheduled.kind {
@@ -1036,9 +1132,12 @@ impl RedstoneSystem {
         }
     }
 
-    fn settle_power(&mut self, manager: &ChunkManager) -> bool {
+    fn settle_power(&mut self, manager: &ChunkManager) -> (bool, HashSet<BlockPos>) {
+        // Positions evaluated this settle — transition scheduling (repeaters)
+        // needs them even when own power did not change.
+        let mut evaluated = HashSet::new();
         if self.dirty.is_empty() {
-            return true;
+            return (true, evaluated);
         }
 
         let mut current_dirty = std::mem::take(&mut self.dirty);
@@ -1048,15 +1147,16 @@ impl RedstoneSystem {
 
         for _pass in 0..MAX_PROPAGATION_PASSES {
             if current_dirty.is_empty() {
-                return true;
+                return (true, evaluated);
             }
 
             for pos in current_dirty.drain() {
                 evaluations += 1;
                 if evaluations > max_evaluations {
                     self.dirty.extend(next_dirty);
-                    return false;
+                    return (false, evaluated);
                 }
+                evaluated.insert(pos);
 
                 let Some(state) = self.components.get(&pos).copied() else {
                     continue;
@@ -1099,18 +1199,30 @@ impl RedstoneSystem {
 
         if !current_dirty.is_empty() {
             self.dirty.extend(current_dirty);
-            return false;
+            return (false, evaluated);
         }
 
-        true
+        (true, evaluated)
     }
 
     fn apply_component_transitions(
         &mut self,
         manager: &mut ChunkManager,
         update: &mut RedstoneUpdate,
+        settle_evaluated: &HashSet<BlockPos>,
     ) {
-        let mut positions: Vec<BlockPos> = self.components.keys().copied().collect();
+        let mut positions: HashSet<BlockPos> = HashSet::new();
+        for &pos in settle_evaluated {
+            if self.transition_positions.contains(&pos) {
+                positions.insert(pos);
+            }
+        }
+        for &pos in &self.due_positions_scratch {
+            if self.transition_positions.contains(&pos) {
+                positions.insert(pos);
+            }
+        }
+        let mut positions: Vec<BlockPos> = positions.into_iter().collect();
         positions.sort_unstable();
         for pos in positions {
             let block = get_block(manager, pos);
@@ -1692,22 +1804,54 @@ fn sub(a: BlockPos, b: BlockPos) -> BlockPos {
     (a.0 - b.0, a.1 - b.1, a.2 - b.2)
 }
 
-fn normalize_plate_occupants(
-    system: &RedstoneSystem,
+fn fill_plate_occupants(
+    scratch: &mut HashSet<BlockPos>,
+    components: &HashMap<BlockPos, ComponentState>,
     manager: &ChunkManager,
     occupants: &[BlockPos],
-) -> HashSet<BlockPos> {
-    occupants
-        .iter()
-        .map(|&(x, y, z)| (x, y - 1, z))
-        .filter(|pos| {
-            system.components.contains_key(pos)
-                && matches!(
-                    get_block(manager, *pos),
-                    BlockType::PressurePlate | BlockType::PressurePlatePowered
-                )
-        })
-        .collect()
+) {
+    scratch.clear();
+    for &(x, y, z) in occupants {
+        let pos = (x, y - 1, z);
+        if components.contains_key(&pos)
+            && matches!(
+                get_block(manager, pos),
+                BlockType::PressurePlate | BlockType::PressurePlatePowered
+            )
+        {
+            scratch.insert(pos);
+        }
+    }
+}
+
+fn is_comparator_block(block: BlockType) -> bool {
+    matches!(block, BlockType::Comparator | BlockType::ComparatorPowered)
+}
+
+fn is_transition_capable(block: BlockType) -> bool {
+    matches!(
+        block,
+        BlockType::RedstoneTorch
+            | BlockType::RedstoneTorchOff
+            | BlockType::Comparator
+            | BlockType::ComparatorPowered
+            | BlockType::RedstoneLamp
+            | BlockType::RedstoneLampLit
+            | BlockType::Repeater
+            | BlockType::RepeaterPowered
+            | BlockType::OakDoor
+            | BlockType::OakDoorOpen
+            | BlockType::OakTrapdoor
+            | BlockType::OakTrapdoorOpen
+            | BlockType::Piston
+            | BlockType::PistonExtended
+            | BlockType::StickyPiston
+            | BlockType::StickyPistonExtended
+            | BlockType::TNT
+            | BlockType::Dispenser
+            | BlockType::Dropper
+            | BlockType::NoteBlock
+    )
 }
 
 #[cfg(test)]
@@ -1719,7 +1863,7 @@ mod tests {
 
     fn manager() -> ChunkManager {
         let mut manager = ChunkManager::new(2);
-        manager.chunks.insert((0, 0), Chunk::new(0, 0));
+        manager.insert_resident_chunk((0, 0), Chunk::new(0, 0));
         manager
     }
 
@@ -1750,6 +1894,8 @@ mod tests {
         component.note = 19;
         component.last_powered = true;
         system.components.insert((3, Y, -4), component);
+        system.index_component((3, Y, -4), BlockType::Repeater);
+        system.known_load_generation = 0;
 
         system.scheduled.push(ScheduledTick {
             due: 41,
@@ -1985,7 +2131,7 @@ mod tests {
 
         let mut system = RedstoneSystem::new();
         let mut manager = ChunkManager::new(2);
-        manager.chunks.insert((0, 0), Chunk::new(0, 0));
+        manager.insert_resident_chunk((0, 0), Chunk::new(0, 0));
 
         let initial_state = BlockState {
             facing: Direction::West,
@@ -2383,7 +2529,7 @@ mod tests {
             crate::block_entity::BlockEntity::Observer(o) if !o.baseline_initialized
         ));
 
-        manager.chunks.insert((1, 0), Chunk::new(1, 0));
+        manager.insert_resident_chunk((1, 0), Chunk::new(1, 0));
         manager.set_block(16, Y, 0, BlockType::Stone);
         system.tick(&mut manager, &[]);
         let observer = manager.get_block_entity(15, Y, 0).unwrap();
@@ -2584,8 +2730,8 @@ mod tests {
     #[test]
     fn collect_only_emits_components_inside_the_target_chunk() {
         let mut manager = ChunkManager::new(2);
-        manager.chunks.insert((0, 0), Chunk::new(0, 0));
-        manager.chunks.insert((1, 0), Chunk::new(1, 0));
+        manager.insert_resident_chunk((0, 0), Chunk::new(0, 0));
+        manager.insert_resident_chunk((1, 0), Chunk::new(1, 0));
         let mut system = RedstoneSystem::new();
         // First component inside chunk (0, 0).
         manager.set_block(1, Y, 0, BlockType::Repeater);
@@ -2654,8 +2800,8 @@ mod tests {
     #[test]
     fn cross_chunk_redstone_line_propagation() {
         let mut manager = ChunkManager::new(2);
-        manager.chunks.insert((0, 0), Chunk::new(0, 0));
-        manager.chunks.insert((1, 0), Chunk::new(1, 0));
+        manager.insert_resident_chunk((0, 0), Chunk::new(0, 0));
+        manager.insert_resident_chunk((1, 0), Chunk::new(1, 0));
         let mut system = RedstoneSystem::new();
 
         // Place Lever at x=14 (chunk 0) and RedstoneWires across x=15 (chunk 0) to x=20 (chunk 1)
@@ -2718,6 +2864,33 @@ mod tests {
         assert!(system.is_sleeping());
         assert_eq!(system.power_at((0, Y, 0)), 15);
         assert_eq!(system.power_at((1, Y, 0)), 15);
+    }
+
+    #[test]
+    fn sleeping_redstone_skips_loaded_chunk_key_probes() {
+        let mut manager = manager();
+        let mut system = RedstoneSystem::new();
+        place(
+            &mut system,
+            &mut manager,
+            0,
+            BlockType::Lever,
+            Direction::North,
+        );
+        system.tick(&mut manager, &[]);
+        assert!(system.is_sleeping());
+        let probes = system.loaded_chunk_key_probes;
+        let generation = manager.load_generation();
+        let known = system.known_load_generation;
+        system.tick(&mut manager, &[]);
+        assert!(system.is_sleeping());
+        assert_eq!(system.loaded_chunk_key_probes, probes);
+        assert_eq!(manager.load_generation(), generation);
+        assert_eq!(system.known_load_generation, known);
+        assert_eq!(
+            known, generation,
+            "sleep path must compare generation, not probe chunk keys"
+        );
     }
 
     fn reference_full_settle(
@@ -2823,8 +2996,8 @@ mod tests {
     #[test]
     fn differential_dirty_worklist_vs_full_settle_parity() {
         let mut manager = ChunkManager::new(2);
-        manager.chunks.insert((0, 0), Chunk::new(0, 0));
-        manager.chunks.insert((1, 0), Chunk::new(1, 0));
+        manager.insert_resident_chunk((0, 0), Chunk::new(0, 0));
+        manager.insert_resident_chunk((1, 0), Chunk::new(1, 0));
         let mut system = RedstoneSystem::new();
 
         // Build circuit spanning multiple chunks:

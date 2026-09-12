@@ -896,6 +896,26 @@ impl EntityManager {
         id
     }
 
+    /// Insert a fully constructed entity with a caller-chosen id using the same
+    /// incremental index updates as [`Self::spawn`] / [`Self::add_restored_entity`].
+    pub fn insert_indexed_entity(&mut self, entity: Entity) {
+        let id = entity.id;
+        let entity_type = entity.entity_type;
+        let pos = entity.position;
+        let idx = self.entities.len();
+        self.entities.push(entity);
+        self.id_to_index.insert(id, idx);
+        self.type_buckets.entry(entity_type).or_default().push(id);
+        let chunk_pos = Self::chunk_for(pos);
+        self.spatial_buckets.entry(chunk_pos).or_default().push(id);
+        self.entity_chunks.insert(id, chunk_pos);
+        if id >= self.next_id {
+            self.next_id = id + 1;
+        }
+        self.bump_spatial_revision();
+        self.bump_checksum_epoch();
+    }
+
     pub fn add_restored_entity(&mut self, data: &crate::save::EntitySaveData) -> u64 {
         let id = self.next_id;
         self.next_id += 1;

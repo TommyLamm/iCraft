@@ -22,14 +22,14 @@ impl AuthorityCore {
             self.tick_session_domains(dimension);
             self.tick_mining(dimension);
             self.tick_portal_travel(dimension);
-            let players: Vec<(PlayerId, [f32; 3])> = self
+            let players: Vec<(PlayerId, [f32; 3], f32, f32)> = self
                 .session_ids_in_dimension(dimension)
                 .iter()
                 .copied()
                 .filter_map(|id| {
-                    self.sessions
-                        .get(&id)
-                        .map(|session| (session.id, session.position))
+                    self.sessions.get(&id).map(|session| {
+                        (session.id, session.position, session.yaw, session.pitch)
+                    })
                 })
                 .collect();
             // One world_mut for tick + redstone drain; dispense needs a fresh

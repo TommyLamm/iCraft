@@ -130,6 +130,9 @@ pub struct ChunkManager {
     pub render_distance: i32,
     pub dimension: crate::dimension::Dimension,
     pub dirty_chunks: crate::save::DirtyChunkSet,
+    /// Monotonic counter bumped whenever the resident column set changes.
+    /// Redstone compares this instead of scanning `known_chunks` against keys.
+    load_generation: u64,
     water_updates: FluidUpdateQueue,
     lava_updates: FluidUpdateQueue,
     pending_mesh_invalidations: HashSet<(i32, i32)>,
@@ -147,11 +150,36 @@ impl ChunkManager {
             render_distance,
             dimension,
             dirty_chunks: crate::save::DirtyChunkSet::new(),
+            load_generation: 0,
             water_updates: FluidUpdateQueue::new(),
             lava_updates: FluidUpdateQueue::new(),
             pending_mesh_invalidations: HashSet::new(),
             pending_section_mesh_invalidations: HashSet::new(),
         }
+    }
+
+    /// Resident-column generation observed by redstone sleep / sync.
+    pub fn load_generation(&self) -> u64 {
+        self.load_generation
+    }
+
+    /// Call after inserting or removing a resident column so redstone can skip
+    /// O(resident) key-set compares on the sleeping path.
+    pub fn bump_load_generation(&mut self) {
+        self.load_generation = self.load_generation.wrapping_add(1);
+    }
+
+    /// Insert a resident column and bump [`Self::load_generation`].
+    pub fn insert_resident_chunk(&mut self, key: (i32, i32), chunk: Chunk) {
+        self.chunks.insert(key, chunk);
+        self.bump_load_generation();
+    }
+
+    /// Remove a resident column and bump [`Self::load_generation`].
+    pub fn remove_resident_chunk(&mut self, key: &(i32, i32)) -> Option<Chunk> {
+        let removed = self.chunks.remove(key)?;
+        self.bump_load_generation();
+        Some(removed)
     }
 
     fn record_mesh_invalidation(&mut self, wx: i32, wy: i32, wz: i32) {
@@ -199,6 +227,7 @@ impl ChunkManager {
             block_entities,
         )?;
         self.chunks.insert((cx, cz), chunk);
+        self.bump_load_generation();
         Ok(())
     }
 

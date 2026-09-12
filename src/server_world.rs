@@ -79,7 +79,8 @@ pub struct ServerWorld {
     /// Redstone actions are drained after the world tick by AuthorityCore so
     /// globally unique entity ids can be assigned before execution.
     pending_redstone_actions: Vec<RedstoneAction>,
-    block_revisions: BTreeMap<(i32, i32, i32), u64>,
+    /// Per-column block revision map. Evicting a column is O(that column).
+    block_revisions: BTreeMap<(i32, i32), BTreeMap<(i32, i32, i32), u64>>,
     /// XOR of per-entry FNV-1a fingerprints for `block_revisions`.
     /// Maintained on insert/remove so idle ticks do not scan the map.
     block_revision_checksum: u64,
@@ -175,7 +176,7 @@ impl ServerWorld {
         if self.chunks.chunks.contains_key(&key) || self.failed_restore_chunks.contains(&key) {
             return;
         }
-        self.chunks.chunks.insert(key, chunk);
+        self.chunks.insert_resident_chunk(key, chunk);
     }
 
     /// Whether a future/other authoritative spawn source may create a
@@ -201,7 +202,8 @@ impl ServerWorld {
         };
         let chunk =
             generate_chunk_with_options(self.dimension, chunk_x, chunk_z, self.seed, options);
-        self.chunks.chunks.insert((chunk_x, chunk_z), chunk);
+        self.chunks
+            .insert_resident_chunk((chunk_x, chunk_z), chunk);
     }
 
     pub fn ensure_chunk(&mut self, chunk_x: i32, chunk_z: i32) {
@@ -357,12 +359,8 @@ impl ServerWorld {
             .copied()
             .unwrap_or_else(|| {
                 self.block_revisions
-                    .iter()
-                    .filter(|((x, _y, z), _)| {
-                        x.div_euclid(16) == chunk_x && z.div_euclid(16) == chunk_z
-                    })
-                    .map(|(_, revision)| *revision)
-                    .max()
+                    .get(&(chunk_x, chunk_z))
+                    .and_then(|column| column.values().copied().max())
                     .unwrap_or(0)
             })
     }
@@ -373,9 +371,10 @@ impl ServerWorld {
         for (&(chunk_x, chunk_z), &revision) in &self.chunk_revisions {
             let _ = index.ensure_at_least(self.dimension, chunk_x, chunk_z, revision);
         }
-        for (&(x, _y, z), &revision) in &self.block_revisions {
-            let _ =
-                index.ensure_at_least(self.dimension, x.div_euclid(16), z.div_euclid(16), revision);
+        for (&(chunk_x, chunk_z), column) in &self.block_revisions {
+            for &revision in column.values() {
+                let _ = index.ensure_at_least(self.dimension, chunk_x, chunk_z, revision);
+            }
         }
         index
     }
@@ -437,22 +436,20 @@ impl ServerWorld {
     }
 
     fn remove_resident_chunk(&mut self, cx: i32, cz: i32) {
-        self.chunks.chunks.remove(&(cx, cz));
+        self.chunks.remove_resident_chunk(&(cx, cz));
         self.chunks.dirty_chunks.remove(cx, cz);
         self.chunk_revisions.remove(&(cx, cz));
-        let stale: Vec<_> = self
-            .block_revisions
-            .keys()
-            .copied()
-            .filter(|&(x, _y, z)| x.div_euclid(16) == cx && z.div_euclid(16) == cz)
-            .collect();
-        for position in stale {
-            self.clear_block_revision(position);
+        if let Some(column) = self.block_revisions.remove(&(cx, cz)) {
+            for (position, revision) in column {
+                self.block_revision_checksum ^= block_revision_fingerprint(position, revision);
+            }
         }
     }
 
     fn set_block_revision(&mut self, position: (i32, i32, i32), revision: u64) {
-        if let Some(old) = self.block_revisions.insert(position, revision) {
+        let column = (position.0.div_euclid(16), position.2.div_euclid(16));
+        let column_map = self.block_revisions.entry(column).or_default();
+        if let Some(old) = column_map.insert(position, revision) {
             if old == revision {
                 return;
             }
@@ -461,9 +458,17 @@ impl ServerWorld {
         self.block_revision_checksum ^= block_revision_fingerprint(position, revision);
     }
 
+    #[allow(dead_code)]
     fn clear_block_revision(&mut self, position: (i32, i32, i32)) {
-        if let Some(old) = self.block_revisions.remove(&position) {
+        let column = (position.0.div_euclid(16), position.2.div_euclid(16));
+        let Some(column_map) = self.block_revisions.get_mut(&column) else {
+            return;
+        };
+        if let Some(old) = column_map.remove(&position) {
             self.block_revision_checksum ^= block_revision_fingerprint(position, old);
+        }
+        if column_map.is_empty() {
+            self.block_revisions.remove(&column);
         }
     }
 
@@ -476,11 +481,11 @@ impl ServerWorld {
             crate::world::Chunk::empty_in_dimension(self.dimension, data.chunk_x, data.chunk_z);
         if let Err(error) = data.restore_to_chunk(&mut decoded) {
             self.failed_restore_chunks.insert(key);
-            self.chunks.chunks.remove(&key);
+            let _ = self.chunks.remove_resident_chunk(&key);
             self.chunk_revisions.remove(&key);
             return Err(error);
         }
-        self.chunks.chunks.insert(key, decoded);
+        self.chunks.insert_resident_chunk(key, decoded);
         let redstone_metadata = data.redstone_metadata();
         self.redstone.restore_chunk_metadata(
             &self.chunks,
@@ -1488,7 +1493,7 @@ impl ServerWorld {
 
     /// Advance exactly one 20 Hz tick.  All iteration order is normalized so
     /// the checksum and mutation revisions are topology-independent.
-    pub fn tick(&mut self, players: &[(PlayerId, [f32; 3])]) -> AuthoritySnapshot {
+    pub fn tick(&mut self, players: &[(PlayerId, [f32; 3], f32, f32)]) -> AuthoritySnapshot {
         if self.rules.do_daylight_cycle {
             self.time = self.time.wrapping_add(1);
         }
@@ -1496,7 +1501,7 @@ impl ServerWorld {
 
         let mut occupants: Vec<_> = players
             .iter()
-            .filter_map(|(_, position)| {
+            .filter_map(|(_, position, _, _)| {
                 position.iter().all(|value| value.is_finite()).then_some((
                     position[0].floor() as i32,
                     position[1].floor() as i32,
@@ -1508,7 +1513,7 @@ impl ServerWorld {
         occupants.dedup();
         let simulation_distance = self.chunks.render_distance.clamp(0, 32) as u8;
         let mut simulation_chunks = BTreeSet::new();
-        for (_, position) in players {
+        for (_, position, _, _) in players {
             if position.iter().all(|value| value.is_finite()) {
                 simulation_chunks.extend(chunks_around(*position, simulation_distance));
             }
@@ -1866,8 +1871,7 @@ impl ServerWorld {
                 }
                 _ => {}
             }
-            self.entities.entities.push(entity);
-            self.entities.rebuild_indexes();
+            self.entities.insert_indexed_entity(entity);
             return true;
         }
         false
@@ -1917,7 +1921,7 @@ impl ServerWorld {
         mutations
     }
 
-    fn tick_entities(&mut self, players: &[(PlayerId, [f32; 3])]) {
+    fn tick_entities(&mut self, players: &[(PlayerId, [f32; 3], f32, f32)]) {
         // Peaceful is an authority policy, not merely a spawn-rate hint:
         // already-loaded hostile entities are removed at the next fixed tick.
         // `do_mob_spawning=false` deliberately does not take this path, so it
@@ -1931,10 +1935,13 @@ impl ServerWorld {
                 self.entities.rebuild_indexes();
             }
         }
-        let mut player_positions: Vec<_> = players.to_vec();
-        player_positions.sort_by_key(|(id, _)| *id);
+        let mut player_positions: Vec<_> = players
+            .iter()
+            .map(|(id, position, yaw, pitch)| (*id, *position, *yaw, *pitch))
+            .collect();
+        player_positions.sort_by_key(|(id, _, _, _)| *id);
         if self.rules.do_mob_spawning && self.dimension == Dimension::Overworld {
-            for (_, position) in &player_positions {
+            for (_, position, _, _) in &player_positions {
                 let player = Vec3::from_array(*position);
                 let sky_light = if (self.time % 24_000) < 12_000 { 15 } else { 4 };
                 crate::passive_mob::spawn_passive_mobs(
@@ -1977,13 +1984,13 @@ impl ServerWorld {
             let mut chasing = false;
             if entity.entity_type.is_hostile() && !matches!(self.difficulty, Difficulty::Peaceful)
             {
-                let nearest = player_positions.iter().min_by(|(_, left), (_, right)| {
+                let nearest = player_positions.iter().min_by(|(_, left, _, _), (_, right, _, _)| {
                     entity
                         .position
                         .distance_squared(Vec3::from_array(*left))
                         .total_cmp(&entity.position.distance_squared(Vec3::from_array(*right)))
                 });
-                if let Some((_, target)) = nearest.filter(|(_, target)| {
+                if let Some((_, target, _, _)) = nearest.filter(|(_, target, _, _)| {
                     entity.position.distance_squared(Vec3::from_array(*target)) <= chase_range_sq
                 }) {
                     chasing = true;
@@ -2026,38 +2033,52 @@ impl ServerWorld {
         self.entities.sync_entity_positions(&moved_ids);
         self.entities.scratch.id_list = moved_ids;
 
-        if let Some((_, first_pos)) = player_positions.first() {
-            let player_vec = Vec3::from_array(*first_pos);
-            // When the AI loop already dirtied checksum inputs, skip the
-            // before/after key capture. Otherwise detect boss-path pose /
-            // ai_phase / membership changes (including within-chunk moves).
-            let epoch_before = self.entities.checksum_epoch();
-            let keys_before = (!checksum_inputs_changed).then(|| entity_checksum_keys(&self.entities));
-            crate::boss::ensure_dimension_entities(
-                self.dimension,
-                &mut self.entities,
-                &self.chunks,
-                player_vec,
-                self.time as f32 * FIXED_DT,
-            );
-            let boss_events = crate::boss::update_dimension_entities(
-                self.dimension,
-                &mut self.entities,
-                &self.chunks,
-                player_vec,
-                Vec3::NEG_Z,
-                FIXED_DT,
-                crate::inventory::GameMode::Survival,
-            );
-            if let Some(before) = keys_before {
-                let epoch_changed = self.entities.checksum_epoch() != epoch_before;
-                if !epoch_changed && before != entity_checksum_keys(&self.entities) {
-                    self.entities.mark_checksum_inputs_changed();
-                }
+        if player_positions.is_empty() {
+            return;
+        }
+
+        let boss_players: Vec<(Vec3, Vec3)> = player_positions
+            .iter()
+            .map(|(_, position, yaw, pitch)| {
+                (Vec3::from_array(*position), look_from_yaw_pitch(*yaw, *pitch))
+            })
+            .collect();
+        let focus = boss_players
+            .iter()
+            .min_by(|(left, _), (right, _)| {
+                left.length_squared().total_cmp(&right.length_squared())
+            })
+            .map(|(pos, _)| *pos)
+            .unwrap_or(Vec3::ZERO);
+
+        // When the AI loop already dirtied checksum inputs, skip the
+        // before/after key capture. Otherwise detect boss-path pose /
+        // ai_phase / membership changes (including within-chunk moves).
+        let epoch_before = self.entities.checksum_epoch();
+        let keys_before = (!checksum_inputs_changed).then(|| entity_checksum_keys(&self.entities));
+        crate::boss::ensure_dimension_entities(
+            self.dimension,
+            &mut self.entities,
+            &self.chunks,
+            focus,
+            self.time as f32 * FIXED_DT,
+        );
+        let boss_events = crate::boss::update_dimension_entities(
+            self.dimension,
+            &mut self.entities,
+            &self.chunks,
+            &boss_players,
+            FIXED_DT,
+            crate::inventory::GameMode::Survival,
+        );
+        if let Some(before) = keys_before {
+            let epoch_changed = self.entities.checksum_epoch() != epoch_before;
+            if !epoch_changed && before != entity_checksum_keys(&self.entities) {
+                self.entities.mark_checksum_inputs_changed();
             }
-            if boss_events.dragon_completion.is_some() {
-                self.handle_dragon_completion();
-            }
+        }
+        if boss_events.dragon_completion.is_some() {
+            self.handle_dragon_completion();
         }
     }
 
@@ -2204,6 +2225,16 @@ fn entity_skips_idle_physics(entity: &Entity, chasing: bool) -> bool {
         || entity.entity_type.is_anchored()
         || entity.on_ground
         || entity.entity_type.uses_flying_physics()
+}
+
+fn look_from_yaw_pitch(yaw: f32, pitch: f32) -> Vec3 {
+    if !yaw.is_finite() || !pitch.is_finite() {
+        return Vec3::NEG_Z;
+    }
+    let yaw = yaw.to_radians();
+    let pitch = pitch.to_radians();
+    let horizontal = pitch.cos();
+    Vec3::new(-yaw.sin() * horizontal, -pitch.sin(), yaw.cos() * horizontal)
 }
 
 fn fnv1a_write(hash: &mut u64, bytes: &[u8]) {
@@ -2824,7 +2855,7 @@ mod tests {
             world
                 .entities
                 .spawn(EntityType::Zombie, Vec3::new(10.0, 80.0, 10.0));
-            world.tick(&[(7, [8.0, 80.0, 8.0])])
+            world.tick(&[(7, [8.0, 80.0, 8.0], 0.0, 0.0)])
         };
         assert_eq!(make(), make());
     }
@@ -2868,7 +2899,8 @@ mod tests {
     fn folded_block_revision_checksum(world: &ServerWorld) -> u64 {
         world
             .block_revisions
-            .iter()
+            .values()
+            .flat_map(|column| column.iter())
             .fold(0u64, |acc, (&position, &revision)| {
                 acc ^ block_revision_fingerprint(position, revision)
             })
@@ -2939,8 +2971,8 @@ mod tests {
             world
                 .entities
                 .spawn(EntityType::Zombie, Vec3::new(10.0, 80.0, 10.0));
-            world.tick(&[(7, [8.0, 80.0, 8.0])]);
-            world.tick(&[(7, [8.0, 80.0, 8.0])])
+            world.tick(&[(7, [8.0, 80.0, 8.0], 0.0, 0.0)]);
+            world.tick(&[(7, [8.0, 80.0, 8.0], 0.0, 0.0)])
         };
         assert_eq!(tick(), tick());
     }
@@ -3082,8 +3114,8 @@ mod tests {
             entity.ai_phase = 4;
         }
         // Player is beyond HOSTILE_CHASE_RANGE (40); chase must not arm.
-        world.tick(&[(7, [8.0, 80.0, 80.0])]);
-        world.tick(&[(7, [8.0, 80.0, 80.0])]);
+        world.tick(&[(7, [8.0, 80.0, 80.0], 0.0, 0.0)]);
+        world.tick(&[(7, [8.0, 80.0, 80.0], 0.0, 0.0)]);
         let entity = world.entities.get_by_id(id).unwrap();
         assert_eq!(entity.velocity, Vec3::ZERO);
         assert!(!entity.target_player);
@@ -3110,7 +3142,7 @@ mod tests {
         }
         // In-range player east of the zombie so chase writes +X velocity and
         // the mover crosses into chunk (1, 0) under incremental sync.
-        world.tick(&[(7, [24.0, 80.0, 8.0])]);
+        world.tick(&[(7, [24.0, 80.0, 8.0], 0.0, 0.0)]);
         let pos = world.entities.get_by_id(id).unwrap().position;
         assert!(
             pos.x > 8.0,
@@ -3145,7 +3177,7 @@ mod tests {
         let peaceful_id = peaceful
             .entities
             .spawn(EntityType::Zombie, Vec3::new(10.0, 80.0, 10.0));
-        peaceful.tick(&[(7, [8.0, 80.0, 8.0])]);
+        peaceful.tick(&[(7, [8.0, 80.0, 8.0], 0.0, 0.0)]);
         assert!(peaceful.entities.get_by_id(peaceful_id).is_none());
 
         let mut easy_rules = rules;
@@ -3163,7 +3195,7 @@ mod tests {
         let easy_id = easy
             .entities
             .spawn(EntityType::Zombie, Vec3::new(10.0, 80.0, 10.0));
-        easy.tick(&[(7, [8.0, 80.0, 8.0])]);
+        easy.tick(&[(7, [8.0, 80.0, 8.0], 0.0, 0.0)]);
         assert!(easy.entities.get_by_id(easy_id).is_some());
         assert!(easy
             .entities
@@ -3182,7 +3214,7 @@ mod tests {
         let normal_id = normal
             .entities
             .spawn(EntityType::Zombie, Vec3::new(10.0, 80.0, 10.0));
-        normal.tick(&[(7, [8.0, 80.0, 8.0])]);
+        normal.tick(&[(7, [8.0, 80.0, 8.0], 0.0, 0.0)]);
 
         let mut hard = ServerWorld::new_with_difficulty(
             7,
@@ -3196,7 +3228,7 @@ mod tests {
         let hard_id = hard
             .entities
             .spawn(EntityType::Zombie, Vec3::new(10.0, 80.0, 10.0));
-        hard.tick(&[(7, [8.0, 80.0, 8.0])]);
+        hard.tick(&[(7, [8.0, 80.0, 8.0], 0.0, 0.0)]);
         let easy_speed = easy.entities.get_by_id(easy_id).unwrap().velocity.x.abs();
         let normal_speed = normal
             .entities
@@ -3341,7 +3373,7 @@ mod tests {
         if let Some(BlockEntity::Hopper(hopper)) = world.chunks.get_block_entity_mut(128, 80, 8) {
             hopper.transfer_cooldown = 6;
         }
-        world.tick(&[(7, [8.0, 80.0, 8.0])]);
+        world.tick(&[(7, [8.0, 80.0, 8.0], 0.0, 0.0)]);
         let near = match world.get_block_entity(8, 80, 8) {
             Some(BlockEntity::Hopper(hopper)) => hopper.transfer_cooldown,
             _ => panic!("near hopper"),
@@ -3393,7 +3425,7 @@ mod tests {
             rules,
             2, Difficulty::default());
         world.set_block(4, 65, 4, BlockType::Fire, 0).unwrap();
-        let players = [(1u64, [4.0_f32, 65.0, 4.0])];
+        let players = [(1u64, [4.0_f32, 65.0, 4.0], 0.0_f32, 0.0_f32)];
         for _ in 0..400 {
             let _ = world.tick(&players);
         }

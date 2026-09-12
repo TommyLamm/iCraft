@@ -30,6 +30,10 @@ fn is_furnace_block(block: BlockType) -> bool {
     matches!(block, BlockType::Furnace | BlockType::FurnaceLit)
 }
 
+fn is_hopper_block(block: BlockType) -> bool {
+    matches!(block, BlockType::Hopper)
+}
+
 #[derive(Clone)]
 pub struct Chunk {
     pub chunk_x: i32,
@@ -44,6 +48,8 @@ pub struct Chunk {
     pub(crate) redstone_positions: Vec<u32>,
     /// Compact local coordinates of furnace / lit-furnace blocks.
     pub(crate) furnace_positions: Vec<u32>,
+    /// Compact local coordinates of hopper blocks (same encoding as furnaces).
+    pub(crate) hopper_positions: Vec<u32>,
     /// Ascending `section_y` values whose `random_tick_count() > 0`.
     /// Maintained on load / `set_block_local` so authority sampling never
     /// rescans empty sections each tick.
@@ -76,6 +82,7 @@ impl Chunk {
             torch_positions: Vec::new(),
             redstone_positions: Vec::new(),
             furnace_positions: Vec::new(),
+            hopper_positions: Vec::new(),
             random_tick_sections: Vec::new(),
             block_entities: std::collections::HashMap::new(),
         }
@@ -218,6 +225,8 @@ impl Chunk {
             Self::build_redstone_index_from_sections(height.min_section_y(), &sections);
         let furnace_positions =
             Self::build_furnace_index_from_sections(height.min_section_y(), &sections);
+        let hopper_positions =
+            Self::build_hopper_index_from_sections(height.min_section_y(), &sections);
         let random_tick_sections =
             Self::build_random_tick_index_from_sections(height.min_section_y(), &sections);
 
@@ -230,6 +239,7 @@ impl Chunk {
             torch_positions,
             redstone_positions,
             furnace_positions,
+            hopper_positions,
             random_tick_sections,
             block_entities: std::collections::HashMap::new(),
         }
@@ -332,6 +342,34 @@ impl Chunk {
         positions
     }
 
+    fn build_hopper_index_from_sections(
+        min_sec_y: i8,
+        sections: &[Option<ChunkSection>],
+    ) -> Vec<u32> {
+        let mut positions = Vec::new();
+        for (sec_idx, sec_opt) in sections.iter().enumerate() {
+            let Some(sec) = sec_opt else {
+                continue;
+            };
+            if sec.non_air_count() == 0 {
+                continue;
+            }
+            let sec_y = min_sec_y + sec_idx as i8;
+            for ly in 0..SECTION_SIZE {
+                let wy = section_and_local_y_to_world_y(sec_y, ly as u8);
+                for z in 0..CHUNK_DEPTH {
+                    for x in 0..CHUNK_WIDTH {
+                        let idx = (ly << 8) | (z << 4) | x;
+                        if is_hopper_block(sec.get_block(idx)) {
+                            positions.push(Self::encode_torch_position(x, wy, z));
+                        }
+                    }
+                }
+            }
+        }
+        positions
+    }
+
     fn build_random_tick_index_from_sections(
         min_sec_y: i8,
         sections: &[Option<ChunkSection>],
@@ -363,6 +401,11 @@ impl Chunk {
         &self.furnace_positions
     }
 
+    /// Returns the indexed local positions of hopper blocks.
+    pub fn hopper_positions(&self) -> &[u32] {
+        &self.hopper_positions
+    }
+
     /// Returns ascending section Y values that still have random-tickable blocks.
     pub fn random_tick_sections(&self) -> &[i8] {
         &self.random_tick_sections
@@ -387,6 +430,7 @@ impl Chunk {
             + self.torch_positions.capacity() * size_of::<u32>()
             + self.redstone_positions.capacity() * size_of::<u32>()
             + self.furnace_positions.capacity() * size_of::<u32>()
+            + self.hopper_positions.capacity() * size_of::<u32>()
             + self.random_tick_sections.capacity() * size_of::<i8>()
             + self.block_entities.capacity()
                 * (size_of::<(u8, i16, u8)>() + size_of::<crate::block_entity::BlockEntity>())
@@ -508,6 +552,12 @@ impl Chunk {
             Self::build_furnace_index_from_sections(self.min_section_y, &self.sections);
     }
 
+    /// Rebuilds the hopper index after bulk block mutations (generation/load).
+    pub fn rebuild_hopper_index(&mut self) {
+        self.hopper_positions =
+            Self::build_hopper_index_from_sections(self.min_section_y, &self.sections);
+    }
+
     /// Rebuilds the random-tick section index after bulk block mutations.
     pub fn rebuild_random_tick_index(&mut self) {
         self.random_tick_sections =
@@ -567,6 +617,17 @@ impl Chunk {
         }
         if new_is_furnace && !old_is_furnace {
             self.furnace_positions.push(encoded);
+        }
+
+        let old_is_hopper = is_hopper_block(old);
+        let new_is_hopper = is_hopper_block(block);
+        if old_is_hopper && !new_is_hopper {
+            if let Some(index) = self.hopper_positions.iter().position(|&p| p == encoded) {
+                self.hopper_positions.swap_remove(index);
+            }
+        }
+        if new_is_hopper && !old_is_hopper {
+            self.hopper_positions.push(encoded);
         }
 
         match self.random_tick_sections.binary_search(&sec_y_val) {
@@ -940,6 +1001,20 @@ mod tests {
     }
 
     #[test]
+    fn hopper_index_tracks_local_mutations_without_duplicates() {
+        let mut chunk = Chunk::new(0, 0);
+        assert!(chunk.hopper_positions().is_empty());
+        chunk.set_block_local(3, 40, 5, BlockType::Hopper);
+        assert_eq!(chunk.hopper_positions().len(), 1);
+        let encoded = chunk.hopper_positions()[0];
+        assert_eq!(Chunk::decode_torch_position(encoded), (3, 40, 5));
+        chunk.set_block_local(3, 40, 5, BlockType::Hopper);
+        assert_eq!(chunk.hopper_positions().len(), 1);
+        chunk.set_block_local(3, 40, 5, BlockType::Stone);
+        assert!(chunk.hopper_positions().is_empty());
+    }
+
+    #[test]
     fn random_tick_index_tracks_section_eligibility() {
         let mut chunk = Chunk::empty(0, 0);
         assert!(chunk.random_tick_sections().is_empty());
@@ -968,6 +1043,7 @@ mod tests {
             torch_positions: Vec::new(),
             redstone_positions: Vec::new(),
             furnace_positions: Vec::new(),
+            hopper_positions: Vec::new(),
             random_tick_sections: Vec::new(),
             block_entities: std::collections::HashMap::new(),
         };

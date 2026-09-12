@@ -218,19 +218,31 @@ input
 - Hopper `transfer_cooldown` countdown is memory-only. A column is marked dirty
   only when hopper slots change or cooldown is armed `0→N` after a transfer.
   Reload restores the last persisted cooldown (typically 8 after a transfer),
-  so a hopper may wait up to 8 extra ticks. Furnaces are ticked from a compact
+  so a hopper may wait up to 8 extra ticks. Hoppers are discovered from a
+  compact per-chunk `hopper_positions` index (same encoding as furnaces /
+  torches), so zero-hopper simulation columns do not walk `block_entities`.
+  Furnaces are ticked from a compact
   per-chunk index with the same encoding as torches. Random ticks sample from a
   per-chunk ascending `section_y` index (`random_tick_sections`) maintained on
   load / `set_block_local` / unload; authority walks the simulation-union
   columns and takes at most 128 already-ordered eligible sections without
   rescanning empty sections or sorting each tick. Sleeping redstone skips
   comparator/observer refresh until a container mutation, plate occupancy
-  change, scheduled/dirty work, or loaded-chunk set change wakes it. Grounded
+  change, scheduled/dirty work, or loaded-chunk set change wakes it.
+  `ChunkManager` carries a monotonic `load_generation` bumped on resident
+  insert/remove; sleeping redstone compares that counter instead of probing
+  every known chunk key. Awake redstone keeps comparator and transition-
+  capable component indexes, runs transitions only for settle-evaluated /
+  due positions, and collects persistent metadata from a per-column sidecar.
+  Block mutation revisions are stored per-column so eviction is O(that
+  column). Grounded
   dropped items with near-zero velocity skip XYZ physics until the support
   block changes or an external push applies velocity. Living entities that are
   sitting, anchored, grounded (or flying with zero velocity), and not in
   hostile chase skip `update_physics` and `ai_phase` bumps; hostiles only write
   chase velocity when a player is within range and the desired speed differs.
+  Dimension boss / Enderman updates use nearest-player pose plus actual look
+  direction and skip entirely when the dimension has no players.
   `tick_entities` syncs spatial buckets via a mover id list
   (`sync_entity_positions`), not a full-table `sync_positions` scan.
 - `EmbeddedRuntimeBridge::sync_local_inventory` may write back only

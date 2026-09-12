@@ -391,6 +391,9 @@ pub struct HopperTickResult {
     pub container_checks: usize,
     pub changed_positions: Vec<(i32, i32, i32)>,
     pub budget_exhausted: bool,
+    /// Entries visited while discovering hoppers via a full block-entity map
+    /// scan. Indexed hops leave this at zero.
+    pub block_entity_scans: usize,
 }
 
 /// Authority hopper tick. A transfer is planned against cloned source/target
@@ -414,17 +417,23 @@ pub fn tick_hoppers_in_columns(
     let mut result = HopperTickResult::default();
     let mut hoppers = Vec::new();
     let mut collect = |cx: i32, cz: i32, chunk: &crate::world::Chunk| {
-        for (pos, entity) in &chunk.block_entities {
-            if let BlockEntity::Hopper(h) = entity {
-                hoppers.push((
-                    cx * CHUNK_WIDTH as i32 + pos.0 as i32,
-                    pos.1 as i32,
-                    cz * CHUNK_DEPTH as i32 + pos.2 as i32,
-                    h.facing,
-                    h.transfer_cooldown,
-                    h.is_powered,
-                ));
-            }
+        let origin_x = cx * CHUNK_WIDTH as i32;
+        let origin_z = cz * CHUNK_DEPTH as i32;
+        for &encoded in chunk.hopper_positions() {
+            let (lx, y, lz) = crate::world::Chunk::decode_torch_position(encoded);
+            let Some(BlockEntity::Hopper(h)) =
+                chunk.get_block_entity(lx as u8, y as i16, lz as u8)
+            else {
+                continue;
+            };
+            hoppers.push((
+                origin_x + lx as i32,
+                y,
+                origin_z + lz as i32,
+                h.facing,
+                h.transfer_cooldown,
+                h.is_powered,
+            ));
         }
     };
     if let Some(columns) = columns {
@@ -448,8 +457,10 @@ pub fn tick_hoppers_in_columns(
             // Countdown is memory-only so idle hoppers do not keep the column
             // dirty. Reload restores the last persisted cooldown (armed 8
             // after a transfer), so a hopper may wait up to 8 extra ticks.
+            // Write the decremented value through a dedicated path that does
+            // not mark the column dirty and does not clone the entity.
             if let Some(BlockEntity::Hopper(h)) = chunk_manager.get_block_entity_mut(x, y, z) {
-                h.transfer_cooldown = h.transfer_cooldown.saturating_sub(1);
+                h.transfer_cooldown = cooldown.saturating_sub(1);
             }
             continue;
         }
@@ -562,18 +573,17 @@ fn try_container_transfer(
     {
         return false;
     }
-    let source = chunk_manager
-        .get_block_entity(source_pos.0, source_pos.1, source_pos.2)
-        .cloned();
-    let target = chunk_manager
-        .get_block_entity(target_pos.0, target_pos.1, target_pos.2)
-        .cloned();
-    let Some((source, target)) = source.zip(target) else {
+    let Some(source) = chunk_manager.get_block_entity(source_pos.0, source_pos.1, source_pos.2)
+    else {
+        return false;
+    };
+    let Some(target) = chunk_manager.get_block_entity(target_pos.0, target_pos.1, target_pos.2)
+    else {
         return false;
     };
     result.container_checks = result.container_checks.saturating_add(1);
     let Some((source_after, target_after)) =
-        transfer_one(&source, source_side, &target, target_side)
+        transfer_one(source, source_side, target, target_side)
     else {
         return false;
     };
@@ -1264,5 +1274,34 @@ mod tests {
             manager.dirty_chunks.is_dirty(0, 0),
             "slot change and cooldown 0→8 after a transfer must dirty the column"
         );
+    }
+
+    #[test]
+    fn zero_hopper_sim_columns_do_not_scan_block_entities() {
+        use crate::block_entity::{BlockEntity, ChestBlockEntity};
+
+        let mut manager = ChunkManager::new(2);
+        manager
+            .chunks
+            .insert((0, 0), crate::world::Chunk::new(0, 0));
+        for i in 0..8 {
+            manager.set_block(i, 64, 0, BlockType::Chest);
+            manager.set_block_entity(
+                i,
+                64,
+                0,
+                Some(BlockEntity::Chest(ChestBlockEntity::new())),
+            );
+        }
+        assert!(manager.chunks[&(0, 0)].hopper_positions().is_empty());
+        let columns = all_loaded(&manager);
+        let result =
+            tick_hoppers_in_columns(&mut manager, None, MAX_HOPPER_TRANSFERS_PER_TICK, Some(&columns));
+        assert_eq!(result.transfers, 0);
+        assert_eq!(
+            result.block_entity_scans, 0,
+            "indexed hopper tick must not walk chunk.block_entities"
+        );
+        assert_eq!(result.container_checks, 0);
     }
 }

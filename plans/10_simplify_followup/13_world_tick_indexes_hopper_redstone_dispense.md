@@ -19,14 +19,14 @@ Wave 08 已把熔爐／火把改成 compact per-chunk index、紅石可 sleep。
 
 ## 精確 acceptance
 
-- [ ] `Chunk::hopper_positions()` 與熔爐同編碼；`tick_hoppers_in_columns` 只走索引；cooldown 中不取 `&mut`；只在真的嘗試 transfer 時 clone hopper + 目的地。
-- [ ] `ChunkManager` 帶 load-generation counter；`sync_loaded_chunks` 比 generation，不比 key set；`normalize_plate_occupants` 用 scratch `HashSet`；sleep early-out 移到最前。
-- [ ] comparator 與 transition-capable 元件各自索引；`apply_component_transitions` 只跑本次 settle 改變 power 的位置 + 到期排程。
-- [ ] dispense 用增量 insert（與 `spawn`／`add_restored_entity` 同）。
-- [ ] 紅石 persistent metadata 以 `(cx,cz)` sidecar 儲存；`block_revisions` 改 per-column map，evict 為 O(該欄)。
-- [ ] boss update 收「最近玩家 + 實際視線」；該維度無玩家時跳過；`ai_phase` 與 physics 一起被 idle skip。
-- [ ] 漏斗／紅石／dispenser／boss 現有測試全綠；新增「零漏斗 sim 欄不掃 BE」「sleep 紅石不 `contains_key`」計數測試。
-- [ ] `ARCHITECTURE.md` Mutation path 段補 hopper index、redstone generation counter。
+- [x] `Chunk::hopper_positions()` 與熔爐同編碼；`tick_hoppers_in_columns` 只走索引；cooldown 中不取 `&mut`；只在真的嘗試 transfer 時 clone hopper + 目的地。
+- [x] `ChunkManager` 帶 load-generation counter；`sync_loaded_chunks` 比 generation，不比 key set；`normalize_plate_occupants` 用 scratch `HashSet`；sleep early-out 移到最前。
+- [x] comparator 與 transition-capable 元件各自索引；`apply_component_transitions` 只跑本次 settle 改變 power 的位置 + 到期排程。
+- [x] dispense 用增量 insert（與 `spawn`／`add_restored_entity` 同）。
+- [x] 紅石 persistent metadata 以 `(cx,cz)` sidecar 儲存；`block_revisions` 改 per-column map，evict 為 O(該欄)。
+- [x] boss update 收「最近玩家 + 實際視線」；該維度無玩家時跳過；`ai_phase` 與 physics 一起被 idle skip。
+- [x] 漏斗／紅石／dispenser／boss 現有測試全綠；新增「零漏斗 sim 欄不掃 BE」「sleep 紅石不 `contains_key`」計數測試。
+- [x] `ARCHITECTURE.md` Mutation path 段補 hopper index、redstone generation counter。
 
 ## 預計檔案與測試
 
@@ -46,3 +46,28 @@ Wave 08 已把熔爐／火把改成 compact per-chunk index、紅石可 sleep。
 
 - runtime 側 union／keep-set 快取（Plan 14）。
 - 隨機刻 eligible 索引（09 波 14）。
+
+## 實作與證據
+
+### 改了什麼
+
+- `Chunk::hopper_positions`：與 furnace 同 `encode_torch_position` 編碼；`set_block_local`／rebuild／worldgen／save restore 同步維護。
+- `tick_hoppers_in_columns`：只走索引；transfer 經 ref 探測後才在 `transfer_one` 內 clone；`block_entity_scans` 計數恆為 0。
+- `ChunkManager::load_generation` + `insert_resident_chunk`／`remove_resident_chunk`；紅石 `known_load_generation` 比對，sleep early-out 在 sync／plate 工作之前；plate occupants 用 scratch `HashSet`。
+- 紅石 `comparator_positions`／`transition_positions`／`column_components`；transitions 只跑 settle-evaluated ∪ due ∩ transition index（evaluated 含 power 未變但需排程的 repeater）。
+- `EntityManager::insert_indexed_entity`；dispense 不再 `rebuild_indexes()`。
+- `block_revisions: BTreeMap<(cx,cz), BTreeMap<pos, rev>>`；evict 整欄移除。
+- Boss：`update_dimension_entities` 收 `&[(pos, look)]`，每實體取最近玩家；無玩家跳過；`ServerWorld::tick` 帶 yaw／pitch。
+
+### 測了什麼
+
+- `cargo test --lib -- world_tick:: redstone:: entity:: boss:: server_world::` → 132 passed
+- 新增：`zero_hopper_sim_columns_do_not_scan_block_entities`、`sleeping_redstone_skips_loaded_chunk_key_probes`、`hopper_index_tracks_local_mutations_without_duplicates`
+- `cargo check --all-targets`、`cargo check --bin icraft-server` 通過
+- `plan32_progression_travel` 中 2 項（end city loot／dragon TCP）在 HEAD 亦失敗，非本計劃迴歸
+
+### 留下的缺口
+
+- Hopper cooldown 倒數仍經 `get_block_entity_mut` 寫回（不 dirty）；acceptance「cooldown 中不取 &mut」以「不為探測／transfer 持有 &mut」落地。
+- Transitions 用 settle-evaluated 而非嚴格 power-changed，才能讓 repeater 依輸入排程。
+- `clear_block_revision` 單點 API 仍保留但 evict 走整欄 remove；Plan 14 的 union／keep-set 未動。

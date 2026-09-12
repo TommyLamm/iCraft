@@ -283,6 +283,7 @@ fn generate_superflat_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
     chunk.rebuild_torch_index();
     chunk.rebuild_redstone_index();
     chunk.rebuild_furnace_index();
+    chunk.rebuild_hopper_index();
     chunk.rebuild_random_tick_index();
     chunk
 }
@@ -292,6 +293,7 @@ fn generate_overworld_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
     chunk.rebuild_torch_index();
     chunk.rebuild_redstone_index();
     chunk.rebuild_furnace_index();
+    chunk.rebuild_hopper_index();
     chunk.rebuild_random_tick_index();
     chunk
 }
@@ -551,12 +553,14 @@ fn generate_nether_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
         torch_positions: Vec::new(),
         redstone_positions: Vec::new(),
         furnace_positions: Vec::new(),
+        hopper_positions: Vec::new(),
         random_tick_sections: Vec::new(),
         block_entities: std::collections::HashMap::new(),
     };
     chunk.rebuild_torch_index();
     chunk.rebuild_redstone_index();
     chunk.rebuild_furnace_index();
+    chunk.rebuild_hopper_index();
     chunk.rebuild_random_tick_index();
     chunk
 }
@@ -793,12 +797,14 @@ fn generate_end_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
         torch_positions: Vec::new(),
         redstone_positions: Vec::new(),
         furnace_positions: Vec::new(),
+        hopper_positions: Vec::new(),
         random_tick_sections: Vec::new(),
         block_entities: std::collections::HashMap::new(),
     };
     chunk.rebuild_torch_index();
     chunk.rebuild_redstone_index();
     chunk.rebuild_furnace_index();
+    chunk.rebuild_hopper_index();
     chunk.rebuild_random_tick_index();
     chunk
 }
