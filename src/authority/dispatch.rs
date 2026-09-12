@@ -805,7 +805,7 @@ impl AuthorityCore {
                 if transactions::brew_locks_slot(&candidate, rod_slot) {
                     return Err(RejectReason::InvalidState);
                 }
-                let hook_id = self.next_unique_entity_id();
+                let hook_id = self.next_unique_entity_id(dimension, Some(session_id));
                 let context = fishing::FishingDomainContext {
                     world_seed: self.world(dimension).seed as u64
                         ^ (u64::from(self.world(dimension).dimension as u8) << 32),
@@ -1283,14 +1283,14 @@ impl AuthorityCore {
         death: combat::DeathOutcome,
     ) {
         for slot in death.drops {
-            let id = self.next_unique_entity_id();
+            let id = self.next_unique_entity_id(dimension, None);
             self.claim_entity_id(id);
             let _ = self
                 .world_mut_expect(dimension)
                 .spawn_authority_drop(id, slot, position);
         }
         if death.experience > 0 {
-            let id = self.next_unique_entity_id();
+            let id = self.next_unique_entity_id(dimension, None);
             self.claim_entity_id(id);
             let _ =
                 self.world_mut_expect(dimension)

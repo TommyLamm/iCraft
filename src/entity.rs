@@ -1,4 +1,4 @@
-use crate::chunk_manager::ChunkManager;
+use crate::chunk_manager::{ChunkManager, ColumnNeighborhood};
 use crate::physics::AABB;
 use glam::Vec3;
 
@@ -518,7 +518,7 @@ impl Entity {
             && (self.entity_type.is_living() || self.entity_type == EntityType::EndCrystal)
     }
 
-    pub fn update_physics(&mut self, dt: f32, chunk_manager: &ChunkManager) {
+    pub fn update_physics(&mut self, dt: f32, neighborhood: &ColumnNeighborhood<'_>) {
         if self.entity_type == EntityType::HeartParticle {
             self.position += self.velocity * dt;
             return;
@@ -556,7 +556,7 @@ impl Entity {
 
         // Unloaded columns must not be sampled as Air. Freeze this tick so
         // drops cannot fall through unmaterialized terrain.
-        if self.physics_region_unloaded(chunk_manager, dt) {
+        if self.physics_region_unloaded(neighborhood, dt) {
             return;
         }
 
@@ -567,7 +567,7 @@ impl Entity {
             && self.on_ground
             && self.velocity.length_squared() <= DROPPED_ITEM_REST_VELOCITY_EPS
         {
-            if self.dropped_item_support_holds(chunk_manager) {
+            if self.dropped_item_support_holds(neighborhood) {
                 self.velocity = Vec3::ZERO;
                 return;
             }
@@ -594,16 +594,16 @@ impl Entity {
 
         // Move X
         self.position.x += self.velocity.x * dt;
-        self.resolve_collisions(chunk_manager, 0);
+        self.resolve_collisions(neighborhood, 0);
 
         // Move Z
         self.position.z += self.velocity.z * dt;
-        self.resolve_collisions(chunk_manager, 2);
+        self.resolve_collisions(neighborhood, 2);
 
         // Move Y
         self.position.y += self.velocity.y * dt;
         self.on_ground = false;
-        self.resolve_collisions(chunk_manager, 1);
+        self.resolve_collisions(neighborhood, 1);
 
         // Friction / Deceleration (simulate ground/air drag)
         let friction = if self.on_ground { 0.6 } else { 0.9 };
@@ -611,9 +611,17 @@ impl Entity {
         self.velocity.z *= friction;
     }
 
-    fn physics_region_unloaded(&self, chunk_manager: &ChunkManager, dt: f32) -> bool {
+    /// Convenience for tests / callers that still hold a full `ChunkManager`.
+    pub fn update_physics_in(&mut self, dt: f32, chunk_manager: &ChunkManager) {
+        let cx = (self.position.x / 16.0).floor() as i32;
+        let cz = (self.position.z / 16.0).floor() as i32;
+        let neighborhood = chunk_manager.column_neighborhood_view(cx, cz);
+        self.update_physics(dt, &neighborhood);
+    }
+
+    fn physics_region_unloaded(&self, neighborhood: &ColumnNeighborhood<'_>, dt: f32) -> bool {
         let current = self.get_aabb();
-        if aabb_touches_unloaded_column(chunk_manager, &current) {
+        if aabb_touches_unloaded_column(neighborhood, &current) {
             return true;
         }
         let gravity = if self.entity_type == EntityType::Chicken && self.velocity.y < 0.0 {
@@ -626,42 +634,42 @@ impl Entity {
         let mut predicted = current;
         predicted.min += vel * dt;
         predicted.max += vel * dt;
-        aabb_touches_unloaded_column(chunk_manager, &predicted)
+        aabb_touches_unloaded_column(neighborhood, &predicted)
     }
 
-    fn dropped_item_support_holds(&self, chunk_manager: &ChunkManager) -> bool {
+    fn dropped_item_support_holds(&self, neighborhood: &ColumnNeighborhood<'_>) -> bool {
         let x = self.position.x.floor() as i32;
         let z = self.position.z.floor() as i32;
         let below_y = (self.position.y - 0.001).floor() as i32;
         let occupy_y = self.position.y.floor() as i32;
-        let below = chunk_manager.get_block(x, below_y, z);
+        let below = neighborhood.get_block(x, below_y, z);
         if !below.properties().is_solid {
             return false;
         }
-        let occupying = chunk_manager.get_block(x, occupy_y, z);
+        let occupying = neighborhood.get_block(x, occupy_y, z);
         occupying.properties().is_passable || !occupying.properties().is_solid
     }
 
-    fn resolve_collisions(&mut self, chunk_manager: &ChunkManager, axis: usize) {
+    fn resolve_collisions(&mut self, neighborhood: &ColumnNeighborhood<'_>, axis: usize) {
         crate::physics::resolve_axis_box_collision(
             &mut self.position,
             &mut self.velocity,
             self.size,
             &mut self.on_ground,
-            chunk_manager,
+            neighborhood,
             axis,
         );
     }
 }
 
-fn aabb_touches_unloaded_column(chunk_manager: &ChunkManager, aabb: &AABB) -> bool {
+fn aabb_touches_unloaded_column(neighborhood: &ColumnNeighborhood<'_>, aabb: &AABB) -> bool {
     let min_x = aabb.min.x.floor() as i32;
     let max_x = aabb.max.x.floor() as i32;
     let min_z = aabb.min.z.floor() as i32;
     let max_z = aabb.max.z.floor() as i32;
     for x in min_x..=max_x {
         for z in min_z..=max_z {
-            if !chunk_manager.is_block_loaded(x, 0, z) {
+            if !neighborhood.is_block_loaded(x, 0, z) {
                 return true;
             }
         }
@@ -1205,7 +1213,7 @@ mod tests {
         let mut chicken = Entity::new(1, EntityType::Chicken, Vec3::new(0.5, 10.0, 0.5));
         chicken.velocity.y = -10.0;
         let chunk_manager = loaded_air_column();
-        chicken.update_physics(0.1, &chunk_manager);
+        chicken.update_physics_in(0.1, &chunk_manager);
         assert!(chicken.velocity.y >= -2.01 && chicken.velocity.y <= -1.99);
     }
 
@@ -1223,7 +1231,7 @@ mod tests {
         item.dropped_item = Some(crate::inventory::Item::Stone);
         let chunk_manager = loaded_air_column();
         // Loaded air column; gravity should pull it down.
-        item.update_physics(0.5, &chunk_manager);
+        item.update_physics_in(0.5, &chunk_manager);
         assert!(
             item.velocity.y < 0.0,
             "dropped item should be falling under gravity"
@@ -1252,7 +1260,7 @@ mod tests {
         item.dropped_item = Some(crate::inventory::Item::Stone);
         // Simulate several physics steps so the item falls onto the floor.
         for _ in 0..400 {
-            item.update_physics(0.05, &chunk_manager);
+            item.update_physics_in(0.05, &chunk_manager);
         }
         assert!(
             item.on_ground,
@@ -1282,7 +1290,7 @@ mod tests {
         let mut item = Entity::new(5, EntityType::DroppedItem, Vec3::new(0.5, -8.0, 0.5));
         item.dropped_item = Some(crate::inventory::Item::Stone);
         for _ in 0..400 {
-            item.update_physics(0.05, &chunk_manager);
+            item.update_physics_in(0.05, &chunk_manager);
         }
         assert!(
             item.on_ground,
@@ -1311,21 +1319,21 @@ mod tests {
         item.dropped_item = Some(crate::inventory::Item::Stone);
         item.pickup_cooldown = 0.4;
         for _ in 0..400 {
-            item.update_physics(0.05, &chunk_manager);
+            item.update_physics_in(0.05, &chunk_manager);
         }
         assert!(item.on_ground);
         item.velocity = Vec3::ZERO;
         let rest = item.position;
         item.pickup_cooldown = 0.4;
         for _ in 0..8 {
-            item.update_physics(0.05, &chunk_manager);
+            item.update_physics_in(0.05, &chunk_manager);
         }
         assert_eq!(item.position, rest);
         assert!(item.on_ground);
         assert!((item.pickup_cooldown - 0.0).abs() < 1e-4);
 
         item.velocity = Vec3::new(4.0, 0.0, 0.0);
-        item.update_physics(0.05, &chunk_manager);
+        item.update_physics_in(0.05, &chunk_manager);
         assert!(
             item.position.x > rest.x,
             "an external push must resume dropped-item physics"
@@ -1342,7 +1350,7 @@ mod tests {
                 }
             }
         }
-        falling.update_physics(0.05, &chunk_manager);
+        falling.update_physics_in(0.05, &chunk_manager);
         assert!(
             falling.position.y < rest.y,
             "removing the support block must resume falling"
@@ -1358,7 +1366,7 @@ mod tests {
         item.dropped_item = Some(crate::inventory::Item::Stone);
         item.velocity = Vec3::new(0.0, -8.0, 0.0);
         let start = item.position;
-        item.update_physics(0.05, &chunk_manager);
+        item.update_physics_in(0.05, &chunk_manager);
         assert_eq!(
             item.position, start,
             "unloaded column must freeze the entity instead of falling through air"
@@ -1372,7 +1380,7 @@ mod tests {
         let mut item = Entity::new(4, EntityType::DroppedItem, Vec3::new(0.5, 20.0, 0.5));
         item.pickup_cooldown = 0.5;
         let chunk_manager = loaded_air_column();
-        item.update_physics(0.3, &chunk_manager);
+        item.update_physics_in(0.3, &chunk_manager);
         assert!(
             (item.pickup_cooldown - 0.2).abs() < 1e-4,
             "pickup cooldown should decrement by dt"

@@ -381,19 +381,35 @@ fn is_connectable(neighbor: BlockType, self_type: BlockType) -> bool {
 }
 
 /// Computes local connection flags `(north, south, west, east)` for fences/walls/panes.
-pub fn get_connections(
+pub fn get_connections_sampled(
     self_type: BlockType,
     (x, y, z): (i32, i32, i32),
-    chunk_manager: Option<&ChunkManager>,
+    sample: Option<&dyn Fn(i32, i32, i32) -> BlockType>,
 ) -> (bool, bool, bool, bool) {
-    if let Some(cm) = chunk_manager {
-        let n = is_connectable(cm.get_block(x, y, z - 1), self_type);
-        let s = is_connectable(cm.get_block(x, y, z + 1), self_type);
-        let w = is_connectable(cm.get_block(x - 1, y, z), self_type);
-        let e = is_connectable(cm.get_block(x + 1, y, z), self_type);
+    if let Some(sample) = sample {
+        let n = is_connectable(sample(x, y, z - 1), self_type);
+        let s = is_connectable(sample(x, y, z + 1), self_type);
+        let w = is_connectable(sample(x - 1, y, z), self_type);
+        let e = is_connectable(sample(x + 1, y, z), self_type);
         (n, s, w, e)
     } else {
         (true, true, true, true)
+    }
+}
+
+/// Computes local connection flags `(north, south, west, east)` for fences/walls/panes.
+pub fn get_connections(
+    self_type: BlockType,
+    pos: (i32, i32, i32),
+    chunk_manager: Option<&ChunkManager>,
+) -> (bool, bool, bool, bool) {
+    match chunk_manager {
+        Some(cm) => get_connections_sampled(
+            self_type,
+            pos,
+            Some(&|x, y, z| cm.get_block(x, y, z)),
+        ),
+        None => get_connections_sampled(self_type, pos, None),
     }
 }
 
@@ -407,6 +423,21 @@ pub fn block_collision_shape(
     state_raw: u8,
     pos: (i32, i32, i32),
     chunk_manager: Option<&ChunkManager>,
+) -> VoxelShape {
+    match chunk_manager {
+        Some(cm) => {
+            block_collision_shape_sampled(block, state_raw, pos, Some(&|x, y, z| cm.get_block(x, y, z)))
+        }
+        None => block_collision_shape_sampled(block, state_raw, pos, None),
+    }
+}
+
+/// Physical collision shape with an arbitrary neighbor sampler (3×3 neighborhood).
+pub fn block_collision_shape_sampled(
+    block: BlockType,
+    state_raw: u8,
+    pos: (i32, i32, i32),
+    sample: Option<&dyn Fn(i32, i32, i32) -> BlockType>,
 ) -> VoxelShape {
     let (fx, fy, fz) = (pos.0 as f32, pos.1 as f32, pos.2 as f32);
 
@@ -508,7 +539,7 @@ pub fn block_collision_shape(
         }
 
         BlockType::OakFence => {
-            let (n, s, w, e) = get_connections(block, pos, chunk_manager);
+            let (n, s, w, e) = get_connections_sampled(block, pos, sample);
             fence_shape_connected(n, s, w, e)
         }
 
@@ -522,12 +553,12 @@ pub fn block_collision_shape(
         }
 
         BlockType::CobblestoneWall => {
-            let (n, s, w, e) = get_connections(block, pos, chunk_manager);
+            let (n, s, w, e) = get_connections_sampled(block, pos, sample);
             wall_shape_connected(n, s, w, e)
         }
 
         BlockType::GlassPane => {
-            let (n, s, w, e) = get_connections(block, pos, chunk_manager);
+            let (n, s, w, e) = get_connections_sampled(block, pos, sample);
             pane_shape_connected(n, s, w, e)
         }
 

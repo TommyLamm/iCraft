@@ -111,6 +111,9 @@ pub struct AuthorityCore {
     pub(crate) pending_worldgen: Vec<PendingWorldgenColumn>,
     /// Mode applied to newly created dimensions.
     pub(crate) worldgen_mode: WorldgenMode,
+    /// Chunk / entity counts accumulated while walking worlds in the last tick.
+    pub(crate) last_tick_loaded_chunks: usize,
+    pub(crate) last_tick_entities: usize,
 }
 
 pub struct PendingWorldgenColumn {
@@ -149,6 +152,8 @@ impl AuthorityCore {
             next_authority_entity_id: AUTHORITY_ENTITY_ID_START,
             pending_worldgen: Vec::new(),
             worldgen_mode: WorldgenMode::Sync,
+            last_tick_loaded_chunks: 0,
+            last_tick_entities: 0,
         }
     }
 
@@ -247,6 +252,16 @@ impl AuthorityCore {
             .insert(target, Self::new_world(self.config, target, mode));
     }
 
+    /// Resident column / entity totals without allocating a dimension Vec.
+    pub fn resident_metrics(&self) -> (usize, usize) {
+        self.worlds.values().fold((0, 0), |(chunks, entities), world| {
+            (
+                chunks.saturating_add(world.chunks.chunks.len()),
+                entities.saturating_add(world.entities.entities.len()),
+            )
+        })
+    }
+
     /// Read a loaded dimension. Prefer this over any ambient "active world".
     pub fn world_ref(&self, dimension: Dimension) -> Option<&ServerWorld> {
         self.worlds.get(&dimension)
@@ -319,20 +334,45 @@ impl AuthorityCore {
         });
     }
 
-    pub(crate) fn next_unique_entity_id(&self) -> u64 {
+    /// Allocate the next global authority entity id. Trusts the monotonic
+    /// counter; only probes the target dimension and optional session hook.
+    /// Full multi-world / multi-session scans are debug-only asserts.
+    pub(crate) fn next_unique_entity_id(
+        &self,
+        dimension: Dimension,
+        owner: Option<PlayerId>,
+    ) -> u64 {
         let mut candidate = self.next_authority_entity_id.max(AUTHORITY_ENTITY_ID_START);
         loop {
+            if candidate == 0 {
+                candidate = AUTHORITY_ENTITY_ID_START;
+                continue;
+            }
             let entity_exists = self
                 .worlds
-                .values()
-                .any(|world| world.entities.get_by_id(candidate).is_some());
-            let hook_exists = self.sessions.values().any(|session| {
-                session
-                    .gameplay
-                    .fishing_hook
-                    .is_some_and(|hook| hook.entity_id == candidate)
-            });
-            if candidate != 0 && !entity_exists && !hook_exists {
+                .get(&dimension)
+                .is_some_and(|world| world.entities.get_by_id(candidate).is_some());
+            let hook_exists = owner
+                .and_then(|id| self.sessions.get(&id))
+                .and_then(|session| session.gameplay.fishing_hook)
+                .is_some_and(|hook| hook.entity_id == candidate);
+            debug_assert!(
+                {
+                    let full_entity = self
+                        .worlds
+                        .values()
+                        .any(|world| world.entities.get_by_id(candidate).is_some());
+                    let full_hook = self.sessions.values().any(|session| {
+                        session
+                            .gameplay
+                            .fishing_hook
+                            .is_some_and(|hook| hook.entity_id == candidate)
+                    });
+                    (entity_exists || hook_exists) == (full_entity || full_hook)
+                },
+                "monotonic entity id collided outside target world/session"
+            );
+            if !entity_exists && !hook_exists {
                 return candidate;
             }
             candidate = candidate.wrapping_add(1).max(AUTHORITY_ENTITY_ID_START);

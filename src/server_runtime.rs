@@ -11,8 +11,8 @@ use crate::authority::contract::{
     SESSION_INVENTORY_SLOTS,
 };
 use crate::authority::interest::{
-    capped_spawn_residency, residency_hysteresis_chunks, ChunkCoord, InterestKind, InterestSet,
-    RoutedInterestUpdate,
+    capped_spawn_residency, residency_hysteresis_chunks, union_simulation_chunks, ChunkCoord,
+    InterestKind, InterestSet, RoutedInterestUpdate,
 };
 use crate::authority::{AuthorityConfig, AuthorityCore};
 use crate::dimension::Dimension;
@@ -33,7 +33,7 @@ use crate::save::{
 use glam::Vec3;
 #[cfg(test)]
 use std::cell::Cell;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -799,6 +799,22 @@ pub struct ServerRuntime {
     pub(super) save_flushed: bool,
     worldgen_worker: worldgen_worker::WorldgenWorker,
     save_worker: Option<save_worker::SaveWorker>,
+    /// Cached per-dimension simulation union from interest HashSets.
+    simulation_union_cache: BTreeMap<Dimension, CachedSimulationUnion>,
+    /// Cached residency keep-sets; short-circuit eviction when covered.
+    residency_keep_cache: BTreeMap<Dimension, CachedResidencyKeep>,
+}
+
+struct CachedSimulationUnion {
+    fingerprint: Vec<(u64, Option<crate::authority::interest::InterestChunkAnchor>)>,
+    chunks: BTreeSet<(i32, i32)>,
+}
+
+struct CachedResidencyKeep {
+    fingerprint: Vec<(u64, Option<crate::authority::interest::InterestChunkAnchor>, u8)>,
+    keep: BTreeSet<(i32, i32)>,
+    /// `ChunkManager::load_generation` when every resident was inside `keep`.
+    covered_generation: Option<u64>,
 }
 
 impl ServerRuntime {
@@ -921,6 +937,8 @@ impl ServerRuntime {
             save_flushed: false,
             worldgen_worker: worldgen_worker::WorldgenWorker::new(),
             save_worker: Some(save_worker::SaveWorker::spawn(SaveManager::new(&world_dir))),
+            simulation_union_cache: BTreeMap::new(),
+            residency_keep_cache: BTreeMap::new(),
         };
         runtime.restore_authority_state()?;
         runtime.ensure_spawn_chunk();
@@ -984,7 +1002,8 @@ impl ServerRuntime {
             processed += 1;
             self.handle_event(event)?;
         }
-        let snapshot = self.authority.tick();
+        let simulation_unions = self.cached_simulation_unions();
+        let snapshot = self.authority.tick_with_simulation_unions(&simulation_unions);
         for transfer in self.authority.take_pending_dimension_transfers() {
             self.apply_authority_dimension_transfer(transfer);
         }
@@ -996,18 +1015,12 @@ impl ServerRuntime {
         self.level.time = snapshot.tick;
         self.metrics.ticks = self.metrics.ticks.wrapping_add(1);
         self.metrics.players_online = self.players.len();
-        self.metrics.loaded_chunks = self
-            .authority
-            .dimensions()
-            .filter_map(|dimension| self.authority.world_ref(dimension))
-            .map(|world| world.chunks.chunks.len())
-            .sum();
-        self.metrics.entities = self
-            .authority
-            .dimensions()
-            .filter_map(|dimension| self.authority.world_ref(dimension))
-            .map(|world| world.entities.entities.len())
-            .sum();
+        // Tick walk already counted residents; refresh after eviction so the
+        // published counters match the post-evict map without a second
+        // `dimensions()` Vec allocation.
+        let (loaded_chunks, entities) = self.authority.resident_metrics();
+        self.metrics.loaded_chunks = loaded_chunks;
+        self.metrics.entities = entities;
         if self.metrics.ticks % AUTOSAVE_INTERVAL_TICKS == 0 {
             if let Err(_error) = self.save_all_async() {
                 self.metrics.autosave_failures = self.metrics.autosave_failures.saturating_add(1);
@@ -1022,6 +1035,8 @@ impl ServerRuntime {
             .max(self.metrics.last_tick_time_us);
         self.sync_network_metrics();
         if elapsed > TICK_INTERVAL {
+            // Over-budget is recorded only in timing counters — no stderr I/O
+            // on the tick thread when already late.
             self.metrics.tick_over_budget = self.metrics.tick_over_budget.saturating_add(1);
         }
         Ok(RuntimeTickOutput {
@@ -1573,7 +1588,88 @@ impl ServerRuntime {
             .is_some_and(|world| world.valid_coordinate(x, y, z))
     }
 
-    fn residency_keep_set(&self, dimension: Dimension) -> BTreeSet<(i32, i32)> {
+    fn simulation_union_fingerprint(
+        &self,
+        dimension: Dimension,
+    ) -> Vec<(u64, Option<crate::authority::interest::InterestChunkAnchor>)> {
+        let mut fingerprint: Vec<_> = self
+            .players
+            .iter()
+            .filter(|(_, session)| session.interest.dimension == dimension)
+            .map(|(id, session)| (*id, session.interest.current_chunk_anchor()))
+            .collect();
+        fingerprint.sort_unstable();
+        fingerprint
+    }
+
+    fn cached_simulation_unions(&mut self) -> BTreeMap<Dimension, BTreeSet<(i32, i32)>> {
+        let dimensions: Vec<_> = self.authority.dimensions().collect();
+        let mut unions = BTreeMap::new();
+        for dimension in dimensions {
+            let fingerprint = self.simulation_union_fingerprint(dimension);
+            let reuse = self
+                .simulation_union_cache
+                .get(&dimension)
+                .is_some_and(|cached| cached.fingerprint == fingerprint);
+            if !reuse {
+                let sets: Vec<&InterestSet> = self
+                    .players
+                    .values()
+                    .filter(|session| session.interest.dimension == dimension)
+                    .map(|session| &session.interest)
+                    .collect();
+                let chunks = union_simulation_chunks(sets);
+                self.simulation_union_cache.insert(
+                    dimension,
+                    CachedSimulationUnion {
+                        fingerprint,
+                        chunks: chunks.clone(),
+                    },
+                );
+                unions.insert(dimension, chunks);
+            } else if let Some(cached) = self.simulation_union_cache.get(&dimension) {
+                unions.insert(dimension, cached.chunks.clone());
+            }
+        }
+        unions
+    }
+
+    fn residency_keep_fingerprint(
+        &self,
+        dimension: Dimension,
+    ) -> Vec<(u64, Option<crate::authority::interest::InterestChunkAnchor>, u8)> {
+        let mut fingerprint: Vec<_> = self
+            .players
+            .iter()
+            .filter(|(_, session)| session.interest.dimension == dimension)
+            .map(|(id, session)| {
+                (
+                    *id,
+                    session.interest.current_chunk_anchor(),
+                    session.interest.view_distance,
+                )
+            })
+            .collect();
+        fingerprint.sort_unstable();
+        fingerprint
+    }
+
+    fn residency_keep_set(&mut self, dimension: Dimension) -> (BTreeSet<(i32, i32)>, bool) {
+        let fingerprint = self.residency_keep_fingerprint(dimension);
+        let load_generation = self
+            .authority
+            .world_ref(dimension)
+            .map(|world| world.chunks.load_generation())
+            .unwrap_or(0);
+        if let Some(cached) = self.residency_keep_cache.get(&dimension) {
+            if cached.fingerprint == fingerprint {
+                let covered = cached
+                    .covered_generation
+                    .is_some_and(|generation| generation == load_generation);
+                return (cached.keep.clone(), covered);
+            }
+        }
+
         let mut keep = BTreeSet::new();
         let mut any_session = false;
         for session in self.players.values() {
@@ -1594,13 +1690,30 @@ impl ServerRuntime {
                 self.level.spawn_z,
             ));
         }
-        keep
+        self.residency_keep_cache.insert(
+            dimension,
+            CachedResidencyKeep {
+                fingerprint,
+                keep: keep.clone(),
+                covered_generation: None,
+            },
+        );
+        (keep, false)
+    }
+
+    fn mark_residency_covered(&mut self, dimension: Dimension, generation: u64) {
+        if let Some(cached) = self.residency_keep_cache.get_mut(&dimension) {
+            cached.covered_generation = Some(generation);
+        }
     }
 
     fn evict_uninteresting_chunks(&mut self) {
         let dimensions: Vec<_> = self.authority.dimensions().collect();
         for dimension in dimensions {
-            let keep = self.residency_keep_set(dimension);
+            let (keep, fully_covered) = self.residency_keep_set(dimension);
+            if fully_covered {
+                continue;
+            }
             let mut pending = Vec::new();
             self.authority.with_world(dimension, |world| {
                 let mut unkept_dirty: Vec<_> = world
@@ -1637,6 +1750,8 @@ impl ServerRuntime {
                 }
             }
             let save_manager = &mut self.save_manager;
+            let mut generation_after = 0u64;
+            let mut any_unkept = false;
             self.authority.with_world(dimension, |world| {
                 world.evict_unkept_chunks(&keep, |cx, cz, data| {
                     save_manager
@@ -1647,7 +1762,14 @@ impl ServerRuntime {
                             io_error
                         })
                 });
+                any_unkept = world.chunks.chunks.keys().any(|key| !keep.contains(key));
+                generation_after = world.chunks.load_generation();
             });
+            // Only short-circuit future ticks when every resident is inside keep.
+            // Dirty columns that refused to flush must be retried next tick.
+            if flush_error.is_none() && !any_unkept {
+                self.mark_residency_covered(dimension, generation_after);
+            }
             if let Some(error) = flush_error {
                 self.metrics.evict_flush_failures =
                     self.metrics.evict_flush_failures.saturating_add(1);

@@ -265,22 +265,36 @@ which `ServerWorld` applies; durable writes stay on `ServerRuntime`.
 1. Drain save-worker acks (clear dirty only after successful persist).
 2. Schedule pending async worldgen and collect completed Rayon results.
 3. Drain at most the bounded inbound budget.
-4. `AuthorityCore::tick` applies up to `MAX_INITIAL_CHUNK_PROJECTIONS_PER_TICK`
+4. Build per-dimension simulation unions from cached interest
+   `simulation_chunks` (rebuilt only when a session's chunk anchor changes),
+   then `AuthorityCore::tick` applies up to `MAX_INITIAL_CHUNK_PROJECTIONS_PER_TICK`
    completed columns (session-id / nearest-first), then every loaded dimension
    (session domains, mining, portals, then world time/redstone/hoppers/fluids/
    random ticks/furnaces/spawning/entities; then deferred dispenser/dropper
-   actions).
+   actions). `ServerWorld::tick` takes the interest union as `&BTreeSet` and
+   returns `Vec<WorldMutation>` (dispenser actions stay on the pending queue);
+   plate occupants rebuild their column key only when a player crosses a chunk.
 5. Apply dimension transfers, route snapshots by interest, evict uninteresting
-   columns, close invalid containers, update metrics, enqueue autosave every
-   6,000 ticks (failures increment metrics; shutdown / console `save-all`
-   still block on a save-worker barrier).
+   columns (residency keep-set is cached until anchors/distances change; when
+   every resident is inside keep and `load_generation` is unchanged, eviction
+   is an O(1) skip), close invalid containers, update metrics from the walked
+   worlds (refreshed after eviction), enqueue autosave every 6,000 ticks
+   (failures increment metrics; shutdown / console `save-all` still block on a
+   save-worker barrier). Over-budget ticks only bump timing counters — no
+   tick-thread `eprintln!`.
   `ServerWorld::checksum` is computed only by `AuthorityCore` after pending
-  redstone dispense mutations are folded in; `ServerWorld::tick` leaves
-  snapshot `checksum` at 0. The hash mixes a running XOR of block-revision
-  fingerprints (updated on mutation/evict) plus a cached sorted-entity
-  fingerprint. Idle ticks skip the resident-map scan and, when there is no
-  entity spawn / despawn / pose / `ai_phase` change, reuse the prior entity
-  fingerprint instead of sorting and re-hashing the full table.
+  redstone dispense mutations are folded in. The hash mixes a running XOR of
+  block-revision fingerprints (updated on mutation/evict) plus a cached
+  sorted-entity fingerprint. Idle ticks skip the resident-map scan and, when
+  there is no entity spawn / despawn / pose / `ai_phase` change, reuse the
+  prior entity fingerprint instead of sorting and re-hashing the full table.
+  Entity physics samples a 3×3 `ColumnNeighborhood` (same halo pattern as
+  lighting/mesh) instead of per-voxel `chunks.get`. Movable entities run
+  `update_physics` in parallel via Rayon over read-only chunk refs; collected
+  `moved_ids` are sorted before `sync_entity_positions`. Redstone / fluid /
+  random tick stay sequential. Authority entity ids trust the monotonic
+  counter and only probe the target world plus the optional owner fishing
+  hook (`debug_assert` keeps the old full scan).
 
 Worldgen for interest projection is off the tick thread: `ensure_chunk` in
 `WorldgenMode::Async` only registers demand; Rayon workers generate; results

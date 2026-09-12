@@ -373,7 +373,7 @@ pub fn update_dimension_entities(
                 } else {
                     entity.velocity = Vec3::ZERO;
                 }
-                entity.update_physics(dt, chunks);
+                entity.update_physics_in(dt, chunks);
             }
             EntityType::Piglin | EntityType::Husk => {
                 if !is_creative {
@@ -396,7 +396,7 @@ pub fn update_dimension_entities(
                 } else {
                     entity.velocity = Vec3::ZERO;
                 }
-                entity.update_physics(dt, chunks);
+                entity.update_physics_in(dt, chunks);
             }
             EntityType::Shulker => {
                 if !is_creative
@@ -475,7 +475,7 @@ pub fn update_dimension_entities(
                     entity.velocity.x = angle.sin() * idle_speed;
                     entity.velocity.z = angle.cos() * idle_speed;
                 }
-                entity.update_physics(dt, chunks);
+                entity.update_physics_in(dt, chunks);
             }
             EntityType::EnderDragon => update_dragon(
                 entity,
@@ -495,7 +495,7 @@ pub fn update_dimension_entities(
                 &mut events,
             ),
             EntityType::WitherSkull | EntityType::DragonBreath => {
-                entity.update_physics(dt, chunks);
+                entity.update_physics_in(dt, chunks);
                 if projectile_hit(entity, chunks, player_pos, game_mode, &mut events) {
                     removed_projectiles.push(entity.id);
                 }

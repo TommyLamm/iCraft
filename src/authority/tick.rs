@@ -1,10 +1,11 @@
 use super::contract::{AuthoritySnapshot, SessionInventorySlot, WorldMutation, FIXED_TICK_HZ};
 use super::{stack_from_slot, AuthorityCore};
+use crate::authority::interest::chunks_around;
 use crate::block_entity::BlockEntity;
 use crate::dimension::Dimension;
 use crate::inventory::ItemStack;
 use crate::network::protocol::PlayerId;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 impl AuthorityCore {
     /// Execute one fixed tick for every loaded dimension. Sessions are sorted
@@ -12,11 +13,24 @@ impl AuthorityCore {
     /// mutation order do not depend on transport arrival order. Revisions are
     /// dimension-scoped; `(WorldMutation.dimension, revision)` is the stable
     /// routing/persistence identity.
+    /// Execute one fixed tick. Tests and callers without interest unions use
+    /// the empty-map fallback (session poses → `chunks_around`).
     pub fn tick(&mut self) -> AuthoritySnapshot {
+        let empty = BTreeMap::new();
+        self.tick_with_simulation_unions(&empty)
+    }
+
+    /// Execute one fixed tick using runtime-provided simulation unions.
+    pub fn tick_with_simulation_unions(
+        &mut self,
+        simulation_unions: &BTreeMap<Dimension, BTreeSet<(i32, i32)>>,
+    ) -> AuthoritySnapshot {
         self.apply_pending_worldgen(crate::server_runtime::MAX_INITIAL_CHUNK_PROJECTIONS_PER_TICK);
         self.fixed_tick = self.fixed_tick.wrapping_add(1).max(1);
         let dimensions: Vec<Dimension> = self.dimensions().collect();
         let mut mutations_by_dimension: BTreeMap<Dimension, Vec<WorldMutation>> = BTreeMap::new();
+        let mut loaded_chunks = 0usize;
+        let mut entities = 0usize;
 
         for dimension in dimensions.iter().copied() {
             self.tick_session_domains(dimension);
@@ -32,18 +46,30 @@ impl AuthorityCore {
                     })
                 })
                 .collect();
+            let simulation_chunks = simulation_unions.get(&dimension).cloned().unwrap_or_else(|| {
+                let distance = self.config.render_distance.clamp(0, 32) as u8;
+                let mut union = BTreeSet::new();
+                for (_, position, _, _) in &players {
+                    if position.iter().all(|value| value.is_finite()) {
+                        union.extend(chunks_around(*position, distance));
+                    }
+                }
+                union
+            });
             // One world_mut for tick + redstone drain; dispense needs a fresh
             // borrow so AuthorityCore can allocate global entity ids.
             let (mut world_mutations, actions) = {
                 let world = self
                     .world_mut(dimension)
                     .expect("loaded dimension missing from world map");
-                let world_snapshot = world.tick(&players);
+                loaded_chunks = loaded_chunks.saturating_add(world.chunks.chunks.len());
+                entities = entities.saturating_add(world.entities.entities.len());
+                let world_mutations = world.tick(&players, &simulation_chunks);
                 let actions = world.take_pending_redstone_actions();
-                (world_snapshot.mutations, actions)
+                (world_mutations, actions)
             };
             for action in actions {
-                let candidate = self.next_unique_entity_id();
+                let candidate = self.next_unique_entity_id(dimension, None);
                 let spawned = self
                     .world_mut_expect(dimension)
                     .execute_redstone_dispense(action, candidate);
@@ -54,6 +80,8 @@ impl AuthorityCore {
             world_mutations.extend(self.world_mut_expect(dimension).take_pending_mutations());
             mutations_by_dimension.insert(dimension, world_mutations);
         }
+        self.last_tick_loaded_chunks = loaded_chunks;
+        self.last_tick_entities = entities;
 
         for mutation in std::mem::take(&mut self.pending_mutations) {
             if let Some(dimension) = Dimension::from_wire(mutation.dimension) {
@@ -416,7 +444,7 @@ impl AuthorityCore {
         // and rollback keeps a failed mutation from losing a prepared drop.
         let mut entity_ids = Vec::with_capacity(drops.len());
         for _ in &drops {
-            let candidate = self.next_unique_entity_id();
+            let candidate = self.next_unique_entity_id(dimension, Some(id));
             if candidate == 0 {
                 return false;
             }

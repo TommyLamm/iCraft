@@ -74,7 +74,7 @@ fn difficulty_policy_is_observable_and_existing_hostiles_are_not_frozen_by_gamer
         let id = world
             .entities
             .spawn(EntityType::Zombie, Vec3::new(10.0, 80.0, 10.0));
-        world.tick(&[(7, [8.0, 80.0, 8.0], 0.0, 0.0)]);
+        world.tick_players(&[(7, [8.0, 80.0, 8.0], 0.0, 0.0)]);
         let entity = world
             .entities
             .get_by_id(id)
@@ -95,7 +95,7 @@ fn difficulty_policy_is_observable_and_existing_hostiles_are_not_frozen_by_gamer
     peaceful
         .entities
         .spawn(EntityType::Zombie, Vec3::new(10.0, 80.0, 10.0));
-    peaceful.tick(&[(7, [8.0, 80.0, 8.0], 0.0, 0.0)]);
+    peaceful.tick_players(&[(7, [8.0, 80.0, 8.0], 0.0, 0.0)]);
     assert!(peaceful
         .entities
         .entities

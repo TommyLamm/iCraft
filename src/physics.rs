@@ -1,4 +1,4 @@
-use crate::chunk_manager::ChunkManager;
+use crate::chunk_manager::{ChunkManager, ColumnNeighborhood};
 use crate::voxel_shape::VoxelShape;
 use crate::world::BlockType;
 use glam::Vec3;
@@ -405,12 +405,15 @@ impl PlayerPhysics {
         if self.no_clip {
             return;
         }
+        let cx = (self.position.x / 16.0).floor() as i32;
+        let cz = (self.position.z / 16.0).floor() as i32;
+        let neighborhood = chunk_manager.column_neighborhood_view(cx, cz);
         resolve_axis_box_collision(
             &mut self.position,
             &mut self.velocity,
             self.size,
             &mut self.on_ground,
-            chunk_manager,
+            &neighborhood,
             axis,
         );
     }
@@ -422,25 +425,29 @@ impl PlayerPhysics {
 
         let min_x = check_aabb.min.x.floor() as i32;
         let max_x = check_aabb.max.x.floor() as i32;
-        let height = chunk_manager.dimension.height();
+        let cx = (self.position.x / 16.0).floor() as i32;
+        let cz = (self.position.z / 16.0).floor() as i32;
+        let neighborhood = chunk_manager.column_neighborhood_view(cx, cz);
+        let height = neighborhood.height;
         let min_y =
             (check_aabb.min.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
         let max_y =
             (check_aabb.max.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
         let min_z = check_aabb.min.z.floor() as i32;
         let max_z = check_aabb.max.z.floor() as i32;
+        let sample = |x: i32, y: i32, z: i32| neighborhood.get_block(x, y, z);
 
         for x in min_x..=max_x {
             for y in min_y..=max_y {
                 for z in min_z..=max_z {
-                    let block = chunk_manager.get_block(x, y, z);
+                    let block = neighborhood.get_block(x, y, z);
                     if block.properties().is_solid {
-                        let state = chunk_manager.get_block_state(x, y, z);
-                        let shape = crate::voxel_shape::block_collision_shape(
+                        let state = neighborhood.get_block_state(x, y, z);
+                        let shape = crate::voxel_shape::block_collision_shape_sampled(
                             block,
                             state,
                             (x, y, z),
-                            Some(chunk_manager),
+                            Some(&sample),
                         );
                         if shape.intersects(&check_aabb) {
                             return true;
@@ -459,11 +466,11 @@ pub fn resolve_axis_box_collision(
     velocity: &mut Vec3,
     size: Vec3,
     on_ground: &mut bool,
-    chunk_manager: &ChunkManager,
+    neighborhood: &ColumnNeighborhood<'_>,
     axis: usize,
 ) {
     let body_aabb = AABB::new(*position + Vec3::new(0.0, size.y * 0.5, 0.0), size);
-    let height = chunk_manager.dimension.height();
+    let height = neighborhood.height;
 
     // 檢測周圍可能相交的方塊
     let min_x = body_aabb.min.x.floor() as i32;
@@ -472,18 +479,19 @@ pub fn resolve_axis_box_collision(
     let max_y = (body_aabb.max.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
     let min_z = body_aabb.min.z.floor() as i32;
     let max_z = body_aabb.max.z.floor() as i32;
+    let sample = |x: i32, y: i32, z: i32| neighborhood.get_block(x, y, z);
 
     for x in min_x..=max_x {
         for y in min_y..=max_y {
             for z in min_z..=max_z {
-                let block = chunk_manager.get_block(x, y, z);
+                let block = neighborhood.get_block(x, y, z);
                 if block.properties().is_solid {
-                    let state = chunk_manager.get_block_state(x, y, z);
-                    let shape = crate::voxel_shape::block_collision_shape(
+                    let state = neighborhood.get_block_state(x, y, z);
+                    let shape = crate::voxel_shape::block_collision_shape_sampled(
                         block,
                         state,
                         (x, y, z),
-                        Some(chunk_manager),
+                        Some(&sample),
                     );
 
                     for block_aabb in shape.iter() {

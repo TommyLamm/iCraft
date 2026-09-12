@@ -1,4 +1,5 @@
 use crate::block_entity::BlockEntity;
+use crate::dimension::WorldHeight;
 use crate::inventory::{ContainerInventory, ItemStack};
 use crate::world::{
     BlockSupportStatus, BlockType, Chunk, MeshVoxel, SectionHaloSnapshot, SectionKey, CHUNK_DEPTH,
@@ -8,6 +9,57 @@ use crate::world::{
 use std::collections::{HashMap, HashSet, VecDeque};
 
 type BlockPos = (i32, i32, i32);
+
+/// Immutable 3×3 column halo for entity physics. Built once per mover so the
+/// collision loop never does a per-voxel `chunks.get`.
+#[derive(Clone, Copy)]
+pub struct ColumnNeighborhood<'a> {
+    pub origin_cx: i32,
+    pub origin_cz: i32,
+    pub columns: [[Option<&'a Chunk>; 3]; 3],
+    pub height: WorldHeight,
+}
+
+impl<'a> ColumnNeighborhood<'a> {
+    fn column(&self, wx: i32, wz: i32) -> Option<&'a Chunk> {
+        let cx = wx.div_euclid(CHUNK_WIDTH as i32);
+        let cz = wz.div_euclid(CHUNK_DEPTH as i32);
+        let dx = cx - self.origin_cx;
+        let dz = cz - self.origin_cz;
+        if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dz) {
+            return None;
+        }
+        self.columns[(dz + 1) as usize][(dx + 1) as usize]
+    }
+
+    pub fn is_block_loaded(&self, wx: i32, _wy: i32, wz: i32) -> bool {
+        self.column(wx, wz).is_some()
+    }
+
+    pub fn get_block(&self, wx: i32, wy: i32, wz: i32) -> BlockType {
+        if !self.height.contains_y(wy) {
+            return BlockType::Air;
+        }
+        let Some(chunk) = self.column(wx, wz) else {
+            return BlockType::Air;
+        };
+        let bx = wx.rem_euclid(CHUNK_WIDTH as i32) as usize;
+        let bz = wz.rem_euclid(CHUNK_DEPTH as i32) as usize;
+        chunk.get_block_local(bx, wy, bz)
+    }
+
+    pub fn get_block_state(&self, wx: i32, wy: i32, wz: i32) -> u8 {
+        if !self.height.contains_y(wy) {
+            return 0;
+        }
+        let Some(chunk) = self.column(wx, wz) else {
+            return 0;
+        };
+        let bx = wx.rem_euclid(CHUNK_WIDTH as i32);
+        let bz = wz.rem_euclid(CHUNK_DEPTH as i32);
+        chunk.get_block_state(bx, wy, bz)
+    }
+}
 
 /// Adds every chunk whose mesh can depend on a block at the supplied world position.
 /// AO corner samples make a diagonal chunk dependent on blocks at chunk corners.
@@ -322,6 +374,16 @@ impl ChunkManager {
         std::array::from_fn(|iz| {
             std::array::from_fn(|ix| self.chunks.get(&(cx + ix as i32 - 1, cz + iz as i32 - 1)))
         })
+    }
+
+    /// Physics / entity view of [`Self::column_neighborhood`] with height metadata.
+    pub fn column_neighborhood_view(&self, cx: i32, cz: i32) -> ColumnNeighborhood<'_> {
+        ColumnNeighborhood {
+            origin_cx: cx,
+            origin_cz: cz,
+            columns: self.column_neighborhood(cx, cz),
+            height: self.dimension.height(),
+        }
     }
 
     /// Captures the complete 18^3 worker input for a section. Missing chunks
