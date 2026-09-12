@@ -48,7 +48,7 @@ smoke modules `sim_harness` / `final_acceptance` are gone.
 
 New gameplay belongs in `AuthorityCore` / `ServerWorld`. Start in the narrow
 domain module, then check projection, save, and protocol. Do not add
-cross-domain logic to `state.rs` or `server_runtime.rs`.
+cross-domain logic to `state.rs` or `server_runtime` (root + workers).
 
 ## Runtimes
 
@@ -157,7 +157,7 @@ game_mode, gameplay, and pose onto `PlayerData` for projection/save.
 TCP ingress keeps rate-limit, in-flight dedupe, a completed-request-id set
 (for forwarding retransmits to the authority cache), and a sequence watermark
 filter. It does not store `GameplayResponse` bodies. Bounds / revision /
-reach / spectator gates live in authority `preflight` (`dispatch.rs`).
+reach / spectator gates live in authority `preflight` (`dispatch/`).
 Block / combat handlers use `SessionActionView` (`Copy`) instead of cloning
 the full contract.
 
@@ -532,12 +532,12 @@ from `saves/`).
 | Area | Files |
 | --- | --- |
 | Desktop loop | `src/main.rs` (`mod accessibility` / `localization` / `advancements` / `weather`; `culling` facade), `src/app.rs`, `src/menu/` (widget screens + shared `GpuContext`), `src/state.rs`, `src/audio.rs` |
-| Presentation (desktop-only) | `src/presentation/` — `embedded_runtime.rs`, `network_event.rs`, `frame.rs` are `#[path]` children of `state`. `visibility.rs` (section visibility BFS only; entity LOS worker removed) is loaded via `main.rs`. `gpu_frame_resources` / `presentation_click` are `mod` in `main.rs`; `microbench` is the same behind feature `microbench`. |
-| Authority | `src/authority/` (`tick.rs`, `portals.rs`, `dispatch.rs`, `combat.rs`, `contract.rs`, `fishing.rs`, `interest.rs`, `mining.rs`, `transactions.rs`) |
-| Runtime | `src/server_runtime.rs` plus `ingress.rs`, `projection.rs`, `session_sync.rs`; `src/server_world.rs`; `src/bin/icraft-server.rs` |
-| World | `src/world/` (`block.rs`, `block_table.rs`, `section.rs`, `chunk.rs`, `mesh.rs`), `src/chunk_manager.rs`, `src/dimension.rs`, `src/worldgen/`, `src/structure/` |
-| Gameplay | `src/player.rs`, `src/physics.rs`, `src/inventory/`, `src/block_entity.rs`, `src/redstone.rs`, `src/fluid.rs`, `src/world_tick.rs`, `src/entity.rs`, `src/mob.rs`, `src/passive_mob.rs`, `src/village/` (`VillagerProfession` / `TradeOffer`; POI/raid/merchant-session managers are `cfg(test)` only), `src/fishing.rs` (wire stages + authority helpers; presentation `FishingManager` is `cfg(test)` only) |
+| Presentation (desktop-only) | `src/presentation/` — `embedded_runtime.rs`, `network_event.rs`, `frame.rs`, `inventory_ui.rs`, `authority_projection.rs` are `#[path]` children of `state`; large `state` unit tests live under `presentation/tests/`. `visibility.rs` (section visibility BFS only; entity LOS worker removed) is loaded via `main.rs`. `gpu_frame_resources` / `presentation_click` are `mod` in `main.rs`; `microbench` is the same behind feature `microbench`. |
+| Authority | `src/authority/` (`tick.rs`, `portals.rs`, `dispatch/` (`block_action`, `container`, `workstation`, `combat`, `command`), `combat.rs`, `contract.rs`, `fishing.rs`, `interest.rs`, `mining.rs`, `transactions.rs`, `tests.rs`) |
+| Runtime | `src/server_runtime.rs` plus `events.rs`, `properties.rs`, `session_state.rs`, `ingress.rs`, `projection.rs`, `session_sync.rs`, `tests.rs`; `src/server_world/` (`columns`, `containers`, `mutation`, `tick`, `entities`, `tests`); `src/bin/icraft-server.rs` |
+| World | `src/world/` (`block/` types·state·table, `section.rs`, `chunk.rs`, `mesh/` halo·faces·greedy·section), `src/chunk_manager/` (`WorldColumns` / `PresentationChunks`), `src/dimension.rs`, `src/worldgen/`, `src/structure/` |
+| Gameplay | `src/player.rs`, `src/physics.rs`, `src/inventory/`, `src/block_entity.rs`, `src/redstone/` (`system`, `power`, `piston`), `src/fluid.rs`, `src/world_tick.rs`, `src/entity.rs`, `src/mob.rs`, `src/passive_mob.rs`, `src/boss/` (`dragon`, `wither`, `nether`), `src/village/` (`VillagerProfession` / `TradeOffer`; POI/raid/merchant-session managers are `cfg(test)` only), `src/fishing.rs` (wire stages + authority helpers; presentation `FishingManager` is `cfg(test)` only) |
 | Render | `src/chunk_schedule.rs`, `src/chunk_render.rs` (CPU mesh data; wgpu vertex layout lives next to desktop pipelines), `src/culling/` (`los` + `connectivity` in lib), `src/block_model.rs` (`emit_box` shared terrain box emitter; model paths derived from `BlockType` snake_case), desktop `src/mob_renderer.rs` + `src/mob_parts.rs` (table-driven `MobPart` + animator; dragon/wither/item specials), `src/hand_renderer.rs` (shares `UNIT_CUBOID_CORNERS`), `src/texture.rs` (`PACK_TILES` atlas definition with paint-on-miss), `src/shader.wgsl` |
-| Network | `src/network/` (`protocol.rs`, `transport.rs`, `server.rs`, `client.rs`, `ingress.rs`, `egress.rs`; `loopback_test.rs` is `cfg(test)` only) |
+| Network | `src/network/` (`protocol/` decode·wire_types·gameplay·packet, `transport.rs`, `server.rs` + `server_tests.rs`, `client.rs` + `client_tests.rs`, `ingress.rs`, `egress.rs`; `loopback_test.rs` is `cfg(test)` only) |
 | Save / assets | `src/save/` (`format.rs` includes `AdvancementProgressData`, `region.rs`, `player.rs`, `index.rs`), `src/resources.rs` |
 | Tests | inline `#[cfg(test)]`, `tests/` (`tests/common/tcp_harness.rs`, `authority_harness.rs`) |

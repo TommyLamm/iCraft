@@ -41,13 +41,13 @@
 
 ## 精確 acceptance
 
-- [ ] 上表每個 `#[cfg(test)] mod tests` 超過 ~500 行者搬到同名 `*/tests.rs` 或 `tests/`；生產檔不再含巨型測試模組。
-- [ ] `server_world.rs` → `server_world/{mod,columns,containers,mutation,tick,entities}.rs`；`server_runtime.rs` → 把 `ServerProperties`／`PlayerSessionState`／event 型別移到子檔；`dispatch.rs` → `dispatch/{mod,block_action,container,workstation,combat,command}.rs`。
-- [ ] `protocol.rs` → `protocol/{decode,wire_types,gameplay,packet}.rs`；`client.rs`／`server.rs` 測試移出。
-- [ ] `mesh.rs` → `mesh/{halo,faces,greedy,section}.rs`；`block.rs` → `block/{types,state,table}.rs`；`redstone.rs` → `redstone/{system,power,piston}.rs`；`boss.rs` → `boss/{dragon,wither,nether}.rs`。
-- [ ] `state.rs`：`SlotType` + layout + slot get／set 移 `presentation/inventory_ui.rs`（無 wgpu）；`State::new` 的 GPU 半段移 `bootstrap.rs`；authority 投影區移 `presentation/authority_projection.rs`；inline 測試移 `presentation/tests/`。
-- [ ] `pub use` 保持對外路徑不變（`use crate::server_world::ServerWorld` 等仍成立）。
-- [ ] `git diff --stat` 顯示幾乎全是移動；`cargo test` 數量不變。
+- [x] 上表每個 `#[cfg(test)] mod tests` 超過 ~500 行者搬到同名 `*/tests.rs` 或 `tests/`；生產檔不再含巨型測試模組。
+- [x] `server_world.rs` → `server_world/{mod,columns,containers,mutation,tick,entities}.rs`；`server_runtime.rs` → 把 `ServerProperties`／`PlayerSessionState`／event 型別移到子檔；`dispatch.rs` → `dispatch/{mod,block_action,container,workstation,combat,command}.rs`。
+- [x] `protocol.rs` → `protocol/{decode,wire_types,gameplay,packet}.rs`；`client.rs`／`server.rs` 測試移出。
+- [x] `mesh.rs` → `mesh/{halo,faces,greedy,section}.rs`；`block.rs` → `block/{types,state,table}.rs`；`redstone.rs` → `redstone/{system,power,piston}.rs`；`boss.rs` → `boss/{dragon,wither,nether}.rs`。
+- [x] `state.rs`：`SlotType` + layout + slot get／set 移 `presentation/inventory_ui.rs`（無 wgpu）；`State::new` 的 GPU 半段移 `bootstrap.rs`；authority 投影區移 `presentation/authority_projection.rs`；inline 測試移 `presentation/tests/`。
+- [x] `pub use` 保持對外路徑不變（`use crate::server_world::ServerWorld` 等仍成立）。
+- [x] `git diff --stat` 顯示幾乎全是移動；`cargo test` 數量不變。
 
 ## 預計檔案與測試
 
@@ -65,3 +65,31 @@
 ## 不在本計劃
 
 - 任何行為或簽名變更。
+
+## 實作與證據
+
+### 改了什麼
+
+- 巨型 `#[cfg(test)]` 模組外移：`authority/tests.rs`、`server_world/tests.rs`、`server_runtime/tests.rs`、`network/{server,client}_tests.rs`、`protocol/tests.rs`、`redstone/tests.rs`、`boss/tests.rs`、`world/mesh/tests.rs`、`presentation/tests/*`（原 `state.rs` inline）。
+- 生產切檔（行為不變，`pub use` 維持原路徑）：
+  - `server_world/{mod,columns,containers,mutation,tick,entities}.rs`
+  - `server_runtime/{events,properties,session_state}.rs`（workers 既有）
+  - `authority/dispatch/{mod,block_action,container,workstation,combat,command}.rs`
+  - `network/protocol/{decode,wire_types,gameplay,packet}.rs`
+  - `world/mesh/{halo,faces,greedy,section}.rs`、`world/block/{types,state,table}.rs`
+  - `redstone/{system,power,piston}.rs`、`boss/{dragon,wither,nether}.rs`
+  - `presentation/inventory_ui.rs`、`authority_projection.rs`（`State::new` GPU 半段已在既有 `bootstrap.rs`）
+- `catalog.rs` 經 Plan 21 已瘦身，無需再切。
+- 順手修正 Plan 26 後仍引用 `ChunkManager` 的 narrow 整合測試（`PresentationChunks`／`WorldColumns`），否則 `--all-targets` 無法過。
+
+### 測了什麼
+
+- `cargo check --all-targets` 通過；`cargo check --bin icraft-server` 通過。
+- `cargo test --lib -- --list`：**728**（與切分前一致）；`cargo test --bin icraft -- --list`：216。
+- 窄測：`server_world::`、`redstone::`、`network::protocol::`、`authority::`、`state::remote_sync_tests` 均通過。
+
+### 留下的缺口
+
+- `presentation/frame.rs` 的 inventory／HUD encode 叢集未再拆（計劃允許一次一個叢集；本輪優先 State SlotType／投影／測試）。
+- 子模組間 `pub(super)`／`pub(crate)` 欄位加寬僅為跨檔可見性，非 API 契約變更。
+- Plan 28 測試瘦身未做。

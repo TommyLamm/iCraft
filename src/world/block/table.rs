@@ -3,7 +3,11 @@
 
 use crate::inventory::{ToolMaterial, ToolType};
 
-use super::{BlockProperties, BlockType, RenderType, SoundMaterial};
+use super::{
+    BlockProperties, BlockState, BlockSupportStatus, BlockType, RenderType, SoundMaterial,
+    BLOCK_STATE_OPEN_BIT,
+};
+use crate::redstone::Direction;
 
 /// Number of BlockType variants (Air..=Observer).
 pub const BLOCK_TYPE_COUNT: usize = BlockType::Observer as usize + 1;
@@ -1959,3 +1963,390 @@ pub static BLOCK_TABLE: [BlockDef; BLOCK_TYPE_COUNT] = [
 ];
 
 const _: () = assert!(BLOCK_TABLE.len() == BLOCK_TYPE_COUNT);
+
+impl BlockType {
+    pub fn from_u8(val: u8) -> Self {
+        if val <= BlockType::Observer as u8 {
+            let raw: Self = unsafe { std::mem::transmute(val) };
+            raw.canonicalize()
+        } else {
+            BlockType::Air
+        }
+    }
+
+    /// Wire encoding for multiplayer block sync.
+    ///
+    /// `BlockType` is `#[repr(u8)]` with explicit, stable discriminants, so the
+    /// numeric value is part of the network protocol contract. Adding a new
+    /// variant is allowed (append a new value), but never reuse an existing
+    /// wire value for a different block: older clients would misdecode it.
+    pub fn to_wire(&self) -> u32 {
+        self.canonicalize() as u32
+    }
+
+    /// Inverse of `to_wire`. Reserved holes alias to their live base type.
+    /// Returns `None` for values that do not map to a known discriminant.
+    pub fn from_wire(val: u32) -> Option<Self> {
+        if val > BlockType::Observer as u32 {
+            return None;
+        }
+        let raw: Self = unsafe { std::mem::transmute(val as u8) };
+        Some(raw.canonicalize())
+    }
+
+    /// Map a saved/wire `(block_id, state)` into the live pair.
+    ///
+    /// The 13 legacy powered/open/lit/extended/filled discriminants become the
+    /// base type with `BLOCK_STATE_OPEN_BIT` set. Live base ids keep their state
+    /// bytes unchanged (redstone torch lit = bit clear).
+    pub fn migrate_saved(block_id: u8, state: u8) -> (Self, u8) {
+        match block_id {
+            50 => (Self::RedstoneTorch, state | BLOCK_STATE_OPEN_BIT),
+            52 => (Self::Repeater, state | BLOCK_STATE_OPEN_BIT),
+            54 => (Self::Comparator, state | BLOCK_STATE_OPEN_BIT),
+            56 => (Self::StoneButton, state | BLOCK_STATE_OPEN_BIT),
+            58 => (Self::Lever, state | BLOCK_STATE_OPEN_BIT),
+            60 => (Self::PressurePlate, state | BLOCK_STATE_OPEN_BIT),
+            62 => (Self::Piston, state | BLOCK_STATE_OPEN_BIT),
+            64 => (Self::StickyPiston, state | BLOCK_STATE_OPEN_BIT),
+            66 => (Self::RedstoneLamp, state | BLOCK_STATE_OPEN_BIT),
+            68 => (Self::OakDoor, state | BLOCK_STATE_OPEN_BIT),
+            70 => (Self::OakTrapdoor, state | BLOCK_STATE_OPEN_BIT),
+            82 => (Self::EndPortalFrame, state | BLOCK_STATE_OPEN_BIT),
+            90 => (Self::Furnace, state | BLOCK_STATE_OPEN_BIT),
+            _ => (Self::from_u8(block_id), state),
+        }
+    }
+
+    /// Collapse reserved holes to their live base type.
+    pub const fn canonicalize(self) -> Self {
+        match self {
+            Self::Reserved50 => Self::RedstoneTorch,
+            Self::Reserved52 => Self::Repeater,
+            Self::Reserved54 => Self::Comparator,
+            Self::Reserved56 => Self::StoneButton,
+            Self::Reserved58 => Self::Lever,
+            Self::Reserved60 => Self::PressurePlate,
+            Self::Reserved62 => Self::Piston,
+            Self::Reserved64 => Self::StickyPiston,
+            Self::Reserved66 => Self::RedstoneLamp,
+            Self::Reserved68 => Self::OakDoor,
+            Self::Reserved70 => Self::OakTrapdoor,
+            Self::Reserved82 => Self::EndPortalFrame,
+            Self::Reserved90 => Self::Furnace,
+            other => other,
+        }
+    }
+
+    pub const fn is_reserved_hole(self) -> bool {
+        matches!(
+            self,
+            Self::Reserved50
+                | Self::Reserved52
+                | Self::Reserved54
+                | Self::Reserved56
+                | Self::Reserved58
+                | Self::Reserved60
+                | Self::Reserved62
+                | Self::Reserved64
+                | Self::Reserved66
+                | Self::Reserved68
+                | Self::Reserved70
+                | Self::Reserved82
+                | Self::Reserved90
+        )
+    }
+
+    /// State-aware light emission (lamp/furnace/torch/end-frame).
+    pub fn light_emission_for(self, state: BlockState) -> u8 {
+        match self.canonicalize() {
+            Self::RedstoneTorch => {
+                if state.is_open {
+                    0
+                } else {
+                    7
+                }
+            }
+            Self::RedstoneLamp => {
+                if state.is_open {
+                    15
+                } else {
+                    0
+                }
+            }
+            Self::Furnace => {
+                if state.is_open {
+                    13
+                } else {
+                    0
+                }
+            }
+            Self::EndPortalFrame => {
+                if state.is_open {
+                    2
+                } else {
+                    0
+                }
+            }
+            other => other.def().properties.light_emission,
+        }
+    }
+
+    /// State-aware face atlas tile (lit lamp / filled end-frame top).
+    pub fn face_tex_for(self, state: BlockState, face_idx: usize) -> (u32, u32) {
+        let face = face_idx.min(5);
+        match self.canonicalize() {
+            Self::RedstoneLamp if state.is_open => (8, 14),
+            Self::EndPortalFrame if state.is_open && face == 4 => (6, 4),
+            other => other.get_face_tex_index(face),
+        }
+    }
+
+    pub fn is_solid_for(self, state: BlockState) -> bool {
+        match self.canonicalize() {
+            Self::OakDoor | Self::OakTrapdoor => !state.is_open,
+            other => other.properties().is_solid,
+        }
+    }
+
+    pub fn is_passable_for(self, state: BlockState) -> bool {
+        match self.canonicalize() {
+            Self::OakDoor | Self::OakTrapdoor => state.is_open,
+            other => other.properties().is_passable,
+        }
+    }
+
+    /// The intentionally small Plan27 waterlogging contract.  Other blocks
+    /// retain their existing fluid semantics and must be rejected by the
+    /// authority rather than silently accepting bit 7.
+    pub const fn is_waterloggable(self) -> bool {
+        matches!(self, BlockType::OakSlab | BlockType::CobblestoneSlab)
+    }
+
+    #[inline]
+    pub fn def(self) -> &'static BlockDef {
+        &BLOCK_TABLE[self.canonicalize() as usize]
+    }
+
+    #[inline]
+    pub fn is_cross_model(self) -> bool {
+        self.def().is_cross_model
+    }
+
+    pub fn can_stay_on(self, below: BlockType) -> bool {
+        match self.canonicalize() {
+            BlockType::WheatCrop | BlockType::CarrotCrop | BlockType::PotatoCrop => {
+                below == BlockType::Farmland
+            }
+            BlockType::Dandelion | BlockType::Poppy | BlockType::TallGrass => {
+                matches!(
+                    below,
+                    BlockType::Grass | BlockType::Dirt | BlockType::Farmland
+                )
+            }
+            BlockType::SugarCane => {
+                matches!(
+                    below,
+                    BlockType::Grass | BlockType::Dirt | BlockType::Sand | BlockType::SugarCane
+                )
+            }
+            BlockType::Cactus => {
+                matches!(below, BlockType::Sand | BlockType::Cactus)
+            }
+            BlockType::SnowLayer => below.properties().is_solid,
+            BlockType::Torch
+            | BlockType::RedstoneTorch
+            | BlockType::RedstoneWire
+            | BlockType::Repeater
+            | BlockType::Comparator
+            | BlockType::PressurePlate => below.properties().is_solid,
+            _ => true,
+        }
+    }
+
+    /// Validates support using loaded world context. `None` means the queried
+    /// position belongs to a chunk whose data is not currently available.
+    ///
+    /// Existing blocks are only removed for `Unsupported`; `Unknown` preserves
+    /// them until the missing neighbor loads. New player placements require
+    /// `Supported`, so they never assume an unloaded neighbor contains water or
+    /// empty space.
+    pub fn support_status_at<F>(
+        self,
+        position: (i32, i32, i32),
+        mut get_loaded_block: F,
+    ) -> BlockSupportStatus
+    where
+        F: FnMut(i32, i32, i32) -> Option<BlockType>,
+    {
+        let (x, y, z) = position;
+
+        match self {
+            BlockType::SugarCane => {
+                if y <= 0 {
+                    return BlockSupportStatus::Unsupported;
+                }
+                let Some(below) = get_loaded_block(x, y - 1, z) else {
+                    return BlockSupportStatus::Unknown;
+                };
+                if below == BlockType::SugarCane {
+                    return BlockSupportStatus::Supported;
+                }
+                if !matches!(below, BlockType::Grass | BlockType::Dirt | BlockType::Sand) {
+                    return BlockSupportStatus::Unsupported;
+                }
+
+                let mut has_unknown_neighbor = false;
+                for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    match get_loaded_block(x + dx, y - 1, z + dz) {
+                        Some(BlockType::Water) => return BlockSupportStatus::Supported,
+                        Some(_) => {}
+                        None => has_unknown_neighbor = true,
+                    }
+                }
+                if has_unknown_neighbor {
+                    BlockSupportStatus::Unknown
+                } else {
+                    BlockSupportStatus::Unsupported
+                }
+            }
+            BlockType::Cactus => {
+                if y <= 0 {
+                    return BlockSupportStatus::Unsupported;
+                }
+                let Some(below) = get_loaded_block(x, y - 1, z) else {
+                    return BlockSupportStatus::Unknown;
+                };
+                if !matches!(below, BlockType::Sand | BlockType::Cactus) {
+                    return BlockSupportStatus::Unsupported;
+                }
+
+                let mut has_unknown_neighbor = false;
+                for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    match get_loaded_block(x + dx, y, z + dz) {
+                        Some(block) if block.properties().is_solid || block == BlockType::Lava => {
+                            return BlockSupportStatus::Unsupported;
+                        }
+                        Some(_) => {}
+                        None => has_unknown_neighbor = true,
+                    }
+                }
+                if has_unknown_neighbor {
+                    BlockSupportStatus::Unknown
+                } else {
+                    BlockSupportStatus::Supported
+                }
+            }
+            BlockType::OakDoor => {
+                if y <= 0 {
+                    BlockSupportStatus::Unsupported
+                } else {
+                    match get_loaded_block(x, y - 1, z) {
+                        Some(below) if below == BlockType::OakDoor || self.can_stay_on(below) => {
+                            BlockSupportStatus::Supported
+                        }
+                        Some(_) => BlockSupportStatus::Unsupported,
+                        None => BlockSupportStatus::Unknown,
+                    }
+                }
+            }
+            BlockType::OakLadder => {
+                let mut has_unknown = false;
+                for (dx, dz) in [(0, 1), (0, -1), (1, 0), (-1, 0)] {
+                    match get_loaded_block(x + dx, y, z + dz) {
+                        Some(b) if b.properties().is_solid => return BlockSupportStatus::Supported,
+                        Some(_) => {}
+                        None => has_unknown = true,
+                    }
+                }
+                if has_unknown {
+                    BlockSupportStatus::Unknown
+                } else {
+                    BlockSupportStatus::Unsupported
+                }
+            }
+            BlockType::OakSign => {
+                if y <= 0 {
+                    BlockSupportStatus::Unsupported
+                } else {
+                    let mut has_unknown = false;
+                    if let Some(below) = get_loaded_block(x, y - 1, z) {
+                        if below.properties().is_solid {
+                            return BlockSupportStatus::Supported;
+                        }
+                    } else {
+                        has_unknown = true;
+                    }
+                    for (dx, dz) in [(0, 1), (0, -1), (1, 0), (-1, 0)] {
+                        match get_loaded_block(x + dx, y, z + dz) {
+                            Some(b) if b.properties().is_solid => {
+                                return BlockSupportStatus::Supported
+                            }
+                            Some(_) => {}
+                            None => has_unknown = true,
+                        }
+                    }
+                    if has_unknown {
+                        BlockSupportStatus::Unknown
+                    } else {
+                        BlockSupportStatus::Unsupported
+                    }
+                }
+            }
+            BlockType::Dandelion
+            | BlockType::Poppy
+            | BlockType::TallGrass
+            | BlockType::SnowLayer
+            | BlockType::Torch
+            | BlockType::RedstoneTorch
+            | BlockType::RedstoneWire
+            | BlockType::Repeater
+            | BlockType::Comparator
+            | BlockType::PressurePlate => {
+                if y <= 0 {
+                    BlockSupportStatus::Unsupported
+                } else {
+                    match get_loaded_block(x, y - 1, z) {
+                        Some(below) if self.can_stay_on(below) => BlockSupportStatus::Supported,
+                        Some(_) => BlockSupportStatus::Unsupported,
+                        None => BlockSupportStatus::Unknown,
+                    }
+                }
+            }
+            _ => BlockSupportStatus::Supported,
+        }
+    }
+
+    #[inline]
+    pub fn sound_material(self) -> Option<SoundMaterial> {
+        self.def().sound
+    }
+
+    #[inline]
+    pub fn properties(self) -> &'static BlockProperties {
+        &self.def().properties
+    }
+
+    /// Whether this block is a full, opaque cube that casts vertex ambient occlusion.
+    pub fn is_ao_occluder(self) -> bool {
+        let properties = self.properties();
+        properties.is_solid && properties.render_type == RenderType::Opaque
+    }
+
+    #[inline]
+    pub fn get_face_tex_index(self, face_idx: usize) -> (u32, u32) {
+        self.def().face_tex[face_idx.min(5)]
+    }
+
+    #[inline]
+    pub fn preferred_tool(self) -> ToolType {
+        self.def().preferred_tool
+    }
+
+    #[inline]
+    pub fn min_harvest_material(self) -> Option<ToolMaterial> {
+        self.def().min_harvest
+    }
+
+}
+

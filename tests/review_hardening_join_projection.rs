@@ -1,4 +1,4 @@
-use icraft::chunk_manager::ChunkManager;
+use icraft::chunk_manager::PresentationChunks;
 use icraft::dimension::Dimension;
 use icraft::presentation_inventory_policy::{
     schedule_presentation_chunk_load, MultiplayerRole, PresentationChunkLoadPolicy,
@@ -23,7 +23,7 @@ fn schedule_chunk_load_does_not_insert_generated_column_for_join_client() {
         PresentationChunkLoadPolicy::AwaitAuthoritativePayload
     );
 
-    let mut manager = ChunkManager::new_in_dimension(2, Dimension::Overworld);
+    let mut manager = PresentationChunks::new(2);
     let mut generated = false;
     let loaded = schedule_presentation_chunk_load(policy, || {
         generated = true;
@@ -36,7 +36,7 @@ fn schedule_chunk_load_does_not_insert_generated_column_for_join_client() {
         )
     });
     if let Some(chunk) = loaded {
-        manager.chunks.insert((0, 0), chunk);
+        manager.insert_resident_chunk((0, 0), chunk);
     }
 
     assert!(!generated, "join client must not call worldgen");
@@ -55,7 +55,7 @@ fn chunk_data_inserts_column_matching_payload_without_prior_worldgen() {
     source.set_block_local(15, -60, 15, BlockType::Bedrock);
     let payload = icraft::save::ChunkSaveData::from_chunk(&source).expect("compress payload");
 
-    let mut manager = ChunkManager::new_in_dimension(2, Dimension::Overworld);
+    let mut manager = PresentationChunks::new(2);
     let scheduled = schedule_presentation_chunk_load(
         PresentationTopology::from(&role, false).chunk_load_policy(),
         || {

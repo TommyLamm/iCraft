@@ -8,10 +8,10 @@ fn passive_mobs_spawn_inside_signed_height_and_loaded_chunks() {
     let seed = 2_563_678_733;
     let dimension = Dimension::Overworld;
     let height = dimension.height();
-    let mut chunks = icraft::chunk_manager::ChunkManager::new_in_dimension(2, dimension);
+    let mut chunks = icraft::chunk_manager::WorldColumns::new_in_dimension(2, dimension);
     for cx in -2..=2 {
         for cz in -2..=2 {
-            chunks.chunks.insert(
+            chunks.insert_resident_chunk(
                 (cx, cz),
                 icraft::dimension::generate_chunk(dimension, cx, cz, seed),
             );

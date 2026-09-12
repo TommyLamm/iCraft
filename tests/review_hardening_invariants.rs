@@ -8,7 +8,7 @@ mod common;
 use common::tcp_harness::HeldLoopback;
 use icraft::authority::contract::{SessionContract, SessionGameplayState, SessionInventorySlot};
 use icraft::authority::{AuthorityConfig, AuthorityCore};
-use icraft::chunk_manager::ChunkManager;
+use icraft::chunk_manager::{PresentationChunks, WorldColumns};
 use icraft::dimension::Dimension;
 use icraft::entity::EntityType;
 use icraft::inventory::{Item, ItemStack};
@@ -340,14 +340,14 @@ fn stale_block_place_does_not_consume_held_stack_or_create_drops() {
 /// Join-client presentation sink: apply only revision-gated projections.
 /// Never constructs `AuthorityCore` / `ServerWorld`.
 struct HeadlessJoinSink {
-    chunks: ChunkManager,
+    chunks: PresentationChunks,
     applied: HashMap<(u8, i32, i32), u64>,
 }
 
 impl HeadlessJoinSink {
     fn new() -> Self {
         Self {
-            chunks: ChunkManager::new_in_dimension(2, Dimension::Overworld),
+            chunks: PresentationChunks::new(2),
             applied: HashMap::new(),
         }
     }
@@ -388,7 +388,7 @@ impl HeadlessJoinSink {
         match self.applied.get_mut(&key) {
             Some(current) if revision > *current => {
                 *current = revision;
-                self.chunks.set_block(x, y, z, block);
+                self.chunks.apply_presentation_cell(x, y, z, block, 0, 0);
             }
             _ => {}
         }
