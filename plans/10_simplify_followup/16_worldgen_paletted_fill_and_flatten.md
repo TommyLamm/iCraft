@@ -68,11 +68,11 @@
 
 ### 測了什麼
 
-- `cargo test --lib -- worldgen:: dimension:: world::chunk:: flatten_soa ore:: feature::`（47 passed）
-- `cargo test --lib world::section::`（10 passed）
+- `cargo test --lib -- worldgen:: dimension:: world::section:: world::chunk:: flatten_soa ore:: feature::`（58 passed）
+- `cargo test --lib world::section::`（10 passed，含於上列）
 - `dimension::tests::fixed_seed_column_fingerprints_are_stable`（OW／Nether／End／Superflat 固定 seed 指紋）
-- `tests/review_hardening_chunk_restore.rs`（見 commit 前最終跑）
-- `cargo check --all-targets`／`cargo check --bin icraft-server`（見 commit 前最終跑）
+- `tests/review_hardening_chunk_restore.rs`（5 passed）
+- `cargo check --all-targets`／`cargo check --bin icraft-server`（通過）
 
 ### 留下的缺口
 
