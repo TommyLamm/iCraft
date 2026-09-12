@@ -134,12 +134,12 @@ fn embedded_response(
     output
         .presentation_events
         .iter()
-        .find_map(|event| match event {
-            ProjectionEvent {
+        .find_map(|event| match event.as_packet_event() {
+            Some(ProjectionEvent {
                 dest: ProjectionDest::Session(event_target),
                 packet: Packet::GameplayResponse { response, .. },
                 ..
-            } if *event_target == target && response.request_id == request_id => {
+            }) if *event_target == target && response.request_id == request_id => {
                 Some(response.clone())
             }
             _ => None,
@@ -190,22 +190,22 @@ fn run_embedded() {
     ));
     assert!(cast_output.presentation_events.iter().any(|event| {
         matches!(
-            event,
-            ProjectionEvent {
+            event.as_packet_event(),
+            Some(ProjectionEvent {
                 dest: ProjectionDest::Session(target),
                 packet: Packet::PlayerSessionUpdate { state, .. },
                 ..
-            } if *target == EMBEDDED_OWNER && state.fishing_hook.is_some()
+            }) if *target == EMBEDDED_OWNER && state.fishing_hook.is_some()
         )
     }));
     assert!(!cast_output.presentation_events.iter().any(|event| {
         matches!(
-            event,
-            ProjectionEvent {
+            event.as_packet_event(),
+            Some(ProjectionEvent {
                 dest: ProjectionDest::Session(target),
                 packet: Packet::PlayerSessionUpdate { player_id, .. },
                 ..
-            } if *target == EMBEDDED_OBSERVER && *player_id == EMBEDDED_OWNER
+            }) if *target == EMBEDDED_OBSERVER && *player_id == EMBEDDED_OWNER
         )
     }));
 

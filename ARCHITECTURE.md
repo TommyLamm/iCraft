@@ -70,8 +70,10 @@ All server paths -> AuthorityCore -> BTreeMap<Dimension, ServerWorld>
 - `State` is the desktop composition root: GPU, input, camera, UI, render
   caches, interpolation. It is not the world authority. Desktop `State` does
   not hold `RedstoneSystem`; live redstone ticks only in `ServerWorld`.
-  Join/embedded block facing comes from `ChunkData` / `BlockChange` /
-  block-entity projection, not client-side redstone restore.
+  Join/embedded block facing comes from projected columns / mutations /
+  block-entity events, not client-side redstone restore. Embedded columns
+  arrive as in-process `PresentationEvent::ChunkColumn(Arc<Chunk>)`; join
+  clients still decode revision-gated `ChunkData`.
 - Singleplayer and listen-host use `ServerRuntime::new_embedded`. Local and
   socket input share one bounded FIFO.
 - A join client never runs authority, worldgen, or `SaveManager`. It sends
@@ -162,7 +164,9 @@ input
   -> atomic AuthorityCore / ServerWorld mutation
   -> dimension-scoped revision + cached GameplayResponse (authority only)
   -> AuthoritySnapshot / targeted presentation event
-  -> embedded State projection or TCP client projection
+  -> embedded State: `ChunkColumn(Arc<Chunk>)` + snapshot `WorldMutation`
+     (TCP/join: `ChunkData` / `BlockChange`)
+  -> presentation apply (no `ChunkManager::set_block` fluid side effects)
 ```
 
 - Reject before mutating. A rejection must not consume inventory, spawn
@@ -374,15 +378,21 @@ close that connection; there is no decode-then-drop leftover path.
 `ServerListPing*`; after handshake the connection holds the negotiated
 version and other packets omit the field.
 
-Server→client projection is one schema end-to-end: `ServerRuntime` builds a
-wire `Packet` once inside `ProjectionEvent { dest, packet }`
-(`ProjectionDest::Session` / `Broadcast`). Embedded presentation drains the
-same `ProjectionEvent` queue and calls `handle_inbound_packet(packet)` with no
-second mirror enum. TCP listen/dedicated wraps it as `HostToServer::Project`.
+Server→client projection is one schema end-to-end for wire gameplay:
+`ServerRuntime` builds a wire `Packet` once inside
+`ProjectionEvent { dest, packet }` (`ProjectionDest::Session` /
+`Broadcast`). Embedded presentation drains `PresentationEvent`: either
+`Packet(ProjectionEvent)` (same shape as TCP) or
+`ChunkColumn { Arc<Chunk>, revision, … }` for the local session — never
+dense `ChunkData` streams or a second palette rebuild / full-column
+lighting pass. TCP listen/dedicated wraps wire events as
+`HostToServer::Project` only; `ChunkColumn` never leaves the process.
 `HostToServer` keeps only control variants
 (`DisconnectClient` / `DisconnectCatchupClient` / `Stop`). Egress classifies
 mailbox delivery (catch-up / pose / state / reliable) from the `Packet`
-variant — it is not a second payload enum. Join-client inbound is the same
+variant — it is not a second payload enum. Embedded block deltas apply once
+from snapshot `WorldMutation` (including `raw_fluid` + revision gate);
+`BlockChange` packets are TCP/join only. Join-client inbound is the same
 `Packet` after one protocol-version check: `ClientToGame` is only
 `StatusUpdate` (local connection-progress text) or `Packet`; presentation
 `NetworkInbound` is that thin type, and `NetworkStaging` / handlers classify
@@ -399,7 +409,8 @@ idempotent. Live egress for sleep / container click / close is a
 `GameplayRequest`. `Container` uses typed `ContainerAction` (Open=`0`,
 Close=`1`); unknown discriminants fail decode. Live desktop send uses pose /
 chat / disconnect / `GameplayRequest` / respawn. Server→client `BlockChange`
-projection and server→client `ContainerClose` remain. Clients do not ACK
+projection remains for TCP/join; embedded applies the same cells from
+snapshot `WorldMutation` only. Clients do not ACK
 chunks; the join-client inbound queue is 1024 events so one presentation
 tick can enqueue without ACK pacing. Deleting leftover inbound `Packet`
 variants shifts later discriminants; handshake is protocol v21.
@@ -446,9 +457,11 @@ epoch matches the last persisted watermark. Disk chunk streams use zlib level 1
 (`Compression::fast`); the wrapper is unchanged so older level-6 payloads
 still inflate. Historical save payloads still treat Y as `0..256` world Y
 and must not be reinterpreted as signed-Y. Live `ChunkData` projection
-sends uncompressed terrain streams instead of the disk `ChunkSaveData`
-envelope. Desktop world paths go through `validated_world_path` (no
-symlink escape from `saves/`).
+sends uncompressed terrain streams to TCP/join clients instead of the disk
+`ChunkSaveData` envelope. Embedded local sessions receive
+`PresentationEvent::ChunkColumn(Arc<Chunk>)` and keep authority lighting.
+Desktop world paths go through `validated_world_path` (no symlink escape
+from `saves/`).
 
 ## Code map
 

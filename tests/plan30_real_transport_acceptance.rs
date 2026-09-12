@@ -168,12 +168,12 @@ fn embedded_response(
     output
         .presentation_events
         .iter()
-        .find_map(|event| match event {
-            ProjectionEvent {
+        .find_map(|event| match event.as_packet_event() {
+            Some(ProjectionEvent {
                 dest: ProjectionDest::Session(event_target),
                 packet: Packet::GameplayResponse { response, .. },
                 ..
-            } if *event_target == target && response.request_id == request_id => {
+            }) if *event_target == target && response.request_id == request_id => {
                 Some(response.clone())
             }
             _ => None,
@@ -184,12 +184,12 @@ fn embedded_response(
 fn embedded_owner_projection(output: &RuntimeTickOutput, target: u64) -> bool {
     output.presentation_events.iter().any(|event| {
         matches!(
-            event,
-            ProjectionEvent {
+            event.as_packet_event(),
+            Some(ProjectionEvent {
                 dest: ProjectionDest::Session(event_target),
                 packet: Packet::PlayerSessionUpdate { player_id, .. },
                 ..
-            } if *event_target == target && *player_id == target
+            }) if *event_target == target && *player_id == target
         )
     })
 }

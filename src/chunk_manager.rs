@@ -711,6 +711,45 @@ impl ChunkManager {
         }
     }
 
+    /// Write a revision-gated projection cell without authority fluid side
+    /// effects. Presentation applies host payloads here; it must not enqueue
+    /// fluid neighbors or re-run world simulation on the GPU thread.
+    pub fn apply_presentation_cell(
+        &mut self,
+        wx: i32,
+        wy: i32,
+        wz: i32,
+        block: BlockType,
+        state: u8,
+        raw_fluid: u8,
+    ) -> bool {
+        let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) else {
+            return false;
+        };
+        let Some(chunk) = self.chunks.get_mut(&(cx, cz)) else {
+            return false;
+        };
+        let previous = chunk.get_block_local(bx, by, bz);
+        let previous_state = chunk.get_block_state(bx as i32, by as i32, bz as i32);
+        let previous_fluid = chunk.get_fluid_level(bx, by, bz);
+        if previous == block && previous_state == state && previous_fluid == raw_fluid {
+            return false;
+        }
+        if previous != block {
+            chunk.set_block_local(bx, by, bz, block);
+            chunk.update_heightmap(bx, bz);
+        }
+        if previous_state != state || previous != block {
+            chunk.set_block_state(bx as i32, by as i32, bz as i32, state);
+        }
+        if previous_fluid != raw_fluid {
+            chunk.set_fluid_level(bx, by, bz, raw_fluid);
+        }
+        self.dirty_chunks.mark_dirty(cx, cz);
+        self.record_mesh_invalidation(wx, wy, wz);
+        true
+    }
+
     pub fn get_sky_light(&self, wx: i32, wy: i32, wz: i32) -> u8 {
         if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
             if let Some(chunk) = self.chunks.get(&(cx, cz)) {

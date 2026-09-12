@@ -196,12 +196,12 @@ fn embedded_response(
     output
         .presentation_events
         .iter()
-        .find_map(|event| match event {
-            ProjectionEvent {
+        .find_map(|event| match event.as_packet_event() {
+            Some(ProjectionEvent {
                 dest: ProjectionDest::Session(event_target),
                 packet: Packet::GameplayResponse { response, .. },
                 ..
-            } if *event_target == target && response.request_id == request_id => {
+            }) if *event_target == target && response.request_id == request_id => {
                 Some(response.clone())
             }
             _ => None,
@@ -281,18 +281,27 @@ fn run_embedded_vector() {
             .get_block(TARGET.0, TARGET.1, TARGET.2),
         BlockType::Air
     );
-    assert!(events.iter().any(|event| {
-        matches!(
-            event,
-            ProjectionEvent {
-                dest: ProjectionDest::Session(event_target),
-                packet: Packet::BlockChange { x, y, z, block, .. },
-                ..
-            } if *event_target == OWNER_ID
-                && (*x, *y, *z) == TARGET
-                && *block == BlockType::Air.to_wire()
-        )
-    }));
+    assert!(
+        !events.iter().any(|event| {
+            matches!(
+                event.as_packet_event(),
+                Some(ProjectionEvent {
+                    dest: ProjectionDest::Session(event_target),
+                    packet: Packet::BlockChange { .. },
+                    ..
+                }) if *event_target == OWNER_ID
+            )
+        }),
+        "embedded local session must not receive BlockChange; WorldMutation applies once"
+    );
+    assert_eq!(
+        runtime
+            .authority
+            .world(Dimension::Overworld)
+            .get_block(TARGET.0, TARGET.1, TARGET.2),
+        BlockType::Air,
+        "authority still commits the break for the embedded owner"
+    );
     assert!(runtime
         .drain_routed_updates()
         .iter()

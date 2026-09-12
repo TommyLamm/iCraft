@@ -165,12 +165,12 @@ fn embedded_block_use_diamond_ore_is_unsupported_and_preserves_world() {
     let response = output
         .presentation_events
         .iter()
-        .find_map(|event| match event {
-            ProjectionEvent {
+        .find_map(|event| match event.as_packet_event() {
+            Some(ProjectionEvent {
                 dest: ProjectionDest::Session(target),
                 packet: Packet::GameplayResponse { response, .. },
                 ..
-            } if *target == OWNER_ID && response.request_id == 1 => Some(response),
+            }) if *target == OWNER_ID && response.request_id == 1 => Some(response),
             _ => None,
         })
         .expect("embedded BlockAction response");

@@ -17,6 +17,7 @@ use crate::network::server::{HostToServer, ProjectionEvent};
 use crate::save::ChunkSaveData;
 use glam::Vec3;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// Pose / health / anim signature used to skip unchanged entity state fanout.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -550,11 +551,38 @@ impl ServerRuntime {
         );
     }
 
+    /// Project an in-process column to the embedded local session without
+    /// dense terrain streams. TCP clients still use [`Self::send_chunk_projection`].
+    pub(super) fn send_embedded_chunk_column(
+        &mut self,
+        to: u64,
+        dimension: Dimension,
+        cx: i32,
+        cz: i32,
+        revision: u64,
+        chunk: Arc<crate::world::Chunk>,
+    ) {
+        debug_assert_eq!(self.local_session_id, Some(to));
+        self.push_presentation_event_raw(PresentationEvent::ChunkColumn {
+            to,
+            dimension: dimension as u8,
+            cx,
+            cz,
+            revision,
+            chunk,
+        });
+    }
+
+    /// Queue a wire-shaped projection for the embedded local session.
+    pub(super) fn push_presentation_event(&mut self, event: ProjectionEvent) -> bool {
+        self.push_presentation_event_raw(PresentationEvent::Packet(event))
+    }
+
     /// Queue an embedded-client projection without allowing replaceable state
     /// floods to evict request acknowledgements or authoritative lifecycle
     /// changes. Returns `false` only when a replaceable update is discarded or
     /// the bounded critical overflow is exhausted; both paths emit QueueFull.
-    pub(super) fn push_presentation_event(&mut self, event: ProjectionEvent) -> bool {
+    pub(super) fn push_presentation_event_raw(&mut self, event: PresentationEvent) -> bool {
         let replaceable_key = presentation_replaceable_key(&event);
         if let Some(key) = replaceable_key {
             if let Some(index) = self
@@ -674,6 +702,11 @@ impl ServerRuntime {
         let targets =
             self.queue_interest_update(dimension, revision, InterestKind::Block((x, y, z)));
         for target in targets {
+            // Embedded local session applies WorldMutation once via
+            // project_authority_mutations; BlockChange is TCP/join only.
+            if self.local_session_id == Some(target) {
+                continue;
+            }
             self.send_targeted(
                 target,
                 Packet::BlockChange {
@@ -1154,30 +1187,12 @@ impl ServerRuntime {
                     if !world.chunk_is_resident(cx, cz) {
                         return None;
                     }
-                    world.chunks.chunks.get(&(cx, cz)).and_then(|chunk| {
-                        let data = ChunkSaveData::network_terrain_payload(chunk).ok()?;
+                    world.chunks.chunks.get(&(cx, cz)).map(|chunk| {
                         let revision = world.chunk_revision(cx, cz);
-                        Some((
-                            revision,
-                            data.min_section_y,
-                            data.section_count,
-                            data.blocks,
-                            data.block_states,
-                            data.fluid_levels,
-                            data.block_entities,
-                        ))
+                        (revision, chunk.clone())
                     })
                 });
-                let Some((
-                    revision,
-                    min_section_y,
-                    section_count,
-                    blocks,
-                    block_states,
-                    fluid_levels,
-                    block_entities,
-                )) = payload
-                else {
+                let Some((revision, chunk)) = payload else {
                     if let Some(session) = self.players.get_mut(id) {
                         if session.interest.dimension == dimension
                             && session.interest.chunks.contains(&(cx, cz))
@@ -1197,19 +1212,33 @@ impl ServerRuntime {
                     revision,
                     InterestKind::Chunk((cx, cz)),
                 );
-                self.send_chunk_projection(
-                    *id,
-                    dimension,
-                    cx,
-                    cz,
-                    revision,
-                    min_section_y,
-                    section_count,
-                    blocks,
-                    block_states,
-                    fluid_levels,
-                    block_entities,
-                );
+                if self.local_session_id == Some(*id) {
+                    self.send_embedded_chunk_column(
+                        *id,
+                        dimension,
+                        cx,
+                        cz,
+                        revision,
+                        Arc::new(chunk),
+                    );
+                } else {
+                    let Some(data) = ChunkSaveData::network_terrain_payload(&chunk).ok() else {
+                        continue;
+                    };
+                    self.send_chunk_projection(
+                        *id,
+                        dimension,
+                        cx,
+                        cz,
+                        revision,
+                        data.min_section_y,
+                        data.section_count,
+                        data.blocks,
+                        data.block_states,
+                        data.fluid_levels,
+                        data.block_entities,
+                    );
+                }
                 projected += 1;
             }
             if !made_progress {

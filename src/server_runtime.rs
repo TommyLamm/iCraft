@@ -40,6 +40,7 @@ use std::io;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -212,10 +213,66 @@ impl RuntimeInput {
 /// bounded `session_updates`; this lane only diverts responses that would
 /// otherwise be addressed to a nonexistent socket session.
 ///
-/// Same shape as the TCP host channel: a wire [`Packet`] plus [`ProjectionDest`].
+/// Wire gameplay still uses [`ProjectionEvent`] (a [`Packet`] plus dest) for TCP.
+/// Embedded columns may instead carry [`PresentationEvent::ChunkColumn`].
 pub use crate::network::server::{ProjectionDest, ProjectionEvent};
 
 use crate::network::protocol::Packet;
+
+/// Embedded presentation drain: wire-shaped packets or in-process `Arc<Chunk>`.
+#[derive(Clone)]
+pub enum PresentationEvent {
+    Packet(ProjectionEvent),
+    /// Zero-copy column for the local embedded session. Never encoded for TCP.
+    ChunkColumn {
+        to: u64,
+        dimension: u8,
+        cx: i32,
+        cz: i32,
+        revision: u64,
+        chunk: Arc<crate::world::Chunk>,
+    },
+}
+
+impl std::fmt::Debug for PresentationEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Packet(event) => f.debug_tuple("Packet").field(event).finish(),
+            Self::ChunkColumn {
+                to,
+                dimension,
+                cx,
+                cz,
+                revision,
+                chunk,
+            } => f
+                .debug_struct("ChunkColumn")
+                .field("to", to)
+                .field("dimension", dimension)
+                .field("cx", cx)
+                .field("cz", cz)
+                .field("revision", revision)
+                .field("chunk_arc", &Arc::as_ptr(chunk))
+                .finish(),
+        }
+    }
+}
+
+impl PresentationEvent {
+    pub fn session_id(&self) -> Option<u64> {
+        match self {
+            Self::Packet(event) => event.session_id(),
+            Self::ChunkColumn { to, .. } => Some(*to),
+        }
+    }
+
+    pub fn as_packet_event(&self) -> Option<&ProjectionEvent> {
+        match self {
+            Self::Packet(event) => Some(event),
+            Self::ChunkColumn { .. } => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReplaceablePresentationKey {
@@ -239,40 +296,56 @@ enum ReplaceablePresentationKey {
     },
 }
 
-fn presentation_replaceable_key(event: &ProjectionEvent) -> Option<ReplaceablePresentationKey> {
-    let target = event.session_id()?;
-    match &event.packet {
-        Packet::ChunkData {
+fn presentation_replaceable_key(event: &PresentationEvent) -> Option<ReplaceablePresentationKey> {
+    match event {
+        PresentationEvent::ChunkColumn {
+            to,
             dimension,
             cx,
             cz,
             ..
         } => Some(ReplaceablePresentationKey::Chunk {
-            target,
+            target: *to,
             dimension: *dimension,
             cx: *cx,
             cz: *cz,
         }),
-        Packet::EntityState {
-            dimension, state, ..
-        } => Some(ReplaceablePresentationKey::EntityState {
-            target,
-            dimension: *dimension,
-            entity_id: state.entity_id,
-        }),
-        Packet::PlayerPosition { id, .. } => Some(ReplaceablePresentationKey::PlayerPosition {
-            target,
-            id: *id,
-        }),
-        Packet::TimeSync { .. } => Some(ReplaceablePresentationKey::TimeSync { target }),
-        _ => None,
+        PresentationEvent::Packet(event) => {
+            let target = event.session_id()?;
+            match &event.packet {
+                Packet::ChunkData {
+                    dimension,
+                    cx,
+                    cz,
+                    ..
+                } => Some(ReplaceablePresentationKey::Chunk {
+                    target,
+                    dimension: *dimension,
+                    cx: *cx,
+                    cz: *cz,
+                }),
+                Packet::EntityState {
+                    dimension, state, ..
+                } => Some(ReplaceablePresentationKey::EntityState {
+                    target,
+                    dimension: *dimension,
+                    entity_id: state.entity_id,
+                }),
+                Packet::PlayerPosition { id, .. } => Some(ReplaceablePresentationKey::PlayerPosition {
+                    target,
+                    id: *id,
+                }),
+                Packet::TimeSync { .. } => Some(ReplaceablePresentationKey::TimeSync { target }),
+                _ => None,
+            }
+        }
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct RuntimeTickOutput {
     pub snapshot: AuthoritySnapshot,
-    pub presentation_events: Vec<ProjectionEvent>,
+    pub presentation_events: Vec<PresentationEvent>,
 }
 
 #[derive(Debug)]
@@ -790,7 +863,7 @@ pub struct ServerRuntime {
     pub(super) network_metrics: NetworkMetrics,
     pub(super) transport_mode: TransportMode,
     pub(super) local_session_id: Option<u64>,
-    pub(super) presentation_events: VecDeque<ProjectionEvent>,
+    pub(super) presentation_events: VecDeque<PresentationEvent>,
     pub(super) observed_transport_rejections: u64,
     pub(super) observed_transport_duplicates: u64,
     pub(super) stopped: bool,
@@ -2220,12 +2293,12 @@ mod tests {
         );
         assert!(runtime.presentation_events.iter().any(|event| matches!(
             event,
-            ProjectionEvent { packet: Packet::GameplayResponse { response, .. }, .. }
+            PresentationEvent::Packet(ProjectionEvent { packet: Packet::GameplayResponse { response, .. }, .. })
                 if response.request_id == 700
         )));
         assert!(runtime.presentation_events.iter().any(|event| matches!(
             event,
-            ProjectionEvent { packet: Packet::PlayerSessionUpdate { state, .. }, .. }
+            PresentationEvent::Packet(ProjectionEvent { packet: Packet::PlayerSessionUpdate { state, .. }, .. })
                 if state.revision == 77
         )));
         assert!(runtime.network_metrics.snapshot().queue_full > 0);
@@ -2253,9 +2326,54 @@ mod tests {
         );
         assert!(runtime.presentation_events.iter().any(|event| matches!(
             event,
-            ProjectionEvent { packet: Packet::GameplayResponse { response, .. }, .. }
+            PresentationEvent::Packet(ProjectionEvent { packet: Packet::GameplayResponse { response, .. }, .. })
                 if response.request_id == 0
         )));
+
+        let world_dir = runtime.world_dir.clone();
+        runtime.shutdown().unwrap();
+        let _ = fs::remove_dir_all(world_dir);
+    }
+
+    #[test]
+    fn embedded_chunk_projection_uses_arc_column_not_dense_stream() {
+        let (mut runtime, _input) = embedded_runtime("arc_chunk_column");
+        let output = runtime.tick_with_output().unwrap();
+        let columns: Vec<_> = output
+            .presentation_events
+            .iter()
+            .filter_map(|event| match event {
+                PresentationEvent::ChunkColumn {
+                    to,
+                    cx,
+                    cz,
+                    revision,
+                    chunk,
+                    ..
+                } => Some((*to, *cx, *cz, *revision, Arc::strong_count(chunk))),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !columns.is_empty(),
+            "embedded local session must receive ChunkColumn projections"
+        );
+        assert!(columns.iter().all(|(to, ..)| *to == 99));
+        assert!(
+            !output.presentation_events.iter().any(|event| {
+                matches!(
+                    event.as_packet_event(),
+                    Some(ProjectionEvent {
+                        dest: ProjectionDest::Session(99),
+                        packet: Packet::ChunkData { .. },
+                        ..
+                    })
+                )
+            }),
+            "embedded must not dense-stream ChunkData to the local session"
+        );
+        // Arc fanout: projection owns one strong ref; authority kept its owned Chunk.
+        assert!(columns.iter().all(|(.., strong)| *strong >= 1));
 
         let world_dir = runtime.world_dir.clone();
         runtime.shutdown().unwrap();
@@ -2269,7 +2387,12 @@ mod tests {
         let baseline = runtime.tick_with_output().unwrap();
         assert!(baseline.presentation_events.iter().any(|event| matches!(
             event,
-            ProjectionEvent { dest: ProjectionDest::Session(99), packet: Packet::ChunkData { .. }, .. }
+            PresentationEvent::ChunkColumn { to: 99, .. }
+                | PresentationEvent::Packet(ProjectionEvent {
+                    dest: ProjectionDest::Session(99),
+                    packet: Packet::ChunkData { .. },
+                    ..
+                })
         )));
         runtime.drain_routed_updates();
 
@@ -2315,11 +2438,11 @@ mod tests {
                 .iter()
                 .filter(|event| matches!(
                     event,
-                    ProjectionEvent {
+                    PresentationEvent::Packet(ProjectionEvent {
                         dest: ProjectionDest::Session(99),
                         packet: Packet::BlockChange { x: 8, y: 80, z: 8, .. },
                         ..
-                    }
+                    })
                 ))
                 .count(),
             0,
@@ -2658,11 +2781,11 @@ mod tests {
         let updates: Vec<_> = output
             .presentation_events
             .iter()
-            .filter_map(|event| match event {
-                ProjectionEvent {
+            .filter_map(|event| match event.as_packet_event() {
+                Some(ProjectionEvent {
                     packet: Packet::PlayerSessionUpdate { state, .. },
                     ..
-                } if state.revision == 1 => Some(*state),
+                }) if state.revision == 1 => Some(*state),
                 _ => None,
             })
             .collect();
@@ -2682,11 +2805,11 @@ mod tests {
             .presentation_events
             .iter()
             .all(|event| !matches!(
-                event,
-                ProjectionEvent {
+                event.as_packet_event(),
+                Some(ProjectionEvent {
                     packet: Packet::PlayerSessionUpdate { state, .. },
                     ..
-                } if state.revision == 1
+                }) if state.revision == 1
             )));
 
         let world_dir = runtime.world_dir.clone();
@@ -2887,30 +3010,30 @@ mod tests {
     }
 
     fn entity_lifecycle_counts(
-        events: &[ProjectionEvent],
+        events: &[PresentationEvent],
         entity_id: u64,
     ) -> (usize, usize, usize) {
         let mut spawns = 0;
         let mut states = 0;
         let mut despawns = 0;
         for event in events {
-            match event {
-                ProjectionEvent {
+            match event.as_packet_event() {
+                Some(ProjectionEvent {
                     packet: Packet::EntitySpawn { state, .. },
                     ..
-                } if state.entity_id == entity_id => {
+                }) if state.entity_id == entity_id => {
                     spawns += 1;
                 }
-                ProjectionEvent {
+                Some(ProjectionEvent {
                     packet: Packet::EntityState { state, .. },
                     ..
-                } if state.entity_id == entity_id => {
+                }) if state.entity_id == entity_id => {
                     states += 1;
                 }
-                ProjectionEvent {
+                Some(ProjectionEvent {
                     packet: Packet::EntityDespawn { entity_id: id, .. },
                     ..
-                } if *id == entity_id => {
+                }) if *id == entity_id => {
                     despawns += 1;
                 }
                 _ => {}

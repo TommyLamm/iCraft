@@ -148,8 +148,8 @@ impl EmbeddedRuntimeBridge {
             }
         }
         for event in &output.presentation_events {
-            let crate::network::protocol::Packet::GameplayResponse { response, .. } =
-                &event.packet
+            let Some(crate::network::protocol::Packet::GameplayResponse { response, .. }) =
+                event.as_packet_event().map(|e| &e.packet)
             else {
                 continue;
             };

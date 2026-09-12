@@ -182,9 +182,11 @@ fn closest_melee_target(
         .map(|(id, _)| id)
 }
 
-/// Apply a network-visible block value to CPU world state and return every
-/// chunk whose mesh/light data depends on it. Redstone and gameplay side
-/// effects remain the caller's responsibility.
+/// Apply a network-visible block value to CPU presentation state and return
+/// every chunk whose mesh/light data depends on it. Writes the cell payload
+/// directly — never `ChunkManager::set_block`, which would enqueue fluids and
+/// re-run authority side effects on the GPU thread. Local lighting runs only
+/// when opacity or light emission changes.
 fn apply_synced_block_change(
     chunk_manager: &mut ChunkManager,
     x: i32,
@@ -192,6 +194,7 @@ fn apply_synced_block_change(
     z: i32,
     block: BlockType,
     state: u8,
+    raw_fluid: u8,
 ) -> Option<std::collections::HashSet<(i32, i32)>> {
     let ((cx, cz), _) = chunk_manager.world_to_local(x, y, z)?;
     if !chunk_manager.chunks.contains_key(&(cx, cz)) {
@@ -199,14 +202,16 @@ fn apply_synced_block_change(
     }
     let previous = chunk_manager.get_block(x, y, z);
     let previous_state = chunk_manager.get_block_state(x, y, z);
-    if previous == block && previous_state == state {
+    let previous_raw_fluid = chunk_manager.get_fluid_raw(x, y, z);
+    if previous == block && previous_state == state && previous_raw_fluid == raw_fluid {
         return None;
     }
 
-    chunk_manager.set_block(x, y, z, block);
-    chunk_manager.set_block_state(x, y, z, state);
     let old_properties = previous.properties();
     let new_properties = block.properties();
+    if !chunk_manager.apply_presentation_cell(x, y, z, block, state, raw_fluid) {
+        return None;
+    }
     let mut dirty_chunks = std::collections::HashSet::new();
     if old_properties.is_opaque() != new_properties.is_opaque() {
         if new_properties.is_opaque() {
@@ -703,13 +708,17 @@ mod remote_sync_tests {
         manager.chunks.insert((1, 0), Chunk::new(1, 0));
         manager.set_sky_light(15, 80, 8, 15);
 
-        let dirty = apply_synced_block_change(&mut manager, 15, 80, 8, BlockType::Stone, 0)
+        let dirty = apply_synced_block_change(&mut manager, 15, 80, 8, BlockType::Stone, 0, 0)
             .expect("loaded block should change");
 
         assert_eq!(manager.get_block(15, 80, 8), BlockType::Stone);
         assert_eq!(manager.get_sky_light(15, 80, 8), 0);
         assert!(dirty.contains(&(0, 0)));
         assert!(dirty.contains(&(1, 0)));
+        assert!(
+            manager.pop_fluid_update(false).is_none(),
+            "projection apply must not enqueue fluid neighbors"
+        );
     }
 
     #[test]
@@ -3697,22 +3706,92 @@ impl State {
         Some(output.snapshot)
     }
 
-    /// Deliver a session-targeted runtime projection as the same `Packet`
-    /// shape join clients stage — no second presentation enum map.
+    /// Deliver a session-targeted runtime projection. Wire packets share the
+    /// join-client handler; embedded columns insert `Arc<Chunk>` without dense
+    /// decode or full-column lighting recompute.
     fn deliver_projection_event(
         &mut self,
-        event: crate::server_runtime::ProjectionEvent,
+        event: crate::server_runtime::PresentationEvent,
         session_id: crate::network::protocol::PlayerId,
     ) {
-        use crate::server_runtime::ProjectionDest;
+        use crate::server_runtime::{PresentationEvent, ProjectionDest};
 
-        let ProjectionDest::Session(target) = event.dest else {
+        match event {
+            PresentationEvent::Packet(event) => {
+                let ProjectionDest::Session(target) = event.dest else {
+                    return;
+                };
+                if target != session_id {
+                    return;
+                }
+                self.handle_inbound_packet(event.packet);
+            }
+            PresentationEvent::ChunkColumn {
+                to,
+                dimension,
+                cx,
+                cz,
+                revision,
+                chunk,
+            } => {
+                if to != session_id {
+                    return;
+                }
+                self.apply_embedded_chunk_column(dimension, cx, cz, revision, chunk);
+            }
+        }
+    }
+
+    /// Insert an in-process authority column. Lighting is already computed on
+    /// the authority `Chunk`; presentation must not call
+    /// `recompute_direct_column_lighting`.
+    fn apply_embedded_chunk_column(
+        &mut self,
+        dimension_wire: u8,
+        cx: i32,
+        cz: i32,
+        revision: u64,
+        chunk: std::sync::Arc<crate::world::Chunk>,
+    ) {
+        let Some(dimension) = crate::dimension::Dimension::from_wire(dimension_wire) else {
             return;
         };
-        if target != session_id {
+        if dimension != self.current_dimension {
             return;
         }
-        self.handle_inbound_packet(event.packet);
+        let revision_key = (dimension, cx, cz);
+        if revision
+            < self
+                .client_chunk_revisions
+                .get(&revision_key)
+                .copied()
+                .unwrap_or(0)
+        {
+            return;
+        }
+        self.client_chunk_revisions.insert(revision_key, revision);
+        let inserted_new = !self.chunk_manager.chunks.contains_key(&(cx, cz));
+        // Clone out of the Arc so presentation owns a mutable CPU copy while
+        // authority keeps mutating its resident map. One structural clone —
+        // no dense flatten / palette rebuild / column lighting.
+        self.chunk_manager
+            .insert_resident_chunk((cx, cz), (*chunk).clone());
+        if inserted_new {
+            let lifetime = self.next_chunk_lifetime();
+            self.chunk_lifetimes.insert((cx, cz), lifetime);
+            self.chunk_meshes.insert((cx, cz), ChunkMesh::pending());
+        }
+        self.invalidate_chunk_mesh(
+            (cx, cz),
+            if inserted_new {
+                DependencyReason::ChunkLoad
+            } else {
+                DependencyReason::Network
+            },
+        );
+        // Drop any buffered join-style pending changes; the Arc column is the
+        // authority snapshot at `revision`.
+        self.pending_block_changes.remove(&(cx, cz));
     }
 
     fn session_slot_from_stack(
@@ -3949,13 +4028,37 @@ impl State {
     ) {
         let mut dirty_chunks = std::collections::HashSet::new();
         for mutation in mutations {
-            if mutation.dimension != self.current_dimension as u8 {
+            let Some(dimension) = crate::dimension::Dimension::from_wire(mutation.dimension) else {
+                continue;
+            };
+            if dimension != self.current_dimension {
                 continue;
             }
             let Some(block) = BlockType::from_wire(mutation.block) else {
                 continue;
             };
             let (x, y, z) = mutation.position;
+            let Some(((cx, cz), _)) = self.chunk_manager.world_to_local(x, y, z) else {
+                continue;
+            };
+            let revision_key = (dimension, cx, cz);
+            if mutation.revision
+                <= self
+                    .client_chunk_revisions
+                    .get(&revision_key)
+                    .copied()
+                    .unwrap_or(0)
+            {
+                continue;
+            }
+            self.client_chunk_revisions
+                .insert(revision_key, mutation.revision);
+            if !self.chunk_manager.chunks.contains_key(&(cx, cz)) {
+                // Column not resident yet; Arc/ChunkData projection carries the
+                // authority snapshot. Skip buffering — embedded no longer dual-
+                // applies via BlockChange.
+                continue;
+            }
             let previous_block = self.chunk_manager.get_block(x, y, z);
             let previous_state = self.chunk_manager.get_block_state(x, y, z);
             self.play_chest_state_edge(
@@ -3965,15 +4068,19 @@ impl State {
                 block,
                 mutation.state,
             );
-            if let Some(dirty) =
-                apply_synced_block_change(&mut self.chunk_manager, x, y, z, block, mutation.state)
-            {
+            if let Some(dirty) = apply_synced_block_change(
+                &mut self.chunk_manager,
+                x,
+                y,
+                z,
+                block,
+                mutation.state,
+                mutation.raw_fluid,
+            ) {
                 dirty_chunks.extend(dirty);
             }
-            // C1's bounded runtime output does not carry block-entity or
-            // container payloads yet.  Keep those renderer caches untouched
-            // until a typed runtime projection event exists; never query or
-            // mutate a second local authority as a fallback.
+            // Block-entity / container payloads still arrive as typed projection
+            // events; never query a second local authority as a fallback.
         }
         if !dirty_chunks.is_empty() {
             self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Block);
@@ -6446,18 +6553,15 @@ impl State {
         let previous_block = self.chunk_manager.get_block(x, y, z);
         let previous_state = self.chunk_manager.get_block_state(x, y, z);
         let previous_raw_fluid = self.chunk_manager.get_fluid_raw(x, y, z);
-        self.play_chest_state_edge((x, y, z), previous_block, previous_state, block, state);
-        let mut dirty_chunks =
-            apply_synced_block_change(&mut self.chunk_manager, x, y, z, block, state)
-                .unwrap_or_default();
-        if previous_raw_fluid != raw_fluid {
-            self.chunk_manager.set_fluid_raw(x, y, z, raw_fluid);
-            crate::chunk_manager::mark_block_mesh_dependencies(&mut dirty_chunks, x, z);
-        }
         if previous_block == block && previous_state == state && previous_raw_fluid == raw_fluid {
             return;
         }
-        self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Network);
+        self.play_chest_state_edge((x, y, z), previous_block, previous_state, block, state);
+        if let Some(dirty_chunks) =
+            apply_synced_block_change(&mut self.chunk_manager, x, y, z, block, state, raw_fluid)
+        {
+            self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Network);
+        }
     }
 
     /// Client-side application of an incremental block entity update from host.
@@ -8645,12 +8749,12 @@ mod debug_tests {
         assert_eq!(bridge.runtime.authority.world(Dimension::Overworld).get_block(8, 80, 8), before);
         assert!(output.presentation_events.iter().any(|event| {
             matches!(
-                event,
-                crate::server_runtime::ProjectionEvent {
+                event.as_packet_event(),
+                Some(crate::server_runtime::ProjectionEvent {
                     dest: crate::server_runtime::ProjectionDest::Session(target),
                     packet: crate::network::protocol::Packet::GameplayResponse { response, .. },
                     ..
-                } if *target == u64::MAX
+                }) if *target == u64::MAX
                     && response.request_id == 1
                     && matches!(
                         response.outcome,
@@ -8673,10 +8777,9 @@ mod debug_tests {
                 .expect("embedded runtime should construct");
         let initial = bridge
             .runtime
-            .players
-            .get(&u64::MAX)
+            .authority
+            .session(u64::MAX)
             .expect("local session")
-            .data
             .position;
         bridge
             .queue_position(
@@ -8689,10 +8792,9 @@ mod debug_tests {
         bridge.tick().expect("first pose tick");
         let first = bridge
             .runtime
-            .players
-            .get(&u64::MAX)
+            .authority
+            .session(u64::MAX)
             .expect("local session")
-            .data
             .position;
         assert_eq!(first[0], initial[0] + 1.0);
 
@@ -8707,10 +8809,9 @@ mod debug_tests {
         bridge.tick().expect("second pose tick");
         let second = bridge
             .runtime
-            .players
-            .get(&u64::MAX)
+            .authority
+            .session(u64::MAX)
             .expect("local session")
-            .data
             .position;
         assert_eq!(second[0], first[0] + 1.0);
 

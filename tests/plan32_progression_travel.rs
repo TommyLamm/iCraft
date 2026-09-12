@@ -132,11 +132,11 @@ fn singleplayer_typed_nether_activation_and_transfer() {
     let first = output
         .presentation_events
         .iter()
-        .find_map(|event| match event {
-            icraft::server_runtime::ProjectionEvent {
+        .find_map(|event| match event.as_packet_event() {
+            Some(icraft::server_runtime::ProjectionEvent {
                 packet: Packet::GameplayResponse { response, .. },
                 ..
-            } if response.request_id == 1 => Some(response.clone()),
+            }) if response.request_id == 1 => Some(response.clone()),
             _ => None,
         })
         .expect("typed ignite ACK");
@@ -144,11 +144,11 @@ fn singleplayer_typed_nether_activation_and_transfer() {
     input.submit_request(LOCAL_ID, ignite).unwrap();
     output = runtime.tick_with_output().unwrap();
     assert!(output.presentation_events.iter().any(|event| matches!(
-        event,
-        icraft::server_runtime::ProjectionEvent {
+        event.as_packet_event(),
+        Some(icraft::server_runtime::ProjectionEvent {
             packet: Packet::GameplayResponse { response, .. },
             ..
-        } if *response == first
+        }) if *response == first
     )));
     assert_eq!(
         runtime
@@ -184,12 +184,12 @@ fn singleplayer_typed_nether_activation_and_transfer() {
     for _ in 0..25 {
         let output = runtime.tick_with_output().unwrap();
         transferred |= output.presentation_events.iter().any(|event| matches!(
-            event,
-            icraft::server_runtime::ProjectionEvent {
+            event.as_packet_event(),
+            Some(icraft::server_runtime::ProjectionEvent {
                 dest: icraft::server_runtime::ProjectionDest::Session(target),
                 packet: Packet::DimensionTransfer { dimension, .. },
                 ..
-            } if *target == LOCAL_ID && *dimension == Dimension::Nether as u8
+            }) if *target == LOCAL_ID && *dimension == Dimension::Nether as u8
         ));
     }
     assert!(transferred);

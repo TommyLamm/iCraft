@@ -13,8 +13,9 @@ use icraft::network::protocol::{Packet,
     ItemWire, RejectReason, SlotRefWire,
 };
 use icraft::server_runtime::{
-    EmbeddedRuntimeOptions, LocalSessionProfile, LocalSessionStorage, RuntimeInput,
-    ProjectionEvent, ProjectionDest, RuntimeTickOutput, ServerProperties, ServerRuntime, TransportMode,
+    EmbeddedRuntimeOptions, LocalSessionProfile, LocalSessionStorage, ProjectionDest,
+    ProjectionEvent, RuntimeInput, RuntimeTickOutput, ServerProperties, ServerRuntime,
+    TransportMode,
 };
 use icraft::{
     player::PlayerState, save::LevelData, save::PlayerData, save::SaveManager, world::BlockType,
@@ -57,16 +58,16 @@ fn leftover_block_use(session_id: u64, client_revision: u64, request_id: u128) -
 }
 
 fn response_for(
-    events: &[ProjectionEvent],
+    events: &[icraft::server_runtime::PresentationEvent],
     target: u64,
     request_id: u128,
 ) -> Option<&GameplayResponse> {
-    events.iter().find_map(|event| match event {
-        ProjectionEvent {
+    events.iter().find_map(|event| match event.as_packet_event() {
+        Some(ProjectionEvent {
             dest: ProjectionDest::Session(event_target),
             packet: Packet::GameplayResponse { response, .. },
             ..
-        } if *event_target == target && response.request_id == request_id => Some(response),
+        }) if *event_target == target && response.request_id == request_id => Some(response),
         _ => None,
     })
 }
@@ -373,12 +374,12 @@ fn owner_session_update(
     output
         .presentation_events
         .iter()
-        .find_map(|event| match event {
-            ProjectionEvent {
+        .find_map(|event| match event.as_packet_event() {
+            Some(ProjectionEvent {
                 dest: ProjectionDest::Session(target),
                 packet: Packet::PlayerSessionUpdate { player_id, state, .. },
                 ..
-            } if *target == session_id && *player_id == session_id => Some(*state),
+            }) if *target == session_id && *player_id == session_id => Some(*state),
             _ => None,
         })
         .unwrap_or_else(|| panic!("missing owner PlayerSessionUpdate for {session_id}"))
@@ -439,7 +440,10 @@ fn plan24_plan22_gameplay_vectors_match_all_runtime_topologies() {
         assert!(furnace_output
             .presentation_events
             .iter()
-            .any(|event| matches!(event, ProjectionEvent { packet: Packet::BlockEntityDelta { .. }, .. })));
+            .any(|event| matches!(
+                event.as_packet_event(),
+                Some(ProjectionEvent { packet: Packet::BlockEntityDelta { .. }, .. })
+            )));
 
         let plank = harness.source(1, 1);
         let mut craft_sources = [None; 9];
@@ -700,12 +704,12 @@ fn plan24_plan22_gameplay_vectors_match_all_runtime_topologies() {
         let dimension_output = harness.runtime.tick_with_output().unwrap();
         assert!(dimension_output.presentation_events.iter().all(|event| {
             !matches!(
-                event,
-                ProjectionEvent {
+                event.as_packet_event(),
+                Some(ProjectionEvent {
                     dest: ProjectionDest::Session(target),
                     packet: Packet::PlayerSessionUpdate { dimension, .. },
                     ..
-                } if *target == harness.session_id && *dimension != Dimension::Nether as u8
+                }) if *target == harness.session_id && *dimension != Dimension::Nether as u8
             )
         }));
 
@@ -732,12 +736,12 @@ fn plan24_plan22_gameplay_vectors_match_all_runtime_topologies() {
         );
         assert!(reconnect_output.presentation_events.iter().all(|event| {
             !matches!(
-                event,
-                ProjectionEvent {
+                event.as_packet_event(),
+                Some(ProjectionEvent {
                     dest: ProjectionDest::Session(target),
                     packet: Packet::PlayerSessionUpdate { player_id, .. },
                     ..
-                } if *target == harness.session_id && *player_id == TOPOLOGY_VICTIM_ID
+                }) if *target == harness.session_id && *player_id == TOPOLOGY_VICTIM_ID
             )
         }));
         harness.shutdown();
@@ -758,15 +762,15 @@ fn plan28_dispenser_item_projection_matches_all_runtime_topologies() {
         for _ in 0..8 {
             let output = harness.runtime.tick_with_output().unwrap();
             projection = output.presentation_events.into_iter().find_map(|event| {
-                let state = match event {
-                    ProjectionEvent {
+                let state = match event.as_packet_event() {
+                    Some(ProjectionEvent {
                         dest: ProjectionDest::Session(target),
                         packet: Packet::EntitySpawn { state, .. } | Packet::EntityState { state, .. },
                         ..
-                    } if target == harness.session_id
+                    }) if *target == harness.session_id
                         && state.entity_type == EntityType::DroppedItem.to_wire() =>
                     {
-                        state
+                        *state
                     }
                     _ => return None,
                 };
