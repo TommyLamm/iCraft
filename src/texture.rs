@@ -11,8 +11,7 @@ pub struct TextureAtlas {
 
 /// Shared LCG used by every procedural tile painter.
 fn next_rand(seed: &mut u32, min: i16, max: i16) -> i16 {
-    *seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
-    let val = (*seed / 65536) % 32768;
+    let val = crate::rng::lcg32_short(seed);
     let diff = max - min;
     if diff <= 0 {
         return min;

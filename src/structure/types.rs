@@ -1,6 +1,7 @@
 use crate::block_entity::BlockEntity;
 use crate::world::BlockType;
 use serde::{Deserialize, Serialize};
+use crate::world::chunk_origin;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StructureId {
@@ -67,9 +68,9 @@ impl BoundingBox {
     }
 
     pub fn intersects_chunk(&self, chunk_x: i32, chunk_z: i32) -> bool {
-        let c_min_x = chunk_x * 16;
+        let c_min_x = chunk_origin(chunk_x);
         let c_max_x = c_min_x + 15;
-        let c_min_z = chunk_z * 16;
+        let c_min_z = chunk_origin(chunk_z);
         let c_max_z = c_min_z + 15;
 
         !(self.max_x < c_min_x

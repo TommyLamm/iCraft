@@ -502,14 +502,10 @@ impl AuthorityCore {
 }
 
 fn aggregate_dimension_checksums(checksums: &[(Dimension, u64)]) -> u64 {
-    let mut hash = 0xcbf29ce484222325u64;
+    let mut hash = crate::rng::FNV_OFFSET;
     for (dimension, checksum) in checksums {
-        hash ^= u64::from(*dimension as u8);
-        hash = hash.wrapping_mul(0x100000001b3);
-        for byte in checksum.to_le_bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
+        crate::rng::fnv1a_write(&mut hash, &[*dimension as u8]);
+        crate::rng::fnv1a_write(&mut hash, &checksum.to_le_bytes());
     }
     hash
 }

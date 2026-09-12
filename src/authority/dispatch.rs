@@ -911,7 +911,9 @@ impl AuthorityCore {
         );
         let (next_slot, next_cursor) = (click_result.slot, click_result.dragged);
         let extract_into_inventory = original.cursor.is_none() && claimed.is_none();
-        candidate.cursor = next_cursor.as_ref().map(session_slot_from_item_stack);
+        candidate.cursor = next_cursor
+            .as_ref()
+            .and_then(SessionInventorySlot::from_stack);
         if extract_into_inventory {
             if let Some(extracted) = candidate.cursor.take() {
                 if !candidate.add_slot(extracted) {
@@ -1454,14 +1456,6 @@ pub(crate) fn stack_from_slot(
     slot.and_then(|slot| SessionInventorySlot::from(slot).to_stack())
 }
 
-fn session_slot_from_item_stack(stack: &crate::inventory::ItemStack) -> SessionInventorySlot {
-    SessionInventorySlot::from_wire(
-        ItemWire::from_stack(stack),
-        stack.can_break,
-        stack.can_place_on,
-    )
-}
-
 fn slot_wire_matches(slot: Option<SessionInventorySlot>, claimed: &ItemWire) -> bool {
     slot.is_some_and(|slot| {
         slot.item == *claimed
@@ -1548,10 +1542,6 @@ fn look_from_angles(yaw: f32, pitch: f32) -> Result<[i16; 3], RejectReason> {
 }
 
 fn quantize_health(health: f32) -> u32 {
-    if health.is_finite() {
-        (health.max(0.0) * 1_000.0).round().min(u32::MAX as f32) as u32
-    } else {
-        u32::MAX
-    }
+    contract::quantize_health(health)
 }
 

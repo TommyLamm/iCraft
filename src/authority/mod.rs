@@ -26,8 +26,9 @@ pub(crate) const AUTHORITY_ENTITY_ID_START: u64 = 1 << 63;
 pub(crate) const ATTACK_COOLDOWN_TICKS: u16 = 5;
 
 pub use contract::{
-    common_gameplay_vectors, milli_within_abs_limit, position_to_milli, position_to_milli_opt,
-    RevisionClock, SessionActionView, FIXED_TICK_HZ, POSITION_ABS_LIMIT, POSITION_MILLI_ABS_LIMIT,
+    common_gameplay_vectors, milli_to_scalar, milli_to_vec3, milli_within_abs_limit,
+    position_to_milli, position_to_milli_opt, quantize_health, scalar_to_milli, RevisionClock,
+    SessionActionView, FIXED_TICK_HZ, POSITION_ABS_LIMIT, POSITION_MILLI_ABS_LIMIT,
     RESPONSE_CACHE_CAPACITY,
 };
 

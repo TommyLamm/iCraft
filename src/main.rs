@@ -11,8 +11,8 @@ pub use icraft::{
     authority, block_entity, block_model, boss, brewing, chunk_manager, chunk_render,
     chunk_schedule, commands, dimension, enchantment, entity, fishing, game_rules, interaction,
     inventory, lighting, navigation, network, passive_mob, perf, physics, player,
-    presentation_inventory_policy, recipes, redstone, resources, save, server_runtime, server_world,
-    structure, village, world,
+    presentation_inventory_policy, recipes, redstone, resources, rng, save, server_runtime,
+    server_world, structure, village, world,
 };
 
 // Desktop-only (Wave 10 Plan 06): keep GPU/UI/lang/LOS worker out of icraft-server.

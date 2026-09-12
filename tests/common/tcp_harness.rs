@@ -381,11 +381,7 @@ pub fn gameplay_request(
 }
 
 pub fn session_slot(stack: ItemStack) -> SessionInventorySlot {
-    SessionInventorySlot::from_wire(
-        ItemWire::from_stack(&stack),
-        stack.can_break,
-        stack.can_place_on,
-    )
+    SessionInventorySlot::from_stack(&stack).expect("fixture stack within u16 count")
 }
 
 pub fn held(stack: &ItemStack) -> SessionSlotWire {

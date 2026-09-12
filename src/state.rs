@@ -3850,15 +3850,9 @@ impl State {
     fn session_slot_from_stack(
         stack: Option<crate::inventory::ItemStack>,
     ) -> Option<crate::authority::contract::SessionInventorySlot> {
-        let stack = stack?;
-        if stack.count == 0 || stack.count > u32::from(u16::MAX) {
-            return None;
-        }
-        Some(crate::authority::contract::SessionInventorySlot::from_wire(
-            crate::network::protocol::ItemWire::from_stack(&stack),
-            stack.can_break,
-            stack.can_place_on,
-        ))
+        stack
+            .as_ref()
+            .and_then(crate::authority::contract::SessionInventorySlot::from_stack)
     }
 
     fn stack_from_session_slot(

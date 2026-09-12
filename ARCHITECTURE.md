@@ -151,6 +151,13 @@ the full contract.
 
 Float→milli pose conversion and the milli abs bound live in
 `authority::contract` (`position_to_milli` / `POSITION_MILLI_ABS_LIMIT`).
+Scalar health / hunger milli helpers (`scalar_to_milli`, `milli_to_scalar`,
+`quantize_health`, `milli_to_vec3`) share that module — NaN policies differ
+on purpose (`quantize_health` → `u32::MAX`, scalars → `0`).
+Block↔chunk XZ helpers are `world::chunk_xz` / `local_xz` / `chunk_origin`.
+Six-neighbor offsets come from `redstone::Direction::ALL` /
+`Direction::all_deltas` (lighting / redstone). Shared FNV-1a and LCG live in
+`rng`; bool flag parsing is `game_rules::parse_bool_flag`.
 Block / interaction reach is `interaction::PLAYER_REACH` (still 8.0) with
 `player_reach_squared()` for squared comparisons.
 

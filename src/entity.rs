@@ -3,6 +3,8 @@ use crate::physics::AABB;
 use glam::Vec3;
 
 const DROPPED_ITEM_REST_VELOCITY_EPS: f32 = 1e-4;
+pub const ENTITY_GRAVITY: f32 = 32.0;
+pub const CHICKEN_GLIDE_GRAVITY: f32 = 8.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum EntityType {
@@ -576,9 +578,9 @@ impl Entity {
 
         // Apply gravity
         let gravity = if self.entity_type == EntityType::Chicken && self.velocity.y < 0.0 {
-            8.0 // slow glide
+            CHICKEN_GLIDE_GRAVITY
         } else {
-            32.0
+            ENTITY_GRAVITY
         };
 
         self.velocity.y -= gravity * dt;
@@ -625,9 +627,9 @@ impl Entity {
             return true;
         }
         let gravity = if self.entity_type == EntityType::Chicken && self.velocity.y < 0.0 {
-            8.0
+            CHICKEN_GLIDE_GRAVITY
         } else {
-            32.0
+            ENTITY_GRAVITY
         };
         let mut vel = self.velocity;
         vel.y -= gravity * dt;
@@ -1060,50 +1062,12 @@ impl EntityManager {
     }
 }
 
+/// Distance-only ray/AABB probe used by melee selection.
+///
+/// Delegates to [`crate::voxel_shape::ray_intersects_aabb`], which is safe for
+/// axis-aligned rays (the previous slab helper divided by `dir` components).
 pub fn ray_intersects_aabb(origin: Vec3, dir: Vec3, aabb: &AABB) -> Option<f32> {
-    let mut tmin = (aabb.min.x - origin.x) / dir.x;
-    let mut tmax = (aabb.max.x - origin.x) / dir.x;
-    if tmin > tmax {
-        std::mem::swap(&mut tmin, &mut tmax);
-    }
-
-    let mut tymin = (aabb.min.y - origin.y) / dir.y;
-    let mut tymax = (aabb.max.y - origin.y) / dir.y;
-    if tymin > tymax {
-        std::mem::swap(&mut tymin, &mut tymax);
-    }
-
-    if tmin > tymax || tymin > tmax {
-        return None;
-    }
-    if tymin > tmin {
-        tmin = tymin;
-    }
-    if tymax < tmax {
-        tmax = tymax;
-    }
-
-    let mut tzmin = (aabb.min.z - origin.z) / dir.z;
-    let mut tzmax = (aabb.max.z - origin.z) / dir.z;
-    if tzmin > tzmax {
-        std::mem::swap(&mut tzmin, &mut tzmax);
-    }
-
-    if tmin > tzmax || tzmin > tmax {
-        return None;
-    }
-    if tzmin > tmin {
-        tmin = tzmin;
-    }
-    if tzmax < tmax {
-        tmax = tzmax;
-    }
-
-    if tmax >= 0.0 {
-        Some(tmin.max(0.0))
-    } else {
-        None
-    }
+    crate::voxel_shape::ray_intersects_aabb_distance(origin, dir, f32::INFINITY, aabb)
 }
 
 #[cfg(test)]
@@ -1198,6 +1162,20 @@ mod tests {
         // Ray pointing away
         let ray_dir_away = Vec3::new(0.0, 0.0, -1.0);
         assert!(ray_intersects_aabb(ray_origin, ray_dir_away, &aabb).is_none());
+    }
+
+    #[test]
+    fn ray_aabb_accepts_axis_aligned_zero_components() {
+        let aabb = AABB::new(Vec3::ZERO, Vec3::ONE);
+        // Pure +X ray — old entity slab helper divided by dir.y/dir.z (== 0).
+        let hit = ray_intersects_aabb(Vec3::new(-2.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), &aabb);
+        assert!(hit.is_some());
+        assert!((hit.unwrap() - 1.5).abs() < 1e-5);
+        // Origin outside on a zero axis misses.
+        assert!(
+            ray_intersects_aabb(Vec3::new(-2.0, 2.0, 0.0), Vec3::new(1.0, 0.0, 0.0), &aabb)
+                .is_none()
+        );
     }
 
     fn loaded_air_column() -> ChunkManager {

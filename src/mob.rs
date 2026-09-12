@@ -121,10 +121,83 @@ pub fn ambient_spawn_rng(player_pos: Vec3, entity_count: usize, time: f32) -> im
         .wrapping_add(entity_count as u32)
         .wrapping_add(time_bits.wrapping_mul(2654435761));
 
-    move || {
-        rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
-        (rng_seed / 65536) % 32768
+    move || crate::rng::lcg32_short(&mut rng_seed)
+}
+
+/// Light / ground gate for [`try_ambient_spawn`].
+pub enum AmbientSpawnRule {
+    /// Hostile: any solid underfoot, two air cells, total light ≤ 7.
+    Hostile { sky_light_level: u8 },
+    /// Passive: grass underfoot, two air cells, caller already gated daylight.
+    Passive,
+}
+
+/// Shared ambient spawn attempt: cap / RNG / angle / distance / height / spawn.
+pub fn try_ambient_spawn(
+    entity_manager: &mut EntityManager,
+    chunk_manager: &ChunkManager,
+    player_pos: Vec3,
+    time: f32,
+    cap: usize,
+    current_count: usize,
+    attempt_modulus: u32,
+    dist_min: u32,
+    dist_span: u32,
+    table: &[EntityType],
+    rule: AmbientSpawnRule,
+) {
+    if current_count >= cap || table.is_empty() || attempt_modulus == 0 || dist_span == 0 {
+        return;
     }
+
+    let mut next_rand = ambient_spawn_rng(player_pos, entity_manager.entities.len(), time);
+    if next_rand() % attempt_modulus != 0 {
+        return;
+    }
+
+    let angle = (next_rand() % 360) as f32 * std::f32::consts::PI / 180.0;
+    let dist = (dist_min + next_rand() % dist_span) as f32;
+    let spawn_x = (player_pos.x + angle.cos() * dist) as i32;
+    let spawn_z = (player_pos.z + angle.sin() * dist) as i32;
+
+    let Some(solid_y) = chunk_manager.highest_solid_y(spawn_x, spawn_z) else {
+        return;
+    };
+    let spawn_y = solid_y + 1;
+    let height = chunk_manager.dimension.height();
+    if !height.contains_y(spawn_y) || !height.contains_y(spawn_y + 1) {
+        return;
+    }
+
+    let block_feet = chunk_manager.get_block(spawn_x, spawn_y, spawn_z);
+    let block_head = chunk_manager.get_block(spawn_x, spawn_y + 1, spawn_z);
+    if block_feet != crate::world::BlockType::Air || block_head != crate::world::BlockType::Air {
+        return;
+    }
+
+    let allowed = match rule {
+        AmbientSpawnRule::Hostile { sky_light_level } => {
+            let block_light = chunk_manager.get_block_light(spawn_x, spawn_y, spawn_z);
+            let effective_sky = if sky_light_level > 10 {
+                sky_light_level
+            } else {
+                4
+            };
+            effective_sky.max(block_light) <= 7
+        }
+        AmbientSpawnRule::Passive => {
+            chunk_manager.get_block(spawn_x, solid_y, spawn_z) == crate::world::BlockType::Grass
+        }
+    };
+    if !allowed {
+        return;
+    }
+
+    let et = table[(next_rand() as usize) % table.len()];
+    entity_manager.spawn(
+        et,
+        Vec3::new(spawn_x as f32 + 0.5, spawn_y as f32, spawn_z as f32 + 0.5),
+    );
 }
 
 pub fn spawn_mobs(
@@ -134,54 +207,21 @@ pub fn spawn_mobs(
     sky_light_level: u8,
     time: f32,
 ) {
-    // Limit total hostile mobs to prevent lag
-    if entity_manager.count_hostile() >= 20 {
-        return;
-    }
-
-    let mut next_rand = ambient_spawn_rng(player_pos, entity_manager.entities.len(), time);
-
-    // ~1% chance per frame to attempt a spawn
-    if next_rand() % 100 != 0 {
-        return;
-    }
-
-    let angle = (next_rand() % 360) as f32 * std::f32::consts::PI / 180.0;
-    let dist = (24 + (next_rand() % 56)) as f32;
-    let spawn_x = (player_pos.x + angle.cos() * dist) as i32;
-    let spawn_z = (player_pos.z + angle.sin() * dist) as i32;
-
-    if let Some(solid_y) = chunk_manager.highest_solid_y(spawn_x, spawn_z) {
-        let spawn_y = solid_y + 1;
-        let height = chunk_manager.dimension.height();
-        if spawn_y >= height.min_y() && spawn_y < height.max_y_exclusive() - 1 {
-            if chunk_manager.get_block(spawn_x, spawn_y, spawn_z) == crate::world::BlockType::Air
-                && chunk_manager.get_block(spawn_x, spawn_y + 1, spawn_z)
-                    == crate::world::BlockType::Air
-            {
-                let block_light = chunk_manager.get_block_light(spawn_x, spawn_y, spawn_z);
-                let effective_sky = if sky_light_level > 10 {
-                    sky_light_level
-                } else {
-                    4
-                };
-                let total_light = effective_sky.max(block_light);
-
-                if total_light <= 7 {
-                    let r = next_rand() % 3;
-                    let et = match r {
-                        0 => EntityType::Zombie,
-                        1 => EntityType::Skeleton,
-                        _ => EntityType::Creeper,
-                    };
-                    entity_manager.spawn(
-                        et,
-                        Vec3::new(spawn_x as f32 + 0.5, spawn_y as f32, spawn_z as f32 + 0.5),
-                    );
-                }
-            }
-        }
-    }
+    const HOSTILE_TABLE: [EntityType; 3] =
+        [EntityType::Zombie, EntityType::Skeleton, EntityType::Creeper];
+    try_ambient_spawn(
+        entity_manager,
+        chunk_manager,
+        player_pos,
+        time,
+        20,
+        entity_manager.count_hostile(),
+        100,
+        24,
+        56,
+        &HOSTILE_TABLE,
+        AmbientSpawnRule::Hostile { sky_light_level },
+    );
 }
 
 #[cfg(test)]

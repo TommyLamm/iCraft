@@ -1,5 +1,6 @@
 use super::types::StructureId;
 use crate::dimension::Dimension;
+use crate::world::chunk_origin;
 
 /// Shared origin Y for `/locate` and actual structure placement.
 ///
@@ -11,8 +12,8 @@ pub fn origin_y_for(id: StructureId, seed: u32, chunk_x: i32, chunk_z: i32) -> i
         StructureId::Dungeon => 20 + ((seed.wrapping_add(chunk_x as u32) % 30) as i32),
         StructureId::Mineshaft => 25,
         StructureId::Village => {
-            let origin_x = chunk_x * 16 + 2;
-            let origin_z = chunk_z * 16 + 2;
+            let origin_x = chunk_origin(chunk_x) + 2;
+            let origin_z = chunk_origin(chunk_z) + 2;
             let ctx = crate::worldgen::WorldGenContext::new(seed);
             let surface = ctx.surface_height_at(origin_x, origin_z);
             let height = Dimension::Overworld.height();

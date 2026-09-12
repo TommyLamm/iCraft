@@ -6,6 +6,7 @@
 use super::*;
 use glam::Mat4;
 use std::time::{Duration, Instant};
+use crate::world::chunk_xz;
 
 impl State {
     pub(super) fn prepare_terrain_draw_plan(&mut self) {
@@ -1589,7 +1590,7 @@ impl State {
                             );
 
                             let (burn_time, burn_total, cook_progress, cook_total) = {
-                                let (cx, cz) = (pos.0.div_euclid(16), pos.2.div_euclid(16));
+                                let (cx, cz) = chunk_xz(pos.0, pos.2);
                                 let (bx, by, bz) = (
                                     pos.0.rem_euclid(16) as u8,
                                     pos.1 as i16,

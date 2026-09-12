@@ -186,6 +186,16 @@ pub fn ray_intersects_aabb(
     }
 }
 
+/// Thin distance-only wrapper for entity / melee probes.
+pub fn ray_intersects_aabb_distance(
+    origin: Vec3,
+    dir: Vec3,
+    max_dist: f32,
+    box_aabb: &AABB,
+) -> Option<f32> {
+    ray_intersects_aabb(origin, dir, max_dist, box_aabb).map(|(t, _)| t)
+}
+
 pub fn aabb(min_x: f32, min_y: f32, min_z: f32, max_x: f32, max_y: f32, max_z: f32) -> AABB {
     AABB {
         min: Vec3::new(min_x, min_y, min_z),

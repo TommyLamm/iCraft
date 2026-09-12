@@ -83,6 +83,8 @@ pub(crate) mod mob;
 /// Minecart/rail presentation tick was only driven by deleted SimHarness.
 #[cfg(test)]
 pub(crate) mod rail;
+/// Shared FNV-1a / LCG helpers (desktop texture/weather re-export via `main`).
+pub mod rng;
 pub(crate) mod world_tick;
 
 // Still crate-internal. Desktop-only files do not `use crate::` these.

@@ -218,6 +218,7 @@ impl RuntimeInput {
 pub use crate::network::server::{ProjectionDest, ProjectionEvent};
 
 use crate::network::protocol::Packet;
+use crate::world::chunk_xz;
 
 /// Embedded presentation drain: wire-shaped packets or in-process `Arc<Chunk>`.
 #[derive(Clone)]
@@ -631,11 +632,7 @@ fn validate_identity_set(key: &str, names: &HashSet<String>) -> Result<(), Serve
 }
 
 fn parse_bool(key: &str, value: &str) -> Result<bool, ServerConfigError> {
-    match value.to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" => Ok(true),
-        "false" | "0" | "no" => Ok(false),
-        _ => Err(invalid(key, value, "expected true or false")),
-    }
+    crate::game_rules::parse_bool_flag(value).ok_or_else(|| invalid(key, value, "expected true or false"))
 }
 
 fn parse_range<T>(
@@ -1505,8 +1502,7 @@ impl ServerRuntime {
 
     pub(super) fn ensure_spawn_chunk(&mut self) {
         let dimension = self.level.spawn_dimension;
-        let cx = self.level.spawn_x.div_euclid(16);
-        let cz = self.level.spawn_z.div_euclid(16);
+        let (cx, cz) = chunk_xz(self.level.spawn_x, self.level.spawn_z);
         self.authority.with_world(dimension, |world| {
             world.materialize_chunk(cx, cz);
         });
@@ -1927,28 +1923,17 @@ pub(super) fn default_player_data(game_mode: GameMode) -> PlayerData {
 }
 
 fn scalar_to_milli(value: f32) -> u32 {
-    if !value.is_finite() {
-        return 0;
-    }
-    (value.max(0.0) * 1_000.0).round() as u32
+    crate::authority::contract::scalar_to_milli(value)
 }
 
 fn milli_to_scalar(value: u32) -> f32 {
-    value as f32 / 1_000.0
+    crate::authority::contract::milli_to_scalar(value)
 }
 
 fn session_slot_from_stack(
     stack: Option<&crate::inventory::ItemStack>,
 ) -> Option<SessionInventorySlot> {
-    let stack = stack?;
-    if stack.count == 0 {
-        return None;
-    }
-    Some(SessionInventorySlot::from_wire(
-        ItemWire::from_stack(stack),
-        stack.can_break,
-        stack.can_place_on,
-    ))
+    SessionInventorySlot::from_stack_opt(stack)
 }
 
 /// Convert the persisted player payload into the compact authority gameplay

@@ -72,13 +72,13 @@ pub fn deterministic_fishing_roll(
     hook_entity_id: u64,
     lane: u64,
 ) -> u32 {
-    let mut value = world_seed
+    // Keep the lane mixer (bite distribution depends on it); only the
+    // SplitMix64 finalizer is shared with world_tick.
+    let seed = world_seed
         ^ player_id.rotate_left(17)
         ^ hook_entity_id.rotate_left(37)
         ^ lane.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    (value ^ (value >> 31)) as u32
+    crate::world_tick::deterministic_rng(seed, 0) as u32
 }
 
 fn integer_sqrt(value: u64) -> u32 {

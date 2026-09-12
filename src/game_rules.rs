@@ -351,6 +351,22 @@ pub fn persisted_player_game_mode(
     }
 }
 
+/// Shared bool flag parser for settings / meta / server.properties / CLI.
+///
+/// Accepts `true|1|yes|on` and `false|0|no|off` (case-insensitive, trimmed).
+pub fn parse_bool_flag(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// Same as [`parse_bool_flag`], falling back when the token is unrecognized.
+pub fn parse_bool_or(value: &str, fallback: bool) -> bool {
+    parse_bool_flag(value).unwrap_or(fallback)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

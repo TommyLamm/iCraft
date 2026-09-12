@@ -495,11 +495,7 @@ impl GameSettings {
 }
 
 pub(super) fn parse_bool(value: &str, fallback: bool) -> bool {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "true" | "1" | "on" => true,
-        "false" | "0" | "off" => false,
-        _ => fallback,
-    }
+    crate::game_rules::parse_bool_or(value, fallback)
 }
 
 const FPS_CAPS: [u32; 4] = [0, 30, 60, 144];

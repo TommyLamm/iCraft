@@ -21,15 +21,15 @@
 
 ## 精確 acceptance
 
-- [ ] `SessionInventorySlot::from_stack`／`to_stack` 在 contract 型別上一份；runtime／dispatch／State／tcp_harness 全改用；count cap 政策一致。
-- [ ] `Direction::ALL` + `Direction::delta` 為六鄰居唯一來源；lighting 七處內聯刪；`dimension.rs` 470–477 刪。
-- [ ] entity／state 改用 `voxel_shape::ray_intersects_aabb`（或薄 `Option<f32>` wrapper）；`entity.rs` 1002–1046 刪；新增軸對齊射線測試。
-- [ ] `world::chunk_xz(x,z)`／`local_xz`／`chunk_origin(cx)` 三個 helper；`server_world.rs` 22 處 + POI／portals `>> 4` 全改。
-- [ ] `milli_to_vec3`／`scalar_to_milli`／`milli_to_scalar`／`quantize_health` 併入 09 波 13 的 milli 模組，統一 NaN／clamp。
-- [ ] `fnv1a` 一份、fishing 用 `next_splitmix64`；`mob`／`weather`／`texture` LCG 用同一 `rng.rs`（fishing bite 分佈測試若依賴常數則保留其種子混法）。
-- [ ] `parse_bool_flag` 一份（建議 `game_rules` 或 `save/format`）。
-- [ ] `try_ambient_spawn(table, light_rule, dist_range)` 一份；重力常數一份。
-- [ ] 相關單元測試全綠；spawn 密度／物種比例測試不變。
+- [x] `SessionInventorySlot::from_stack`／`to_stack` 在 contract 型別上一份；runtime／dispatch／State／tcp_harness 全改用；count cap 政策一致。
+- [x] `Direction::ALL` + `Direction::delta` 為六鄰居唯一來源；lighting 七處內聯刪；`dimension.rs` 470–477 刪。
+- [x] entity／state 改用 `voxel_shape::ray_intersects_aabb`（或薄 `Option<f32>` wrapper）；`entity.rs` 1002–1046 刪；新增軸對齊射線測試。
+- [x] `world::chunk_xz(x,z)`／`local_xz`／`chunk_origin(cx)` 三個 helper；`server_world.rs` 22 處 + POI／portals `>> 4` 全改。
+- [x] `milli_to_vec3`／`scalar_to_milli`／`milli_to_scalar`／`quantize_health` 併入 09 波 13 的 milli 模組，統一 NaN／clamp。
+- [x] `fnv1a` 一份、fishing 用 `next_splitmix64`；`mob`／`weather`／`texture` LCG 用同一 `rng.rs`（fishing bite 分佈測試若依賴常數則保留其種子混法）。
+- [x] `parse_bool_flag` 一份（建議 `game_rules` 或 `save/format`）。
+- [x] `try_ambient_spawn(table, light_rule, dist_range)` 一份；重力常數一份。
+- [x] 相關單元測試全綠；spawn 密度／物種比例測試不變。
 
 ## 預計檔案與測試
 
@@ -48,3 +48,34 @@
 
 - `thiserror`（README §6）。
 - worldgen／structure hash（README §5）。
+
+## 實作與證據
+
+### 改了什麼
+
+- `world::coords`：`chunk_xz`／`local_xz`／`chunk_origin`；`server_world`／interest／ingress／projection／dimension／structure／POI／portals／presentation／client／runtime spawn 改用。
+- `Direction::ALL` + `all_deltas`：`redstone::NEIGHBORS` 與 `lighting::LIGHT_DIRS` 唯一來源。`dimension.rs` 六鄰居表在落地前已不存在（`rg` 無 `NEIGHBORS`／內聯六元組；Wave 17 已收斂 lighting 內聯）。
+- `entity::ray_intersects_aabb` → `voxel_shape::ray_intersects_aabb_distance`；新增軸對齊零分量測試。
+- `SessionInventorySlot::from_stack`／`from_stack_opt`：統一 `count == 0 || count > u16::MAX` → `None`；runtime／dispatch／State／tcp_harness／transactions 改用。
+- milli 家族併入 `authority::contract`（保留 `quantize_health` vs `scalar_to_milli` 的 NaN 語意差）。
+- `src/rng.rs`：FNV-1a + LCG；redstone／tick／server_world／mob／weather／texture 共用。fishing 保留 lane 種子混法，最終化器改 `world_tick::deterministic_rng`。
+- `game_rules::parse_bool_flag`／`parse_bool_or`：save meta／menu settings／server.properties／CLI。
+- `mob::try_ambient_spawn` + `AmbientSpawnRule`；`ENTITY_GRAVITY`／`CHICKEN_GLIDE_GRAVITY`。
+
+### 測了什麼
+
+- `cargo test --lib -- coords::tests ray_aabb_accepts_axis_aligned test_ray_aabb_intersection fresh_loaded_spawn_region` — ok
+- `cargo test --lib` — 714 ok；1 既有失敗 `embedded_block_action_loads_an_interested_boundary_chunk_on_demand`（在乾淨 HEAD `70f2ccc` 亦失敗，非本計劃引入）
+- `cargo test --test review_hardening_session_lifecycle` — 3 ok
+- `cargo test --test review_hardening_container_click` — 9 ok
+- `cargo test --test passive_mob_tests` — 1 ok
+- `cargo test --test plan33_tcp_fishing_lifecycle` — 3 ok
+- `cargo check --all-targets` — ok
+- `cargo check --bin icraft-server` — ok
+
+### 留下的缺口
+
+- `look_from_angles` 仍在 `dispatch.rs`（計劃 milli 列表未強制搬移）。
+- `enchantment.rs` 仍有獨立 LCG（計劃只列 mob／weather／texture）。
+- `network/client.rs` 的 FNV 副本在落地前已不存在（Plan 01 後）。
+- HEAD 既有 boundary-chunk LoS 測試失敗未修（超出本計劃範圍）。

@@ -5,14 +5,6 @@ use std::collections::{HashMap, HashSet};
 
 pub type BlockPos = (i32, i32, i32);
 
-const NEIGHBORS: [BlockPos; 6] = [
-    (1, 0, 0),
-    (-1, 0, 0),
-    (0, 1, 0),
-    (0, -1, 0),
-    (0, 0, 1),
-    (0, 0, -1),
-];
 const MAX_PROPAGATION_PASSES: usize = 64;
 /// Hard cap for delayed redstone work.  Observer pulses and repeaters are
 /// coalesced before this bound is reached so a machine cannot grow an
@@ -66,6 +58,17 @@ impl Default for Direction {
 }
 
 impl Direction {
+    /// All six cardinal directions. Deltas match the historical neighbor table
+    /// order: +X, -X, +Y, -Y, +Z, -Z.
+    pub const ALL: [Self; 6] = [
+        Self::East,
+        Self::West,
+        Self::Up,
+        Self::Down,
+        Self::South,
+        Self::North,
+    ];
+
     pub fn from_yaw(yaw: f32) -> Self {
         let x = yaw.cos();
         let z = yaw.sin();
@@ -82,7 +85,7 @@ impl Direction {
         }
     }
 
-    pub fn delta(self) -> BlockPos {
+    pub const fn delta(self) -> BlockPos {
         match self {
             Self::North => (0, 0, -1),
             Self::South => (0, 0, 1),
@@ -91,6 +94,18 @@ impl Direction {
             Self::Up => (0, 1, 0),
             Self::Down => (0, -1, 0),
         }
+    }
+
+    /// Six neighbor offsets derived from [`Self::ALL`].
+    pub const fn all_deltas() -> [BlockPos; 6] {
+        [
+            Self::East.delta(),
+            Self::West.delta(),
+            Self::Up.delta(),
+            Self::Down.delta(),
+            Self::South.delta(),
+            Self::North.delta(),
+        ]
     }
 
     pub fn opposite(self) -> Self {
@@ -126,6 +141,8 @@ impl Direction {
         }
     }
 }
+
+const NEIGHBORS: [BlockPos; 6] = Direction::all_deltas();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ComparatorMode {
@@ -1667,9 +1684,7 @@ fn encode_comparator_mode(mode: ComparatorMode) -> u8 {
 }
 
 fn fnv1a(data: &[u8]) -> u64 {
-    data.iter().fold(0xcbf29ce484222325, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
-    })
+    crate::rng::fnv1a(data)
 }
 
 fn is_strong_source(manager: &ChunkManager, pos: BlockPos, block: BlockType) -> bool {

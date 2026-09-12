@@ -1,16 +1,10 @@
 use crate::chunk_manager::ChunkManager;
 use crate::dimension::WorldHeight;
+use crate::redstone::Direction;
 use crate::world::{BlockType, Chunk, RenderType, CHUNK_DEPTH, CHUNK_WIDTH, SECTION_SIZE};
 use std::collections::{HashSet, VecDeque};
 
-const LIGHT_DIRS: [(i32, i32, i32); 6] = [
-    (1, 0, 0),
-    (-1, 0, 0),
-    (0, 1, 0),
-    (0, -1, 0),
-    (0, 0, 1),
-    (0, 0, -1),
-];
+const LIGHT_DIRS: [(i32, i32, i32); 6] = Direction::all_deltas();
 
 pub struct LightNode {
     pub x: i32,

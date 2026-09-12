@@ -120,8 +120,7 @@ impl WeatherPresentation {
 }
 
 fn next_random(state: &mut u32) -> u32 {
-    *state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-    *state
+    crate::rng::lcg32_step(state)
 }
 
 fn random_unit(state: &mut u32) -> f32 {

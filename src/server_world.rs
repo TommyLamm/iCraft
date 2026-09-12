@@ -5,8 +5,8 @@
 //! never imports wgpu, winit, audio, camera, or UI modules.
 
 use crate::authority::contract::{
-    position_to_milli_opt, RevisionClock, SessionFishingHookState, SessionGameplayState,
-    SessionInventorySlot, WorldMutation,
+    milli_to_vec3, position_to_milli_opt, RevisionClock, SessionFishingHookState,
+    SessionGameplayState, SessionInventorySlot, WorldMutation,
 };
 use crate::authority::fishing::FishingDomainContext;
 use crate::authority::interest::chunks_around;
@@ -23,7 +23,7 @@ use crate::network::protocol::{
 };
 use crate::redstone::{RedstoneAction, RedstoneSystem};
 use crate::save::{ChunkSaveData, EntitySaveData, MutationRevisionIndex};
-use crate::world::BlockType;
+use crate::world::{BlockType, chunk_origin, chunk_xz};
 use glam::Vec3;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -48,8 +48,6 @@ const ENTITY_IDLE_VELOCITY_EPS: f32 = 1e-4;
 const HOSTILE_CHASE_RANGE: f32 = 40.0;
 const MAX_AUTOMATION_TRANSFERS: usize = 64;
 const MAX_FLUID_UPDATES: usize = 256;
-const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-const FNV_PRIME: u64 = 0x100000001b3;
 
 /// All state required to advance one deterministic world tick.
 pub struct ServerWorld {
@@ -240,7 +238,8 @@ impl ServerWorld {
     }
 
     pub fn safe_spawn_y(&mut self, x: i32, z: i32) -> i32 {
-        self.materialize_chunk(x.div_euclid(16), z.div_euclid(16));
+        let (cx, cz) = chunk_xz(x, z);
+        self.materialize_chunk(cx, cz);
         let height = self.dimension.height();
         for y in (height.min_y()..height.max_y_exclusive()).rev() {
             if self.get_block(x, y, z).properties().is_solid {
@@ -282,7 +281,7 @@ impl ServerWorld {
             .mark_block_entity_dirty(position.0, position.2);
         self.set_block_revision(position, revision);
         self.chunk_revisions.insert(
-            (position.0.div_euclid(16), position.2.div_euclid(16)),
+            chunk_xz(position.0, position.2),
             revision,
         );
         self.pending_mutations.push(WorldMutation {
@@ -395,7 +394,7 @@ impl ServerWorld {
     }
 
     fn column_in_set(&self, columns: &BTreeSet<(i32, i32)>, x: i32, z: i32) -> bool {
-        columns.contains(&(x.div_euclid(16), z.div_euclid(16)))
+        columns.contains(&chunk_xz(x, z))
     }
 
     /// Serialize one resident column for persistence. Failed-restore
@@ -456,7 +455,7 @@ impl ServerWorld {
     }
 
     fn set_block_revision(&mut self, position: (i32, i32, i32), revision: u64) {
-        let column = (position.0.div_euclid(16), position.2.div_euclid(16));
+        let column = chunk_xz(position.0, position.2);
         let column_map = self.block_revisions.entry(column).or_default();
         if let Some(old) = column_map.insert(position, revision) {
             if old == revision {
@@ -469,7 +468,7 @@ impl ServerWorld {
 
     #[allow(dead_code)]
     fn clear_block_revision(&mut self, position: (i32, i32, i32)) {
-        let column = (position.0.div_euclid(16), position.2.div_euclid(16));
+        let column = chunk_xz(position.0, position.2);
         let Some(column_map) = self.block_revisions.get_mut(&column) else {
             return;
         };
@@ -861,8 +860,9 @@ impl ServerWorld {
         if !self.valid_coordinate(x, y, z) {
             return Err(RejectReason::InvalidCoordinate);
         }
-        self.materialize_chunk(x.div_euclid(16), z.div_euclid(16));
-        if !self.chunk_is_resident(x.div_euclid(16), z.div_euclid(16)) {
+        let (cx, cz) = chunk_xz(x, z);
+        self.materialize_chunk(cx, cz);
+        if !self.chunk_is_resident(cx, cz) {
             return Err(RejectReason::InvalidState);
         }
         let old_block = self.get_block(x, y, z);
@@ -939,7 +939,7 @@ impl ServerWorld {
         let revision = self.revisions.allocate();
         self.set_block_revision((x, y, z), revision);
         self.chunk_revisions
-            .insert((x.div_euclid(16), z.div_euclid(16)), revision);
+            .insert(chunk_xz(x, z), revision);
 
         if block == BlockType::Fire {
             if let Some(interior) =
@@ -1108,8 +1108,9 @@ impl ServerWorld {
         {
             return Err(RejectReason::InvalidState);
         }
-        self.materialize_chunk(x.div_euclid(16), z.div_euclid(16));
-        if !self.chunk_is_resident(x.div_euclid(16), z.div_euclid(16)) {
+        let (cx, cz) = chunk_xz(x, z);
+        self.materialize_chunk(cx, cz);
+        if !self.chunk_is_resident(cx, cz) {
             return Err(RejectReason::InvalidState);
         }
 
@@ -1466,7 +1467,7 @@ impl ServerWorld {
         let revision = self.revisions.allocate();
         self.set_block_revision((x, y, z), revision);
         self.chunk_revisions
-            .insert((x.div_euclid(16), z.div_euclid(16)), revision);
+            .insert(chunk_xz(x, z), revision);
         WorldMutation {
             dimension: self.dimension as u8,
             position: (x, y, z),
@@ -1486,7 +1487,7 @@ impl ServerWorld {
         let revision = self.revisions.allocate();
         self.set_block_revision((x, y, z), revision);
         self.chunk_revisions
-            .insert((x.div_euclid(16), z.div_euclid(16)), revision);
+            .insert(chunk_xz(x, z), revision);
         WorldMutation {
             dimension: self.dimension as u8,
             position: mutation.position,
@@ -1942,7 +1943,7 @@ impl ServerWorld {
             };
             for &encoded in chunk.furnace_positions() {
                 let (lx, y, lz) = crate::world::Chunk::decode_torch_position(encoded);
-                positions.push((cx * 16 + lx as i32, y, cz * 16 + lz as i32));
+                positions.push((chunk_origin(cx) + lx as i32, y, chunk_origin(cz) + lz as i32));
             }
         }
         positions.sort_unstable();
@@ -2190,17 +2191,17 @@ impl ServerWorld {
         // do not scan the resident map. Entities contribute a cached sorted
         // fingerprint so idle (no spawn / despawn / pose / ai_phase change)
         // ticks skip sort + full-table hash.
-        let mut hash = FNV_OFFSET;
-        fnv1a_write(&mut hash, &self.time.to_le_bytes());
-        fnv1a_write(&mut hash, &self.revisions.current().to_le_bytes());
-        fnv1a_write(
+        let mut hash = crate::rng::FNV_OFFSET;
+        crate::rng::fnv1a_write(&mut hash, &self.time.to_le_bytes());
+        crate::rng::fnv1a_write(&mut hash, &self.revisions.current().to_le_bytes());
+        crate::rng::fnv1a_write(
             &mut hash,
             &[
                 self.rules.keep_inventory as u8,
                 self.rules.mob_griefing as u8,
             ],
         );
-        fnv1a_write(
+        crate::rng::fnv1a_write(
             &mut hash,
             &[
                 self.rules.do_daylight_cycle as u8,
@@ -2209,18 +2210,18 @@ impl ServerWorld {
             ],
         );
         for mutation in mutations {
-            fnv1a_write(&mut hash, &mutation.dimension.to_le_bytes());
-            fnv1a_write(&mut hash, &mutation.position.0.to_le_bytes());
-            fnv1a_write(&mut hash, &mutation.position.1.to_le_bytes());
-            fnv1a_write(&mut hash, &mutation.position.2.to_le_bytes());
-            fnv1a_write(&mut hash, &mutation.block.to_le_bytes());
-            fnv1a_write(&mut hash, &mutation.state.to_le_bytes());
-            fnv1a_write(&mut hash, &mutation.raw_fluid.to_le_bytes());
-            fnv1a_write(&mut hash, &mutation.revision.to_le_bytes());
+            crate::rng::fnv1a_write(&mut hash, &mutation.dimension.to_le_bytes());
+            crate::rng::fnv1a_write(&mut hash, &mutation.position.0.to_le_bytes());
+            crate::rng::fnv1a_write(&mut hash, &mutation.position.1.to_le_bytes());
+            crate::rng::fnv1a_write(&mut hash, &mutation.position.2.to_le_bytes());
+            crate::rng::fnv1a_write(&mut hash, &mutation.block.to_le_bytes());
+            crate::rng::fnv1a_write(&mut hash, &mutation.state.to_le_bytes());
+            crate::rng::fnv1a_write(&mut hash, &mutation.raw_fluid.to_le_bytes());
+            crate::rng::fnv1a_write(&mut hash, &mutation.revision.to_le_bytes());
         }
-        fnv1a_write(&mut hash, &self.block_revision_checksum.to_le_bytes());
+        crate::rng::fnv1a_write(&mut hash, &self.block_revision_checksum.to_le_bytes());
         let entity_fingerprint = self.entity_checksum_fingerprint();
-        fnv1a_write(&mut hash, &entity_fingerprint.to_le_bytes());
+        crate::rng::fnv1a_write(&mut hash, &entity_fingerprint.to_le_bytes());
         hash
     }
 
@@ -2228,7 +2229,7 @@ impl ServerWorld {
         if let Some(cached) = self.entities.cached_entity_fingerprint() {
             return cached;
         }
-        let mut hash = FNV_OFFSET;
+        let mut hash = crate::rng::FNV_OFFSET;
         let mut order: Vec<usize> = (0..self.entities.entities.len()).collect();
         order.sort_unstable_by_key(|&index| {
             let entity = &self.entities.entities[index];
@@ -2242,36 +2243,36 @@ impl ServerWorld {
         });
         for index in order {
             let entity = &self.entities.entities[index];
-            fnv1a_write(&mut hash, &entity.id.to_le_bytes());
-            fnv1a_write(&mut hash, &entity.position.x.to_bits().to_le_bytes());
-            fnv1a_write(&mut hash, &entity.position.y.to_bits().to_le_bytes());
-            fnv1a_write(&mut hash, &entity.position.z.to_bits().to_le_bytes());
-            fnv1a_write(&mut hash, &entity.ai_phase.to_le_bytes());
-            fnv1a_write(&mut hash, &[entity.entity_type.to_wire()]);
+            crate::rng::fnv1a_write(&mut hash, &entity.id.to_le_bytes());
+            crate::rng::fnv1a_write(&mut hash, &entity.position.x.to_bits().to_le_bytes());
+            crate::rng::fnv1a_write(&mut hash, &entity.position.y.to_bits().to_le_bytes());
+            crate::rng::fnv1a_write(&mut hash, &entity.position.z.to_bits().to_le_bytes());
+            crate::rng::fnv1a_write(&mut hash, &entity.ai_phase.to_le_bytes());
+            crate::rng::fnv1a_write(&mut hash, &[entity.entity_type.to_wire()]);
             let legacy_payload = entity
                 .dropped_item
                 .map(|item| crate::inventory::ItemStack::new(item, entity.dropped_count.max(1)));
             let payload = entity.dropped_stack.as_ref().or(legacy_payload.as_ref());
             if let Some(stack) = payload {
                 let wire = ItemWire::from_stack(stack);
-                fnv1a_write(&mut hash, &wire.item.to_le_bytes());
-                fnv1a_write(&mut hash, &wire.count.to_le_bytes());
-                fnv1a_write(&mut hash, &wire.durability.to_le_bytes());
-                fnv1a_write(&mut hash, &wire.enchantments);
-                fnv1a_write(&mut hash, &wire.custom_name);
-                fnv1a_write(&mut hash, &wire.can_break.to_le_bytes());
-                fnv1a_write(&mut hash, &wire.can_place_on.to_le_bytes());
+                crate::rng::fnv1a_write(&mut hash, &wire.item.to_le_bytes());
+                crate::rng::fnv1a_write(&mut hash, &wire.count.to_le_bytes());
+                crate::rng::fnv1a_write(&mut hash, &wire.durability.to_le_bytes());
+                crate::rng::fnv1a_write(&mut hash, &wire.enchantments);
+                crate::rng::fnv1a_write(&mut hash, &wire.custom_name);
+                crate::rng::fnv1a_write(&mut hash, &wire.can_break.to_le_bytes());
+                crate::rng::fnv1a_write(&mut hash, &wire.can_place_on.to_le_bytes());
                 if let Some(potion) = wire.potion {
-                    fnv1a_write(
+                    crate::rng::fnv1a_write(
                         &mut hash,
                         &[1, potion.kind, potion.level, potion.splash as u8],
                     );
-                    fnv1a_write(&mut hash, &potion.duration_seconds.to_le_bytes());
+                    crate::rng::fnv1a_write(&mut hash, &potion.duration_seconds.to_le_bytes());
                 } else {
-                    fnv1a_write(&mut hash, &[0]);
+                    crate::rng::fnv1a_write(&mut hash, &[0]);
                 }
             } else {
-                fnv1a_write(&mut hash, &[0]);
+                crate::rng::fnv1a_write(&mut hash, &[0]);
             }
         }
         self.entities.store_entity_fingerprint(hash);
@@ -2321,19 +2322,12 @@ fn look_from_yaw_pitch(yaw: f32, pitch: f32) -> Vec3 {
     Vec3::new(-yaw.sin() * horizontal, -pitch.sin(), yaw.cos() * horizontal)
 }
 
-fn fnv1a_write(hash: &mut u64, bytes: &[u8]) {
-    for byte in bytes {
-        *hash ^= u64::from(*byte);
-        *hash = hash.wrapping_mul(FNV_PRIME);
-    }
-}
-
 fn block_revision_fingerprint(position: (i32, i32, i32), revision: u64) -> u64 {
-    let mut hash = FNV_OFFSET;
-    fnv1a_write(&mut hash, &position.0.to_le_bytes());
-    fnv1a_write(&mut hash, &position.1.to_le_bytes());
-    fnv1a_write(&mut hash, &position.2.to_le_bytes());
-    fnv1a_write(&mut hash, &revision.to_le_bytes());
+    let mut hash = crate::rng::FNV_OFFSET;
+    crate::rng::fnv1a_write(&mut hash, &position.0.to_le_bytes());
+    crate::rng::fnv1a_write(&mut hash, &position.1.to_le_bytes());
+    crate::rng::fnv1a_write(&mut hash, &position.2.to_le_bytes());
+    crate::rng::fnv1a_write(&mut hash, &revision.to_le_bytes());
     hash
 }
 
@@ -2356,13 +2350,6 @@ fn operation_position(operation: &GameplayOperation) -> Option<(i32, i32, i32)> 
     }
 }
 
-fn milli_to_vec3(position: [i32; 3]) -> Vec3 {
-    Vec3::new(
-        position[0] as f32 / 1_000.0,
-        position[1] as f32 / 1_000.0,
-        position[2] as f32 / 1_000.0,
-    )
-}
 
 #[cfg(test)]
 mod tests {

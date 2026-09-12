@@ -1,6 +1,7 @@
 use super::placement::{get_structure_candidate_in_region, origin_y_for};
 use super::types::StructureId;
 use crate::dimension::Dimension;
+use crate::world::{chunk_origin, chunk_xz};
 
 pub fn locate_structure(
     id: StructureId,
@@ -8,8 +9,7 @@ pub fn locate_structure(
     world_seed: u32,
     dimension: Dimension,
 ) -> Option<(i32, i32, i32)> {
-    let current_chunk_x = current_pos.0.div_euclid(16);
-    let current_chunk_z = current_pos.2.div_euclid(16);
+    let (current_chunk_x, current_chunk_z) = chunk_xz(current_pos.0, current_pos.2);
 
     let mut closest: Option<((i32, i32, i32), f64)> = None;
     let radius_regions = 20;
@@ -26,8 +26,8 @@ pub fn locate_structure(
                 if let Some((chunk_x, chunk_z)) =
                     get_structure_candidate_in_region(id, dimension, world_seed, reg_x, reg_z)
                 {
-                    let origin_x = chunk_x * 16 + 2;
-                    let origin_z = chunk_z * 16 + 2;
+                    let origin_x = chunk_origin(chunk_x) + 2;
+                    let origin_z = chunk_origin(chunk_z) + 2;
                     let origin_y = origin_y_for(id, world_seed, chunk_x, chunk_z);
 
                     let dx = (origin_x - current_pos.0) as f64;
@@ -81,8 +81,7 @@ mod tests {
         let seed = 1234567;
         let pos = locate_structure(StructureId::Dungeon, (0, 64, 0), seed, Dimension::Overworld)
             .expect("dungeon candidate");
-        let chunk_x = pos.0.div_euclid(16);
-        let chunk_z = pos.2.div_euclid(16);
+        let (chunk_x, chunk_z) = chunk_xz(pos.0, pos.2);
         assert_eq!(
             pos.1,
             origin_y_for(StructureId::Dungeon, seed, chunk_x, chunk_z)
@@ -108,7 +107,7 @@ mod tests {
         let chunk_z = -3;
         let y = origin_y_for(StructureId::Village, seed, chunk_x, chunk_z);
         let ctx = crate::worldgen::WorldGenContext::new(seed);
-        let surface = ctx.surface_height_at(chunk_x * 16 + 2, chunk_z * 16 + 2);
+        let surface = ctx.surface_height_at(chunk_origin(chunk_x) + 2, chunk_origin(chunk_z) + 2);
         let height = Dimension::Overworld.height();
         assert_eq!(
             y,

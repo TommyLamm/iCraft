@@ -262,14 +262,12 @@ fn parse_difficulty(value: &str) -> Result<String, io::Error> {
 }
 
 fn parse_bool_flag(key: &str, value: &str) -> Result<bool, io::Error> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" | "on" => Ok(true),
-        "false" | "0" | "no" | "off" => Ok(false),
-        _ => Err(io::Error::new(
+    icraft::game_rules::parse_bool_flag(value).ok_or_else(|| {
+        io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("{key} must be true/false (got {value:?})"),
-        )),
-    }
+        )
+    })
 }
 
 fn parse_names(value: &str) -> Result<HashSet<String>, io::Error> {

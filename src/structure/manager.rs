@@ -5,6 +5,7 @@ use crate::dimension::Dimension;
 use crate::world::Chunk;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use crate::world::{chunk_origin, chunk_xz};
 
 pub struct StructureManager {
     starts: Mutex<HashMap<(u32, Dimension, i32, i32), Vec<StructureStart>>>,
@@ -46,8 +47,8 @@ impl StructureManager {
             if let Some((chunk_x, chunk_z)) =
                 get_structure_candidate_in_region(id, dimension, seed, region_x, region_z)
             {
-                let origin_x = chunk_x * 16 + 2;
-                let origin_z = chunk_z * 16 + 2;
+                let origin_x = chunk_origin(chunk_x) + 2;
+                let origin_z = chunk_origin(chunk_z) + 2;
                 let origin_y = origin_y_for(id, seed, chunk_x, chunk_z);
 
                 let start = match id {
@@ -101,8 +102,7 @@ impl StructureManager {
                         }
 
                         for block in &piece.blocks {
-                            let b_chunk_x = block.world_x.div_euclid(16);
-                            let b_chunk_z = block.world_z.div_euclid(16);
+                            let (b_chunk_x, b_chunk_z) = chunk_xz(block.world_x, block.world_z);
 
                             if b_chunk_x == chunk_x && b_chunk_z == chunk_z {
                                 let lx = block.world_x.rem_euclid(16) as usize;

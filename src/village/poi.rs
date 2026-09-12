@@ -1,5 +1,6 @@
 #[cfg(test)]
 use crate::dimension::Dimension;
+use crate::world::chunk_xz;
 #[cfg(test)]
 use crate::world::BlockType;
 #[cfg(test)]
@@ -119,8 +120,7 @@ impl PoiManager {
         };
         self.pois.insert((dimension, pos), entry);
 
-        let cx = pos.0 >> 4;
-        let cz = pos.2 >> 4;
+        let (cx, cz) = chunk_xz(pos.0, pos.2);
         let positions = self.chunk_pois.entry((dimension, cx, cz)).or_default();
         if !positions.contains(&pos) {
             positions.push(pos);
@@ -130,8 +130,7 @@ impl PoiManager {
     pub fn remove_poi(&mut self, dimension: Dimension, pos: (i32, i32, i32)) -> Option<PoiEntry> {
         let removed = self.pois.remove(&(dimension, pos));
         if removed.is_some() {
-            let cx = pos.0 >> 4;
-            let cz = pos.2 >> 4;
+            let (cx, cz) = chunk_xz(pos.0, pos.2);
             if let Some(list) = self.chunk_pois.get_mut(&(dimension, cx, cz)) {
                 list.retain(|p| *p != pos);
             }

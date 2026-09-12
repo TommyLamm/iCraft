@@ -4,6 +4,7 @@ use crate::world::{
 };
 use glam::Vec3;
 use noise::{NoiseFn, Perlin};
+use crate::world::chunk_xz;
 
 pub type BlockPos = (i32, i32, i32);
 
@@ -241,8 +242,7 @@ fn apply_fixed_end_city(chunk: &mut Chunk, seed: u32) {
             continue;
         }
         for placement in &piece.blocks {
-            if placement.world_x.div_euclid(16) != chunk.chunk_x
-                || placement.world_z.div_euclid(16) != chunk.chunk_z
+            if chunk_xz(placement.world_x, placement.world_z) != (chunk.chunk_x, chunk.chunk_z)
             {
                 continue;
             }

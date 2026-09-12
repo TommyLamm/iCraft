@@ -44,6 +44,38 @@ pub fn milli_within_abs_limit(value: i32) -> bool {
     value.unsigned_abs() <= POSITION_MILLI_ABS_LIMIT as u32
 }
 
+/// Inverse of pose milli encoding (no abs-limit check — callers already gated).
+pub fn milli_to_vec3(position: [i32; 3]) -> glam::Vec3 {
+    glam::Vec3::new(
+        position[0] as f32 / 1_000.0,
+        position[1] as f32 / 1_000.0,
+        position[2] as f32 / 1_000.0,
+    )
+}
+
+/// Non-negative scalar → milli. Non-finite values become `0`.
+pub fn scalar_to_milli(value: f32) -> u32 {
+    if !value.is_finite() {
+        return 0;
+    }
+    (value.max(0.0) * 1_000.0).round() as u32
+}
+
+/// Milli → non-negative scalar.
+pub fn milli_to_scalar(value: u32) -> f32 {
+    value as f32 / 1_000.0
+}
+
+/// Health / combat milli. Non-finite values become `u32::MAX` (distinct from
+/// [`scalar_to_milli`]'s zero — invalid health must not look like death).
+pub fn quantize_health(health: f32) -> u32 {
+    if health.is_finite() {
+        (health.max(0.0) * 1_000.0).round().min(u32::MAX as f32) as u32
+    } else {
+        u32::MAX
+    }
+}
+
 /// Monotonic server revision shared by mutations and ACKs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RevisionClock {
@@ -100,6 +132,25 @@ impl SessionInventorySlot {
             can_break,
             can_place_on,
         }
+    }
+
+    /// Map a live stack into the compact session wire form.
+    ///
+    /// Empty stacks and counts above `u16::MAX` (ItemWire capacity) become
+    /// `None` so runtime / desktop / harness share one count-cap policy.
+    pub fn from_stack(stack: &ItemStack) -> Option<Self> {
+        if stack.count == 0 || stack.count > u32::from(u16::MAX) {
+            return None;
+        }
+        Some(Self::from_wire(
+            ItemWire::from_stack(stack),
+            stack.can_break,
+            stack.can_place_on,
+        ))
+    }
+
+    pub fn from_stack_opt(stack: Option<&ItemStack>) -> Option<Self> {
+        stack.and_then(Self::from_stack)
     }
 
     pub fn to_stack(&self) -> Option<ItemStack> {

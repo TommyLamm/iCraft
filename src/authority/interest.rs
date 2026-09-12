@@ -8,6 +8,7 @@
 use crate::chunk_schedule::UNLOAD_HYSTERESIS;
 use crate::dimension::Dimension;
 use std::collections::{BTreeSet, HashSet};
+use crate::world::chunk_xz;
 
 /// Same extra Chebyshev ring the client uses before unloading a column.
 pub const RESIDENCY_HYSTERESIS: i32 = UNLOAD_HYSTERESIS;
@@ -169,7 +170,7 @@ impl InterestSet {
             self.chunk_rebuilds = self.chunk_rebuilds.saturating_add(1);
         }
         self.open_containers.retain(|position| {
-            let chunk = (position.0.div_euclid(16), position.2.div_euclid(16));
+            let chunk = chunk_xz(position.0, position.2);
             self.chunks.contains(&chunk)
         });
         let mut entered: Vec<_> = if old_dimension == dimension {
@@ -244,7 +245,7 @@ impl InterestSet {
             | InterestKind::BlockEntity(position)
             | InterestKind::Container(position) => self
                 .chunks
-                .contains(&(position.0.div_euclid(16), position.2.div_euclid(16))),
+                .contains(&chunk_xz(position.0, position.2)),
         }
     }
 
@@ -302,8 +303,7 @@ where
 
 /// Capped spawn ring kept only while a dimension has no sessions.
 pub fn capped_spawn_residency(spawn_x: i32, spawn_z: i32) -> BTreeSet<ChunkCoord> {
-    let cx = spawn_x.div_euclid(16);
-    let cz = spawn_z.div_euclid(16);
+    let (cx, cz) = chunk_xz(spawn_x, spawn_z);
     let mut chunks = BTreeSet::new();
     for dx in -SPAWN_RESIDENCY_RADIUS..=SPAWN_RESIDENCY_RADIUS {
         for dz in -SPAWN_RESIDENCY_RADIUS..=SPAWN_RESIDENCY_RADIUS {

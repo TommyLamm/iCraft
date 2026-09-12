@@ -14,6 +14,7 @@ use crate::network::server::{HostToServer, ProjectionEvent, ServerToHost};
 use crate::save::normalize_player_identity;
 use std::io;
 use std::time::Instant;
+use crate::world::chunk_xz;
 
 impl ServerRuntime {
     pub(super) fn handle_event(&mut self, event: ServerToHost) -> io::Result<()> {
@@ -473,8 +474,10 @@ impl ServerRuntime {
                 .map(|session| session.interest.dimension)
             {
                 let _ = self.authority.with_world(dimension, |world| {
-                    world.ensure_chunk(target.0.div_euclid(16), target.1.div_euclid(16));
-                    world.ensure_chunk(support.0.div_euclid(16), support.1.div_euclid(16));
+                    let (tcx, tcz) = chunk_xz(target.0, target.1);
+                    let (scx, scz) = chunk_xz(support.0, support.1);
+                    world.ensure_chunk(tcx, tcz);
+                    world.ensure_chunk(scx, scz);
                 });
             }
         }

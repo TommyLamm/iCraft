@@ -18,6 +18,7 @@ use crate::save::ChunkSaveData;
 use glam::Vec3;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use crate::world::chunk_xz;
 
 /// Pose / health / anim signature used to skip unchanged entity state fanout.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -638,7 +639,7 @@ impl ServerRuntime {
     ) -> Vec<u64> {
         let mut targets: Vec<u64> = match kind {
             InterestKind::Block(position) | InterestKind::BlockEntity(position) => {
-                let chunk = (position.0.div_euclid(16), position.2.div_euclid(16));
+                let chunk = chunk_xz(position.0, position.2);
                 let mut ids = self.sessions_interested_in_chunk(dimension, chunk);
                 ids.retain(|id| {
                     self.players
@@ -648,7 +649,7 @@ impl ServerRuntime {
                 ids
             }
             InterestKind::Container(position) => {
-                let chunk = (position.0.div_euclid(16), position.2.div_euclid(16));
+                let chunk = chunk_xz(position.0, position.2);
                 let mut ids = self.sessions_interested_in_chunk(dimension, chunk);
                 ids.retain(|id| {
                     self.players

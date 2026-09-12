@@ -12,6 +12,7 @@ use super::protocol::{
     PlayerEffectWire, PlayerId, SessionGameplayWire, PROTOCOL_VERSION,
 };
 use super::transport::{Connection, ConnectionWriter};
+use crate::world::chunk_xz;
 
 /// Bounded network-client → game-thread queue. A malicious server cannot grow
 /// this without bound; sustained overflow disconnects the join client.
@@ -340,7 +341,7 @@ impl RevisionGate {
         state: u8,
         raw_fluid: u8,
     ) -> Vec<Packet> {
-        let key = (dimension, x.div_euclid(16), z.div_euclid(16));
+        let key = { let (cx, cz) = chunk_xz(x, z); (dimension, cx, cz) };
         if let Some(current) = self.applied.get_mut(&key) {
             if revision <= *current {
                 return Vec::new();

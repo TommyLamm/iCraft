@@ -5,6 +5,7 @@ use crate::network::protocol::PlayerId;
 use crate::server_world::FIXED_DT;
 use crate::world::BlockType;
 use glam::Vec3;
+use crate::world::chunk_xz;
 
 impl AuthorityCore {
     pub(crate) fn tick_portal_travel(&mut self, dimension: Dimension) {
@@ -120,8 +121,7 @@ impl AuthorityCore {
                         target_dim,
                         Vec3::from_array(position),
                     );
-                    let cx = scaled.x.floor() as i32 >> 4;
-                    let cz = scaled.z.floor() as i32 >> 4;
+                    let (cx, cz) = chunk_xz(scaled.x.floor() as i32, scaled.z.floor() as i32);
                     let height = target_dim.height();
 
                     let target_pos = {

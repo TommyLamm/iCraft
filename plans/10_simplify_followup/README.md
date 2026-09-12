@@ -79,7 +79,7 @@
 | 21 | [`catalog.rs`／`recipes.rs` 資料表化](21_item_catalog_and_recipes_tables.md) | P2 | ~-2,000 行 match 與 `add_shaped` | 無 | 已完成 |
 | 22 | [渲染資料表：mob 部件、atlas paint-on-miss、單一 cube emitter、shader 殘留](22_render_data_tables_mob_texture_cube.md) | P2 | ~-2,500 行；啟動不再畫兩次 atlas | 無 | 已完成 |
 | 23 | [`menu.rs` widget 表、共用 `GpuContext`、controls 單表](23_menu_widget_table_and_shared_gpu.md) | P2 | ~-1,500 行；menu↔game 不再重建 device | 無 | 已完成 |
-| 24 | [跨模組 helper 合併：slot／鄰居／ray／座標／milli／RNG／parse_bool／spawn](24_cross_cutting_helpers.md) | P2 | ~-300 行；修 entity ray 除零 | 09 波 13 | 未開始 |
+| 24 | [跨模組 helper 合併：slot／鄰居／ray／座標／milli／RNG／parse_bool／spawn](24_cross_cutting_helpers.md) | P2 | ~-300 行；修 entity ray 除零 | 09 波 13 | 已完成 |
 | 25 | [結構生成 helper 與雙 End City](25_structure_gen_helpers_and_end_city.md) | P2 | ~-450 行 box／chest／start 樣板；一套 End City 放置 | 無 | 未開始 |
 | 26 | [`ChunkManager` 拆 presentation／authority，dense chunk grid](26_chunk_manager_split_and_dense_grid.md) | P2 | 權威 `set_block` 不再維護兩個無人 drain 的 mesh set；每 `get_block` 少 hash | 15、17 | 未開始 |
 | 27 | [巨檔機械切分：server_world／server_runtime／dispatch／network／mesh／block／redstone／catalog／state](27_giant_file_splits.md) | P2 | 導航與編譯隔離；~9,000 行 inline 測試移出 | 01–06 | 未開始 |

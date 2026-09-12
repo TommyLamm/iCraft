@@ -1,5 +1,6 @@
 use crate::chunk_manager::ChunkManager;
 use crate::entity::{EntityManager, EntityType};
+use crate::mob::{try_ambient_spawn, AmbientSpawnRule};
 use glam::Vec3;
 
 pub fn spawn_passive_mobs(
@@ -9,60 +10,37 @@ pub fn spawn_passive_mobs(
     sky_light_level: u8,
     time: f32,
 ) {
-    // Limit total passive mobs to prevent lag.
+    if sky_light_level < 10 {
+        return;
+    }
+
     let passive_count = entity_manager.count_passive();
-    if passive_count >= 15 {
-        return;
-    }
-
-    let mut next_rand =
-        crate::mob::ambient_spawn_rng(player_pos, entity_manager.entities.len(), time);
-
-    // Establish the first visible population promptly, then fall back to the
-    // lower ambient spawn rate.
     let attempt_modulus = if passive_count == 0 { 5 } else { 100 };
-    if sky_light_level < 10 || next_rand() % attempt_modulus != 0 {
-        return;
-    }
-
-    let angle = (next_rand() % 360) as f32 * std::f32::consts::PI / 180.0;
-    // Stay inside the loaded view radius.  The former 24..79 block range was
-    // usually outside a fresh world's authoritative chunks, so every spawn
-    // attempt sampled Air and silently failed.
     let max_dist = (chunk_manager.render_distance.max(1) as u32 * 16)
         .saturating_sub(4)
         .clamp(12, 64);
-    let dist = (8 + next_rand() % max_dist.saturating_sub(7)) as f32;
-    let spawn_x = (player_pos.x + angle.cos() * dist) as i32;
-    let spawn_z = (player_pos.z + angle.sin() * dist) as i32;
+    // Former range: (8 + next_rand() % max_dist.saturating_sub(7))
+    let dist_span = max_dist.saturating_sub(7).max(1);
 
-    let height = chunk_manager.dimension.height();
-    if let Some(solid_y) = chunk_manager.highest_solid_y(spawn_x, spawn_z) {
-        let spawn_y = solid_y + 1;
-        if height.contains_y(spawn_y) && height.contains_y(spawn_y + 1) {
-            let block_below = chunk_manager.get_block(spawn_x, solid_y, spawn_z);
-            let block_feet = chunk_manager.get_block(spawn_x, spawn_y, spawn_z);
-            let block_head = chunk_manager.get_block(spawn_x, spawn_y + 1, spawn_z);
-
-            // Passive mobs spawn on Grass Blocks under daylight
-            if block_below == crate::world::BlockType::Grass
-                && block_feet == crate::world::BlockType::Air
-                && block_head == crate::world::BlockType::Air
-            {
-                let r = next_rand() % 4;
-                let et = match r {
-                    0 => EntityType::Pig,
-                    1 => EntityType::Cow,
-                    2 => EntityType::Sheep,
-                    _ => EntityType::Chicken,
-                };
-                entity_manager.spawn(
-                    et,
-                    Vec3::new(spawn_x as f32 + 0.5, spawn_y as f32, spawn_z as f32 + 0.5),
-                );
-            }
-        }
-    }
+    const PASSIVE_TABLE: [EntityType; 4] = [
+        EntityType::Pig,
+        EntityType::Cow,
+        EntityType::Sheep,
+        EntityType::Chicken,
+    ];
+    try_ambient_spawn(
+        entity_manager,
+        chunk_manager,
+        player_pos,
+        time,
+        15,
+        passive_count,
+        attempt_modulus,
+        8,
+        dist_span,
+        &PASSIVE_TABLE,
+        AmbientSpawnRule::Passive,
+    );
 }
 
 #[cfg(test)]

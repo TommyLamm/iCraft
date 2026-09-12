@@ -124,11 +124,9 @@ fn stack_from_source(source: SlotRefWire) -> Result<ItemStack, RejectReason> {
 }
 
 fn slot_from_stack(stack: ItemStack) -> SessionInventorySlot {
-    SessionInventorySlot::from_wire(
-        ItemWire::from_stack(&stack),
-        stack.can_break,
-        stack.can_place_on,
-    )
+    SessionInventorySlot::from_stack(&stack).unwrap_or_else(|| {
+        SessionInventorySlot::from_wire(ItemWire::from_stack(&stack), stack.can_break, stack.can_place_on)
+    })
 }
 
 fn wire_from_stack(stack: ItemStack) -> SessionSlotWire {
