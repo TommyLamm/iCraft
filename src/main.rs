@@ -1,69 +1,59 @@
-pub mod accessibility;
-pub mod advancements;
-pub mod ai;
-mod app;
-pub mod audio;
-pub mod authority;
-pub mod block_entity;
-mod block_model;
-mod boss;
-mod brewing;
-mod camera;
-pub(crate) mod chunk_manager;
-mod chunk_render;
-mod chunk_schedule;
-pub mod commands;
-mod container_sessions;
-mod crafting;
-mod culling;
-mod dimension;
-mod enchantment;
-mod entity;
-pub mod final_acceptance;
-pub mod fishing;
-mod fluid;
-pub mod game_rules;
-pub mod gpu_frame_resources;
-mod hand_renderer;
-mod interaction;
-mod inventory;
-mod lighting;
-pub mod localization;
-pub mod loot;
-mod menu;
-pub(crate) mod microbench;
-mod mob;
-mod mob_renderer;
-pub mod navigation;
-pub(crate) mod network;
-mod particles;
-mod passive_mob;
-mod perf;
-pub(crate) mod physics;
-mod player;
-pub mod rail;
-pub mod recipes;
-mod redstone;
-pub mod resources;
-pub mod save;
-mod server_runtime;
-pub mod server_world;
-pub mod sim_harness;
-pub mod spawning;
-mod state;
-pub mod structure;
-mod texture;
-pub mod vehicle;
-pub mod village;
-pub mod voxel_shape;
+//! Desktop entrypoint.
+//!
+//! Shared gameplay/network modules come from the `icraft` library via
+//! `pub use` so desktop files can keep `crate::world` (and friends) without
+//! compiling those sources a second time. Desktop-only GPU/menu modules
+//! stay declared here and must not be added to `lib.rs`.
+//! `--microbench` uses this crate's `mod microbench` behind feature
+//! `microbench` (`cargo run --features microbench -- --microbench`).
+
+pub use icraft::{
+    authority, block_entity, block_model, boss, brewing, chunk_manager, chunk_render,
+    chunk_schedule, commands, dimension, enchantment, entity, fishing, game_rules, interaction,
+    inventory, lighting, navigation, network, passive_mob, perf, physics, player,
+    presentation_inventory_policy, recipes, redstone, resources, rng, save, server_runtime,
+    server_world, structure, village, world,
+};
+
+// Desktop-only (Wave 10 Plan 06): keep GPU/UI/lang/LOS worker out of icraft-server.
+mod accessibility;
+mod advancements;
+mod localization;
 mod weather;
-pub(crate) mod world;
-pub mod world_mutation;
-pub mod world_tick;
-mod worldgen;
+
+/// Section visibility traversal (desktop-only; not in `icraft` lib).
+#[path = "presentation/visibility.rs"]
+mod culling_visibility;
+
+/// Lib LOS/connectivity plus desktop section-visibility traversal.
+pub mod culling {
+    pub use icraft::culling::*;
+    pub use icraft::culling::{connectivity, los};
+    pub use crate::culling_visibility::*;
+}
+
+mod app;
+mod audio;
+mod camera;
+mod gpu_frame_resources;
+mod glyph_atlas;
+mod hand_renderer;
+mod menu;
+#[cfg(feature = "microbench")]
+mod microbench;
+mod mob_parts;
+mod mob_renderer;
+mod particles;
+mod presentation;
+mod presentation_click;
+mod state;
+mod texture;
 
 use app::App;
 use winit::event_loop::EventLoop;
+
+#[global_allocator]
+static GLOBAL_ALLOCATOR: perf::AllocTracker = perf::AllocTracker;
 
 fn wants_microbench<I, S>(args: I) -> bool
 where
@@ -75,8 +65,18 @@ where
 
 fn main() {
     if wants_microbench(std::env::args()) {
-        let _ = microbench::run();
-        return;
+        #[cfg(feature = "microbench")]
+        {
+            let _ = microbench::run();
+            return;
+        }
+        #[cfg(not(feature = "microbench"))]
+        {
+            eprintln!(
+                "--microbench requires feature `microbench`: cargo run --features microbench -- --microbench"
+            );
+            std::process::exit(2);
+        }
     }
 
     let event_loop = EventLoop::new().unwrap();
@@ -93,5 +93,19 @@ mod tests {
     fn microbench_flag_is_selected_without_affecting_other_args() {
         assert!(wants_microbench(["mc", "--microbench"]));
         assert!(!wants_microbench(["mc", "--help"]));
+    }
+
+    #[test]
+    fn thread_alloc_count_is_local_to_calling_thread() {
+        let handle = std::thread::spawn(|| {
+            let _allocation = Box::new([0u8; 64]);
+        });
+        let caller_after_spawn = crate::perf::thread_alloc_count();
+        handle.join().unwrap();
+        assert_eq!(crate::perf::thread_alloc_count(), caller_after_spawn);
+
+        let before = crate::perf::thread_alloc_count();
+        let _allocation = Box::new([0u8; 64]);
+        assert!(crate::perf::thread_alloc_count() > before);
     }
 }

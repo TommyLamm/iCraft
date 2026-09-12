@@ -1,0 +1,245 @@
+use std::collections::HashSet;
+use std::sync::mpsc as std_mpsc;
+use std::time::Duration;
+
+use super::protocol::{Action, Packet, PlayerId};
+
+pub(crate) const MAX_CATCHUP_QUEUE_DEPTH: usize = 32;
+pub(crate) const DEFAULT_POSE_RATE_PER_SECOND: u32 = 20;
+pub(crate) const DEFAULT_CHAT_RATE_PER_SECOND: u32 = 8;
+pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Debug)]
+pub struct ServerConfig {
+    pub catchup_queue_capacity: usize,
+    pub catchup_drain_delay: Duration,
+    pub max_players: usize,
+    pub motd: String,
+    pub whitelist: HashSet<String>,
+    pub request_rate_per_second: u32,
+    pub pose_rate_per_second: u32,
+    pub chat_rate_per_second: u32,
+    pub handshake_timeout: Duration,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            catchup_queue_capacity: MAX_CATCHUP_QUEUE_DEPTH,
+            catchup_drain_delay: Duration::ZERO,
+            max_players: 20,
+            motd: "iCraft server".to_string(),
+            whitelist: HashSet::new(),
+            request_rate_per_second: 120,
+            pose_rate_per_second: DEFAULT_POSE_RATE_PER_SECOND,
+            chat_rate_per_second: DEFAULT_CHAT_RATE_PER_SECOND,
+            handshake_timeout: HANDSHAKE_TIMEOUT,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ServerToHost {
+    Disconnected {
+        reason: String,
+    },
+    ClientJoined {
+        id: PlayerId,
+        username: String,
+    },
+    ClientLeft {
+        id: PlayerId,
+    },
+    ClientPosition {
+        id: PlayerId,
+        sequence: u32,
+        sender_time_millis: u64,
+        x: f32,
+        y: f32,
+        z: f32,
+        yaw: f32,
+        pitch: f32,
+    },
+    ClientAction {
+        id: PlayerId,
+        action: Action,
+    },
+    GameplayRequest {
+        id: PlayerId,
+        request: super::protocol::GameplayRequest,
+    },
+    ChatFromClient {
+        id: PlayerId,
+        message: String,
+    },
+    ClientRespawnRequest {
+        id: PlayerId,
+    },
+}
+
+/// Who should receive a projection already shaped as a wire `Packet`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionDest {
+    Session(PlayerId),
+    Broadcast,
+}
+
+/// Runtime→transport / embedded presentation event: one `Packet` plus routing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectionEvent {
+    pub dest: ProjectionDest,
+    pub packet: Packet,
+}
+
+impl ProjectionEvent {
+    pub fn session(to: PlayerId, packet: Packet) -> Self {
+        Self {
+            dest: ProjectionDest::Session(to),
+            packet,
+        }
+    }
+
+    pub fn broadcast(packet: Packet) -> Self {
+        Self {
+            dest: ProjectionDest::Broadcast,
+            packet,
+        }
+    }
+
+    pub fn session_id(&self) -> Option<PlayerId> {
+        match self.dest {
+            ProjectionDest::Session(id) => Some(id),
+            ProjectionDest::Broadcast => None,
+        }
+    }
+}
+
+/// Host→network-thread control and projection channel.
+/// Gameplay payloads travel as [`ProjectionEvent`] (a wire [`Packet`] plus dest);
+/// only disconnect / stop remain as distinct control variants.
+#[derive(Debug)]
+pub enum HostToServer {
+    Project(ProjectionEvent),
+    DisconnectCatchupClient {
+        to: PlayerId,
+        reason: String,
+    },
+    DisconnectClient {
+        to: PlayerId,
+        reason: String,
+    },
+    Stop,
+}
+
+impl HostToServer {
+    pub fn project_session(to: PlayerId, packet: Packet) -> Self {
+        Self::Project(ProjectionEvent::session(to, packet))
+    }
+
+    pub fn project_broadcast(packet: Packet) -> Self {
+        Self::Project(ProjectionEvent::broadcast(packet))
+    }
+}
+
+/// Host event transport is bounded in production (`SyncSender`) while tests
+/// may use the legacy unbounded sender. The trait keeps NetworkServer's
+/// protocol logic independent of that queue choice and makes `try_send`
+/// semantics explicit for bounded channels.
+///
+/// `Full` is per-connection ingress backpressure. Callers must not treat it
+/// as a dead host or kick unrelated clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostEventSendError {
+    Full,
+    Closed,
+}
+
+pub trait HostEventSender: Clone + Send + Sync + 'static {
+    fn send(&self, event: ServerToHost) -> Result<(), HostEventSendError>;
+}
+
+impl HostEventSender for std_mpsc::Sender<ServerToHost> {
+    fn send(&self, event: ServerToHost) -> Result<(), HostEventSendError> {
+        std_mpsc::Sender::send(self, event).map_err(|_| HostEventSendError::Closed)
+    }
+}
+
+impl HostEventSender for std_mpsc::SyncSender<ServerToHost> {
+    fn send(&self, event: ServerToHost) -> Result<(), HostEventSendError> {
+        match self.try_send(event) {
+            Ok(()) => Ok(()),
+            Err(std_mpsc::TrySendError::Full(_)) => Err(HostEventSendError::Full),
+            Err(std_mpsc::TrySendError::Disconnected(_)) => Err(HostEventSendError::Closed),
+        }
+    }
+}
+
+/// Production host-event boundary with exact backlog and saturation accounting.
+/// The runtime decrements the same gauge only after `Receiver::try_recv` takes
+/// ownership, so the snapshot is a queue gauge rather than a processed-event
+/// estimate.
+#[derive(Clone)]
+pub(crate) struct MeteredHostEventSender {
+    sender: std_mpsc::SyncSender<ServerToHost>,
+    metrics: super::session::NetworkMetrics,
+}
+
+impl MeteredHostEventSender {
+    pub(crate) fn new(
+        sender: std_mpsc::SyncSender<ServerToHost>,
+        metrics: super::session::NetworkMetrics,
+    ) -> Self {
+        Self { sender, metrics }
+    }
+}
+
+impl HostEventSender for MeteredHostEventSender {
+    fn send(&self, event: ServerToHost) -> Result<(), HostEventSendError> {
+        // Increment before publishing: a consumer on another thread may take
+        // the event as soon as `try_send` succeeds. Failed publication rolls
+        // the reservation back, keeping the gauge race-free.
+        self.metrics.enqueue();
+        match self.sender.try_send(event) {
+            Ok(()) => Ok(()),
+            Err(std_mpsc::TrySendError::Full(_)) => {
+                self.metrics.dequeue();
+                self.metrics.record_queue_full();
+                Err(HostEventSendError::Full)
+            }
+            Err(std_mpsc::TrySendError::Disconnected(_)) => {
+                self.metrics.dequeue();
+                Err(HostEventSendError::Closed)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metered_host_event_queue_counts_success_full_and_receive_once() {
+        let (tx, rx) = std_mpsc::sync_channel(1);
+        let metrics = super::super::session::NetworkMetrics::default();
+        let sender = MeteredHostEventSender::new(tx, metrics.clone());
+        assert!(sender
+            .send(ServerToHost::Disconnected {
+                reason: "first".into(),
+            })
+            .is_ok());
+        assert_eq!(metrics.snapshot().queue_depth, 1);
+        assert_eq!(
+            sender.send(ServerToHost::Disconnected {
+                reason: "full".into(),
+            }),
+            Err(HostEventSendError::Full)
+        );
+        assert_eq!(metrics.snapshot().queue_depth, 1);
+        assert_eq!(metrics.snapshot().queue_full, 1);
+
+        let _ = rx.try_recv().expect("runtime takes one metered event");
+        metrics.dequeue();
+        assert_eq!(metrics.snapshot().queue_depth, 0);
+    }
+}

@@ -552,7 +552,7 @@ impl BlockEntity {
                 matches!(block_type, BlockType::Chest | BlockType::EndCityChest)
             }
             BlockEntity::Furnace(_) => {
-                matches!(block_type, BlockType::Furnace | BlockType::FurnaceLit)
+                matches!(block_type, BlockType::Furnace)
             }
             BlockEntity::Sign(_) => matches!(block_type, BlockType::OakSign),
             BlockEntity::Spawner(_) => matches!(block_type, BlockType::Spawner),
@@ -852,7 +852,7 @@ impl BlockEntity {
 }
 
 pub fn double_chest_partner(
-    manager: &crate::chunk_manager::ChunkManager,
+    manager: &impl crate::chunk_manager::ColumnQuery,
     pos: (i32, i32, i32),
 ) -> Option<(i32, i32, i32)> {
     let state_raw = manager.get_block_state(pos.0, pos.1, pos.2);
@@ -881,7 +881,7 @@ pub fn double_chest_partner(
 }
 
 pub fn calculate_container_comparator_signal(
-    manager: &crate::chunk_manager::ChunkManager,
+    manager: &impl crate::chunk_manager::ColumnQuery,
     pos: (i32, i32, i32),
 ) -> u8 {
     let block_entity = match manager.get_block_entity(pos.0, pos.1, pos.2) {
@@ -936,7 +936,7 @@ pub fn default_stub_for_block(block_type: BlockType) -> Option<BlockEntity> {
             loot_seed: None,
             revision: 0,
         })),
-        BlockType::Furnace | BlockType::FurnaceLit => {
+        BlockType::Furnace => {
             Some(BlockEntity::Furnace(FurnaceBlockEntity::new()))
         }
         BlockType::OakSign => Some(BlockEntity::Sign(SignBlockEntity::new())),
@@ -971,7 +971,7 @@ mod tests {
         furnace_state.set_stack(2, Some(ItemStack::new(Item::IronIngot, 1)));
         let furnace = BlockEntity::Furnace(furnace_state);
         assert!(furnace.matches_block_type(BlockType::Furnace));
-        assert!(furnace.matches_block_type(BlockType::FurnaceLit));
+        assert!(furnace.matches_block_type(BlockType::Furnace));
         assert!(!furnace.matches_block_type(BlockType::Chest));
 
         let sign = BlockEntity::Sign(SignBlockEntity::from_text("Hello"));
@@ -1125,7 +1125,7 @@ mod tests {
 
     #[test]
     fn test_comparator_fullness_signal_computation() {
-        let mut manager = crate::chunk_manager::ChunkManager::new(8);
+        let mut manager = crate::chunk_manager::WorldColumns::new(8);
         manager
             .chunks
             .insert((0, 0), crate::world::Chunk::new(0, 0));

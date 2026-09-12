@@ -12,6 +12,7 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Cursor, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub const MAX_PACK_ENTRIES: usize = 4096;
 pub const MAX_PACK_ENTRY_BYTES: u64 = 8 * 1024 * 1024;
@@ -180,7 +181,7 @@ impl FontSource {
 struct LoadedPack {
     manifest: ResourcePackManifest,
     source: String,
-    assets: HashMap<String, Vec<u8>>,
+    assets: HashMap<String, Arc<[u8]>>,
 }
 
 #[derive(Debug, Clone)]
@@ -286,23 +287,10 @@ impl ResourcePackManager {
             }
         }
 
-        // A malformed or cyclic *unselected* pack must not hide every other
-        // pack.  Keep it in `available()` for the UI, diagnose it, and build
-        // the enabled order from the acyclic subset only.  Explicit selection
-        // still uses the strict dependency checks in `apply_enabled_order`.
-        let (order, rejected) = self.best_effort_dependency_order();
-        for (id, reason) in rejected {
-            let source = self
-                .packs
-                .iter()
-                .find(|pack| pack.manifest.id == id)
-                .map(|pack| pack.source.clone());
-            if let Some(source) = source {
-                self.record_diagnostic(Path::new(&source), &reason);
-            }
-        }
-        self.enabled_order = order
-            .into_iter()
+        self.enabled_order = self
+            .packs
+            .iter()
+            .map(|pack| pack.manifest.id.clone())
             .filter(|id| id != BUILTIN_PACK_ID)
             .collect();
         Ok(())
@@ -333,30 +321,7 @@ impl ResourcePackManager {
                 ));
             }
         }
-        for id in &requested {
-            let pack = self
-                .packs
-                .iter()
-                .find(|pack| pack.manifest.id == *id)
-                .expect("available pack checked above");
-            for dependency in &pack.manifest.dependencies {
-                if dependency != BUILTIN_PACK_ID && !seen.contains(dependency) {
-                    return Err(PackError::MissingDependency {
-                        pack: id.clone(),
-                        dependency: dependency.clone(),
-                    });
-                }
-            }
-        }
-        let requested_set: HashSet<&str> = requested.iter().map(String::as_str).collect();
-        // Only selected packs participate in strict validation.  An
-        // unselected broken/cyclic pack remains visible in the UI but cannot
-        // prevent users from disabling it and applying the rest.
-        let topological = self.dependency_order_for_ids(&requested_set)?;
-        self.enabled_order = topological
-            .into_iter()
-            .filter(|id| id != BUILTIN_PACK_ID && requested_set.contains(id.as_str()))
-            .collect();
+        self.enabled_order = requested;
         Ok(())
     }
 
@@ -386,7 +351,7 @@ impl ResourcePackManager {
 
     /// Resolve a logical asset path from the highest-priority enabled pack,
     /// then the built-in pack.  Missing assets are diagnosed once per path.
-    pub fn resolve_asset(&mut self, relative: &str) -> Option<Vec<u8>> {
+    pub fn resolve_asset(&mut self, relative: &str) -> Option<Arc<[u8]>> {
         let value = self.read_asset(relative);
         if value.is_none() {
             self.record_diagnostic(
@@ -400,20 +365,16 @@ impl ResourcePackManager {
     /// Resolve and validate a texture through the pack manager.  Invalid
     /// overrides are skipped so a valid built-in texture still wins over a
     /// corrupt selected-pack entry.
-    pub fn resolve_texture(&mut self, relative: &str) -> Option<Vec<u8>> {
+    pub fn resolve_texture(&mut self, relative: &str) -> Option<Arc<[u8]>> {
         self.resolve_validated_asset(relative, "texture", |bytes| {
             image::load_from_memory(bytes).is_ok()
         })
     }
 
-    pub fn texture_bytes(&mut self, relative: &str) -> Option<Vec<u8>> {
-        self.resolve_texture(relative)
-    }
-
     /// Resolve a JSON item/block model descriptor.  The small client model
     /// format intentionally accepts any JSON object; malformed JSON and
     /// scalar/array descriptors fall back to the built-in/procedural model.
-    pub fn resolve_model(&mut self, relative: &str) -> Option<Vec<u8>> {
+    pub fn resolve_model(&mut self, relative: &str) -> Option<Arc<[u8]>> {
         self.resolve_validated_asset(relative, "model", |bytes| {
             serde_json::from_slice::<serde_json::Value>(bytes)
                 .map(|value| value.is_object())
@@ -421,18 +382,10 @@ impl ResourcePackManager {
         })
     }
 
-    pub fn model_bytes(&mut self, relative: &str) -> Option<Vec<u8>> {
-        self.resolve_model(relative)
-    }
-
     /// Resolve a TrueType/OpenType/WebFont payload.  Font parsing is kept
     /// dependency-free and bounded by checking the format's mandatory magic.
-    pub fn resolve_font(&mut self, relative: &str) -> Option<Vec<u8>> {
+    pub fn resolve_font(&mut self, relative: &str) -> Option<Arc<[u8]>> {
         self.resolve_validated_asset(relative, "font", font_bytes_are_decodable)
-    }
-
-    pub fn font_bytes(&mut self, relative: &str) -> Option<Vec<u8>> {
-        self.resolve_font(relative)
     }
 
     /// Resolve the parsed UI font registry.  A missing `relative` path is
@@ -461,52 +414,28 @@ impl ResourcePackManager {
 
     /// Resolve a sound through the same manager entry point used by the audio
     /// consumer.  Rodio performs the actual bounded decoder validation.
-    pub fn resolve_sound(&mut self, relative: &str) -> Option<Vec<u8>> {
+    pub fn resolve_sound(&mut self, relative: &str) -> Option<Arc<[u8]>> {
         self.resolve_validated_asset(relative, "sound", sound_bytes_are_decodable)
     }
 
-    pub fn sound_bytes(&mut self, relative: &str) -> Option<Vec<u8>> {
-        self.resolve_sound(relative)
-    }
-
-    pub fn read_asset(&self, relative: &str) -> Option<Vec<u8>> {
+    pub fn read_asset(&self, relative: &str) -> Option<Arc<[u8]>> {
         let relative = normalize_logical_path(relative).ok()?;
         for id in self.enabled_order.iter().rev() {
             if let Some(pack) = self.packs.iter().find(|pack| pack.manifest.id == *id) {
                 if let Some(bytes) = lookup_asset(pack, &relative) {
-                    return Some(bytes.to_vec());
+                    return Some(Arc::clone(bytes));
                 }
             }
         }
         self.packs
             .iter()
             .find(|pack| pack.manifest.id == BUILTIN_PACK_ID)
-            .and_then(|pack| lookup_asset(pack, &relative).map(ToOwned::to_owned))
+            .and_then(|pack| lookup_asset(pack, &relative).cloned())
     }
 
-    pub fn locale_bytes(&self, language: &str) -> Option<Vec<u8>> {
+    pub fn locale_bytes(&self, language: &str) -> Option<Arc<[u8]>> {
         let language = normalize_locale_code(language)?;
         self.read_asset(&format!("lang/{language}.json"))
-    }
-
-    pub fn resolve_locale(&mut self, language: &str) -> Option<Vec<u8>> {
-        let language = match normalize_locale_code(language) {
-            Some(language) => language,
-            None => {
-                self.record_asset_diagnostic(
-                    language,
-                    "locale",
-                    "invalid locale code; using built-in fallback",
-                );
-                return None;
-            }
-        };
-        self.resolve_validated_asset(&format!("lang/{language}.json"), "locale", |bytes| {
-            let Ok(text) = std::str::from_utf8(bytes) else {
-                return false;
-            };
-            serde_json::from_str::<HashMap<String, String>>(text).is_ok()
-        })
     }
 
     /// Resolve every valid locale layer from highest to lowest priority.
@@ -514,9 +443,8 @@ impl ResourcePackManager {
     /// The normal asset resolver intentionally returns the first valid
     /// candidate, because textures/models/sounds are whole-asset overrides.
     /// Locale files are maps, however, so callers need all valid layers in
-    /// order to merge a partial selected pack with the built-in catalog.  The
-    /// existing `resolve_locale` method keeps its first-valid semantics.
-    pub fn resolve_locale_layers(&mut self, language: &str) -> Vec<Vec<u8>> {
+    /// order to merge a partial selected pack with the built-in catalog.
+    pub fn resolve_locale_layers(&mut self, language: &str) -> Vec<Arc<[u8]>> {
         let language = match normalize_locale_code(language) {
             Some(language) => language,
             None => {
@@ -541,7 +469,7 @@ impl ResourcePackManager {
         for id in self.enabled_order.iter().rev() {
             if let Some(pack) = self.packs.iter().find(|pack| pack.manifest.id == *id) {
                 if let Some(bytes) = lookup_asset(pack, &normalized) {
-                    candidates.push(bytes.to_vec());
+                    candidates.push(Arc::clone(bytes));
                 }
             }
         }
@@ -551,7 +479,7 @@ impl ResourcePackManager {
             .find(|pack| pack.manifest.id == BUILTIN_PACK_ID)
         {
             if let Some(bytes) = lookup_asset(pack, &normalized) {
-                candidates.push(bytes.to_vec());
+                candidates.push(Arc::clone(bytes));
             }
         }
 
@@ -601,7 +529,7 @@ impl ResourcePackManager {
         relative: &str,
         kind: &str,
         validator: F,
-    ) -> Option<Vec<u8>>
+    ) -> Option<Arc<[u8]>>
     where
         F: Fn(&[u8]) -> bool,
     {
@@ -616,7 +544,7 @@ impl ResourcePackManager {
         for id in self.enabled_order.iter().rev() {
             if let Some(pack) = self.packs.iter().find(|pack| pack.manifest.id == *id) {
                 if let Some(bytes) = lookup_asset(pack, &normalized) {
-                    candidates.push(bytes.to_vec());
+                    candidates.push(Arc::clone(bytes));
                 }
             }
         }
@@ -626,7 +554,7 @@ impl ResourcePackManager {
             .find(|pack| pack.manifest.id == BUILTIN_PACK_ID)
         {
             if let Some(bytes) = lookup_asset(pack, &normalized) {
-                candidates.push(bytes.to_vec());
+                candidates.push(Arc::clone(bytes));
             }
         }
         for bytes in candidates {
@@ -647,74 +575,6 @@ impl ResourcePackManager {
         None
     }
 
-    fn dependency_order_for_ids(&self, ids: &HashSet<&str>) -> Result<Vec<String>, PackError> {
-        let by_id: HashMap<_, _> = self
-            .packs
-            .iter()
-            .map(|pack| (pack.manifest.id.as_str(), pack))
-            .collect();
-        let mut state = HashMap::<&str, u8>::new();
-        let mut output = Vec::new();
-        let mut sorted: Vec<&str> = ids.iter().copied().collect();
-        sorted.sort_unstable();
-        for id in sorted {
-            visit_dependency(id, &by_id, &mut state, &mut output)?;
-        }
-        Ok(output)
-    }
-
-    fn best_effort_dependency_order(&self) -> (Vec<String>, Vec<(String, String)>) {
-        let by_id: HashMap<&str, &LoadedPack> = self
-            .packs
-            .iter()
-            .map(|pack| (pack.manifest.id.as_str(), pack))
-            .collect();
-        let mut pending: HashSet<&str> = by_id.keys().copied().collect();
-        let mut order = Vec::with_capacity(by_id.len());
-        loop {
-            let mut progress = false;
-            let mut ids: Vec<&str> = pending.iter().copied().collect();
-            ids.sort_unstable();
-            for id in ids {
-                let Some(pack) = by_id.get(id) else { continue };
-                let dependencies_ready = pack.manifest.dependencies.iter().all(|dependency| {
-                    dependency == BUILTIN_PACK_ID || order.iter().any(|ready| ready == dependency)
-                });
-                if dependencies_ready {
-                    pending.remove(id);
-                    order.push(id.to_string());
-                    progress = true;
-                }
-            }
-            if !progress {
-                break;
-            }
-        }
-        let mut rejected = Vec::new();
-        let mut ids: Vec<&str> = pending.into_iter().collect();
-        ids.sort_unstable();
-        for id in ids {
-            let Some(pack) = by_id.get(id) else { continue };
-            if let Some(dependency) = pack
-                .manifest
-                .dependencies
-                .iter()
-                .find(|dependency| !by_id.contains_key(dependency.as_str()))
-            {
-                rejected.push((
-                    id.to_string(),
-                    format!("missing dependency {dependency}; pack disabled"),
-                ));
-            } else {
-                rejected.push((
-                    id.to_string(),
-                    "dependency cycle; pack disabled until selection is repaired".into(),
-                ));
-            }
-        }
-        (order, rejected)
-    }
-
     fn record_diagnostic(&mut self, source: &Path, message: &str) {
         let key = format!("{}::{message}", source.display());
         if self.diagnostic_keys.insert(key) {
@@ -724,36 +584,6 @@ impl ResourcePackManager {
             });
         }
     }
-}
-
-fn visit_dependency<'a>(
-    id: &'a str,
-    by_id: &HashMap<&'a str, &'a LoadedPack>,
-    state: &mut HashMap<&'a str, u8>,
-    output: &mut Vec<String>,
-) -> Result<(), PackError> {
-    match state.get(id).copied().unwrap_or(0) {
-        1 => return Err(PackError::DependencyCycle(id.into())),
-        2 => return Ok(()),
-        _ => {}
-    }
-    state.insert(id, 1);
-    let pack = by_id.get(id).ok_or_else(|| PackError::MissingDependency {
-        pack: id.into(),
-        dependency: "unknown".into(),
-    })?;
-    for dependency in &pack.manifest.dependencies {
-        if !by_id.contains_key(dependency.as_str()) {
-            return Err(PackError::MissingDependency {
-                pack: id.into(),
-                dependency: dependency.clone(),
-            });
-        }
-        visit_dependency(dependency, by_id, state, output)?;
-    }
-    state.insert(id, 2);
-    output.push(id.into());
-    Ok(())
 }
 
 fn load_pack_path(path: &Path) -> Result<LoadedPack, PackError> {
@@ -834,14 +664,17 @@ fn load_directory_pack(root: &Path) -> Result<LoadedPack, PackError> {
                 .map_err(|_| PackError::UnsafePath(path.display().to_string()))?;
             let relative = normalize_logical_path(&relative.to_string_lossy())?;
             let bytes = fs::read(&path)?;
+            let bytes: Arc<[u8]> = Arc::from(bytes.into_boxed_slice());
             if path == manifest_path {
-                manifest_bytes = Some(bytes.clone());
+                manifest_bytes = Some(Arc::clone(&bytes));
             }
             insert_asset_aliases(&mut assets, &relative, bytes);
         }
     }
     let manifest = parse_manifest(
-        &manifest_bytes.ok_or_else(|| PackError::InvalidManifest("pack.json is missing".into()))?,
+        manifest_bytes
+            .as_deref()
+            .ok_or_else(|| PackError::InvalidManifest("pack.json is missing".into()))?,
     )?;
     Ok(LoadedPack {
         manifest,
@@ -851,9 +684,8 @@ fn load_directory_pack(root: &Path) -> Result<LoadedPack, PackError> {
 }
 
 fn load_zip_pack(path: &Path) -> Result<LoadedPack, PackError> {
-    // Keep archive handling dependency-free and bounded.  We parse the ZIP
-    // central directory, then read only stored/deflate entries into memory;
-    // no entry is ever extracted to disk.
+    // Bound the archive with the zip crate (deflate via workspace flate2).
+    // Entries are never extracted to disk; ZIP64/symlink/parent paths are rejected.
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(PackError::UnsafePath(path.display().to_string()));
@@ -865,119 +697,48 @@ fn load_zip_pack(path: &Path) -> Result<LoadedPack, PackError> {
     if bytes.len() as u64 > MAX_PACK_BYTES {
         return Err(PackError::PackTooLarge);
     }
-    let eocd = find_zip_end(&bytes)
-        .ok_or_else(|| PackError::Archive("ZIP end record is missing".into()))?;
-    if eocd >= 20 && read_u32(&bytes, eocd - 20) == Some(0x0706_4b50) {
-        return Err(PackError::Archive(
-            "ZIP64 archives are not supported".into(),
-        ));
-    }
-    let entry_count = read_u16(&bytes, eocd + 10)
-        .ok_or_else(|| PackError::Archive("truncated ZIP end record".into()))?
-        as usize;
-    if entry_count == u16::MAX as usize {
-        return Err(PackError::Archive(
-            "ZIP64 archives are not supported".into(),
-        ));
-    }
-    let central_size = read_u32(&bytes, eocd + 12)
-        .ok_or_else(|| PackError::Archive("truncated ZIP end record".into()))?
-        as usize;
-    let central_offset = read_u32(&bytes, eocd + 16)
-        .ok_or_else(|| PackError::Archive("truncated ZIP end record".into()))?
-        as usize;
-    if central_size == u32::MAX as usize || central_offset == u32::MAX as usize {
-        return Err(PackError::Archive(
-            "ZIP64 archives are not supported".into(),
-        ));
-    }
-    if entry_count > MAX_PACK_ENTRIES {
+    reject_zip64_markers(&bytes)?;
+
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
+        .map_err(|error| PackError::Archive(error.to_string()))?;
+    if archive.len() > MAX_PACK_ENTRIES {
         return Err(PackError::TooManyEntries);
     }
-    if central_offset.checked_add(central_size).is_none()
-        || central_offset + central_size > bytes.len()
-    {
-        return Err(PackError::Archive(
-            "ZIP central directory is out of bounds".into(),
-        ));
-    }
+
     let mut assets = HashMap::new();
     let mut manifest_bytes = None;
     let mut total = 0u64;
-    let mut cursor = central_offset;
-    for _ in 0..entry_count {
-        if read_u32(&bytes, cursor) != Some(0x0201_4b50) || cursor + 46 > bytes.len() {
-            return Err(PackError::Archive(
-                "invalid ZIP central directory entry".into(),
-            ));
-        }
-        let flags = read_u16(&bytes, cursor + 8)
-            .ok_or_else(|| PackError::Archive("truncated ZIP flags".into()))?;
-        let compression = read_u16(&bytes, cursor + 10)
-            .ok_or_else(|| PackError::Archive("truncated ZIP method".into()))?;
-        let compressed_size = read_u32(&bytes, cursor + 20)
-            .ok_or_else(|| PackError::Archive("truncated ZIP compressed size".into()))?
-            as u64;
-        let central_crc = read_u32(&bytes, cursor + 16)
-            .ok_or_else(|| PackError::Archive("truncated ZIP CRC".into()))?;
-        let uncompressed_size = read_u32(&bytes, cursor + 24)
-            .ok_or_else(|| PackError::Archive("truncated ZIP uncompressed size".into()))?
-            as u64;
-        let name_len = read_u16(&bytes, cursor + 28)
-            .ok_or_else(|| PackError::Archive("truncated ZIP name length".into()))?
-            as usize;
-        let extra_len = read_u16(&bytes, cursor + 30)
-            .ok_or_else(|| PackError::Archive("truncated ZIP extra length".into()))?
-            as usize;
-        let comment_len = read_u16(&bytes, cursor + 32)
-            .ok_or_else(|| PackError::Archive("truncated ZIP comment length".into()))?
-            as usize;
-        let local_offset = read_u32(&bytes, cursor + 42)
-            .ok_or_else(|| PackError::Archive("truncated ZIP local offset".into()))?
-            as usize;
-        let record_len = 46usize
-            .checked_add(name_len)
-            .and_then(|value| value.checked_add(extra_len))
-            .and_then(|value| value.checked_add(comment_len))
-            .ok_or_else(|| PackError::Archive("ZIP entry length overflow".into()))?;
-        if cursor + record_len > central_offset + central_size {
-            return Err(PackError::Archive(
-                "ZIP central entry is out of bounds".into(),
-            ));
-        }
-        if compressed_size == u32::MAX as u64
-            || uncompressed_size == u32::MAX as u64
-            || local_offset == u32::MAX as usize
+    for index in 0..archive.len() {
+        let mut file = archive
+            .by_index(index)
+            .map_err(|error| PackError::Archive(error.to_string()))?;
+        let raw_name = file.name().to_string();
+        if file
+            .unix_mode()
+            .is_some_and(|mode| mode & 0o170000 == 0o120000)
         {
-            return Err(PackError::Archive(
-                "ZIP64 archives are not supported".into(),
-            ));
-        }
-        let raw_name = String::from_utf8(bytes[cursor + 46..cursor + 46 + name_len].to_vec())
-            .map_err(|_| PackError::UnsafePath("ZIP filename is not valid UTF-8".into()))?;
-        let relative = normalize_logical_path(&raw_name)?;
-        let central_extra = &bytes[cursor + 46 + name_len..cursor + 46 + name_len + extra_len];
-        if contains_zip64_extra(central_extra) {
-            return Err(PackError::Archive(
-                "ZIP64 archives are not supported".into(),
-            ));
-        }
-        let external_attributes = read_u32(&bytes, cursor + 38).unwrap_or_default();
-        let unix_mode = external_attributes >> 16;
-        if unix_mode & 0o170000 == 0o120000 {
             return Err(PackError::UnsafePath(raw_name));
         }
-        cursor += record_len;
-        // Directory entries carry no asset bytes. Validate their path before
-        // skipping so names such as `../` cannot bypass the path guard.
-        if raw_name.ends_with('/') {
+        let Some(enclosed) = file.enclosed_name() else {
+            return Err(PackError::UnsafePath(raw_name));
+        };
+        if file.is_dir() || raw_name.ends_with('/') {
+            let _ = normalize_logical_path(&enclosed.to_string_lossy())?;
             continue;
         }
-        if flags & 0x1 != 0 {
+        if file.encrypted() {
             return Err(PackError::Archive(format!(
                 "encrypted ZIP entry: {raw_name}"
             )));
         }
+        let uncompressed_size = file.size();
+        let compressed_size = file.compressed_size();
+        if uncompressed_size >= u32::MAX as u64 || compressed_size >= u32::MAX as u64 {
+            return Err(PackError::Archive(
+                "ZIP64 archives are not supported".into(),
+            ));
+        }
+        let relative = normalize_logical_path(&enclosed.to_string_lossy())?;
         if uncompressed_size > MAX_PACK_ENTRY_BYTES {
             return Err(PackError::EntryTooLarge(raw_name));
         }
@@ -993,103 +754,29 @@ fn load_zip_pack(path: &Path) -> Result<LoadedPack, PackError> {
         if total > MAX_PACK_BYTES {
             return Err(PackError::PackTooLarge);
         }
-        let local_end = local_offset
-            .checked_add(30)
-            .ok_or_else(|| PackError::Archive("ZIP local header overflow".into()))?;
-        if local_end > bytes.len() || read_u32(&bytes, local_offset) != Some(0x0403_4b50) {
-            return Err(PackError::Archive("invalid ZIP local header".into()));
+        let mut data = Vec::with_capacity(uncompressed_size as usize);
+        (&mut file)
+            .take(MAX_PACK_ENTRY_BYTES + 1)
+            .read_to_end(&mut data)
+            .map_err(|error| PackError::Archive(error.to_string()))?;
+        if data.len() as u64 > MAX_PACK_ENTRY_BYTES {
+            return Err(PackError::EntryTooLarge(raw_name));
         }
-        let local_name_len = read_u16(&bytes, local_offset + 26)
-            .ok_or_else(|| PackError::Archive("truncated ZIP local name length".into()))?
-            as usize;
-        let local_extra_len = read_u16(&bytes, local_offset + 28)
-            .ok_or_else(|| PackError::Archive("truncated ZIP local extra length".into()))?
-            as usize;
-        let local_flags = read_u16(&bytes, local_offset + 6)
-            .ok_or_else(|| PackError::Archive("truncated ZIP local flags".into()))?;
-        let local_compression = read_u16(&bytes, local_offset + 8)
-            .ok_or_else(|| PackError::Archive("truncated ZIP local method".into()))?;
-        let local_crc = read_u32(&bytes, local_offset + 14)
-            .ok_or_else(|| PackError::Archive("truncated ZIP local CRC".into()))?;
-        if local_flags != flags || local_compression != compression {
-            return Err(PackError::Archive(format!(
-                "ZIP local/central header mismatch for {raw_name}"
-            )));
-        }
-        if flags & 0x08 == 0 && local_crc != central_crc {
-            return Err(PackError::Archive(format!(
-                "ZIP local CRC mismatch for {raw_name}"
-            )));
-        }
-        let local_name_end = local_end
-            .checked_add(local_name_len)
-            .ok_or_else(|| PackError::Archive("ZIP local name length overflow".into()))?;
-        let local_extra_end = local_name_end
-            .checked_add(local_extra_len)
-            .ok_or_else(|| PackError::Archive("ZIP local extra length overflow".into()))?;
-        if local_extra_end > bytes.len() {
-            return Err(PackError::Archive("ZIP local header is truncated".into()));
-        }
-        if contains_zip64_extra(&bytes[local_name_end..local_extra_end]) {
-            return Err(PackError::Archive(
-                "ZIP64 archives are not supported".into(),
-            ));
-        }
-        if bytes.get(local_end..local_name_end) != Some(raw_name.as_bytes()) {
-            return Err(PackError::Archive(format!(
-                "ZIP local/central name mismatch for {raw_name}"
-            )));
-        }
-        let data_offset = local_end
-            .checked_add(local_name_len)
-            .and_then(|value| value.checked_add(local_extra_len))
-            .ok_or_else(|| PackError::Archive("ZIP data offset overflow".into()))?;
-        let data_end = data_offset
-            .checked_add(compressed_size as usize)
-            .ok_or_else(|| PackError::Archive("ZIP data length overflow".into()))?;
-        if data_end > bytes.len() {
-            return Err(PackError::Archive("ZIP entry data is out of bounds".into()));
-        }
-        let compressed_bytes = &bytes[data_offset..data_end];
-        let data = match compression {
-            0 => compressed_bytes.to_vec(),
-            8 => {
-                let decoder = flate2::read::DeflateDecoder::new(compressed_bytes);
-                let mut decoded = Vec::with_capacity(uncompressed_size as usize);
-                decoder
-                    .take(MAX_PACK_ENTRY_BYTES + 1)
-                    .read_to_end(&mut decoded)
-                    .map_err(|error| PackError::Archive(error.to_string()))?;
-                decoded
-            }
-            method => {
-                return Err(PackError::Archive(format!(
-                    "unsupported ZIP compression method {method}"
-                )))
-            }
-        };
         if data.len() as u64 != uncompressed_size {
             return Err(PackError::Archive(format!(
                 "ZIP size mismatch for {raw_name}"
             )));
         }
-        if crc32(&data) != central_crc {
-            return Err(PackError::Archive(format!(
-                "ZIP CRC mismatch for {raw_name}"
-            )));
-        }
+        let bytes: Arc<[u8]> = Arc::from(data.into_boxed_slice());
         if relative == "pack.json" || relative == "assets/pack.json" {
-            manifest_bytes = Some(data.clone());
+            manifest_bytes = Some(Arc::clone(&bytes));
         }
-        insert_asset_aliases(&mut assets, &relative, data);
-    }
-    if cursor != central_offset + central_size {
-        return Err(PackError::Archive(
-            "ZIP central directory size does not match entry count".into(),
-        ));
+        insert_asset_aliases(&mut assets, &relative, bytes);
     }
     let manifest = parse_manifest(
-        &manifest_bytes.ok_or_else(|| PackError::InvalidManifest("pack.json is missing".into()))?,
+        manifest_bytes
+            .as_deref()
+            .ok_or_else(|| PackError::InvalidManifest("pack.json is missing".into()))?,
     )?;
     Ok(LoadedPack {
         manifest,
@@ -1098,36 +785,77 @@ fn load_zip_pack(path: &Path) -> Result<LoadedPack, PackError> {
     })
 }
 
-fn find_zip_end(bytes: &[u8]) -> Option<usize> {
-    let start = bytes.len().saturating_sub(65_557);
-    (start..bytes.len().saturating_sub(3))
-        .rev()
-        .find(|&index| read_u32(bytes, index) == Some(0x0605_4b50))
-}
-
-fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = u32::MAX;
-    for &byte in bytes {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            let mask = 0u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+/// Reject ZIP64 before handing bytes to the zip crate so oversized archives
+/// cannot expand through the ZIP64 pathway.
+fn reject_zip64_markers(bytes: &[u8]) -> Result<(), PackError> {
+    let eocd = find_zip_end_marker(bytes).ok_or_else(|| {
+        PackError::Archive("ZIP end record is missing".into())
+    })?;
+    if eocd >= 20 {
+        let locator = &bytes[eocd - 20..eocd];
+        if locator.starts_with(&0x0706_4b50u32.to_le_bytes()) {
+            return Err(PackError::Archive(
+                "ZIP64 archives are not supported".into(),
+            ));
         }
     }
-    !crc
+    let entry_count = u16::from_le_bytes([bytes[eocd + 10], bytes[eocd + 11]]);
+    let central_size = u32::from_le_bytes(bytes[eocd + 12..eocd + 16].try_into().unwrap());
+    let central_offset = u32::from_le_bytes(bytes[eocd + 16..eocd + 20].try_into().unwrap());
+    if entry_count == u16::MAX || central_size == u32::MAX || central_offset == u32::MAX {
+        return Err(PackError::Archive(
+            "ZIP64 archives are not supported".into(),
+        ));
+    }
+    if entry_count as usize > MAX_PACK_ENTRIES {
+        return Err(PackError::TooManyEntries);
+    }
+    if (central_offset as usize)
+        .checked_add(central_size as usize)
+        .is_none_or(|end| end != eocd)
+    {
+        return Err(PackError::Archive(
+            "ZIP central directory size does not match entry count".into(),
+        ));
+    }
+    // Scan central-directory extra fields for ZIP64 (id 0x0001).
+    let mut cursor = central_offset as usize;
+    for _ in 0..entry_count {
+        if cursor + 46 > bytes.len() {
+            break;
+        }
+        let sig = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap());
+        if sig != 0x0201_4b50 {
+            break;
+        }
+        let name_len = u16::from_le_bytes([bytes[cursor + 28], bytes[cursor + 29]]) as usize;
+        let extra_len = u16::from_le_bytes([bytes[cursor + 30], bytes[cursor + 31]]) as usize;
+        let comment_len = u16::from_le_bytes([bytes[cursor + 32], bytes[cursor + 33]]) as usize;
+        let extra_start = cursor + 46 + name_len;
+        let extra_end = extra_start.saturating_add(extra_len);
+        if extra_end <= bytes.len() && contains_zip64_extra_field(&bytes[extra_start..extra_end]) {
+            return Err(PackError::Archive(
+                "ZIP64 archives are not supported".into(),
+            ));
+        }
+        cursor = cursor
+            .saturating_add(46)
+            .saturating_add(name_len)
+            .saturating_add(extra_len)
+            .saturating_add(comment_len);
+    }
+    Ok(())
 }
 
-fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
-    let end = offset.checked_add(2)?;
-    Some(u16::from_le_bytes(bytes.get(offset..end)?.try_into().ok()?))
+fn find_zip_end_marker(bytes: &[u8]) -> Option<usize> {
+    let start = bytes.len().saturating_sub(65_557);
+    (start..bytes.len().saturating_sub(3)).rev().find(|&index| {
+        index + 4 <= bytes.len()
+            && u32::from_le_bytes(bytes[index..index + 4].try_into().unwrap()) == 0x0605_4b50
+    })
 }
 
-fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
-    let end = offset.checked_add(4)?;
-    Some(u32::from_le_bytes(bytes.get(offset..end)?.try_into().ok()?))
-}
-
-fn contains_zip64_extra(extra: &[u8]) -> bool {
+fn contains_zip64_extra_field(extra: &[u8]) -> bool {
     let mut offset = 0usize;
     while offset + 4 <= extra.len() {
         let id = u16::from_le_bytes([extra[offset], extra[offset + 1]]);
@@ -1236,17 +964,17 @@ fn parse_bitmap_font(bytes: &[u8]) -> Option<HashMap<char, [u8; 7]>> {
     Some(parsed)
 }
 
-pub(crate) fn sound_bytes_are_decodable(bytes: &[u8]) -> bool {
+pub fn sound_bytes_are_decodable(bytes: &[u8]) -> bool {
     if bytes.is_empty() {
         return false;
     }
     rodio::Decoder::new(Cursor::new(bytes.to_vec())).is_ok()
 }
 
-fn insert_asset_aliases(assets: &mut HashMap<String, Vec<u8>>, relative: &str, bytes: Vec<u8>) {
+fn insert_asset_aliases(assets: &mut HashMap<String, Arc<[u8]>>, relative: &str, bytes: Arc<[u8]>) {
     let aliases = logical_aliases(relative);
     for alias in aliases {
-        assets.entry(alias).or_insert_with(|| bytes.clone());
+        assets.entry(alias).or_insert_with(|| Arc::clone(&bytes));
     }
 }
 
@@ -1280,7 +1008,7 @@ fn logical_aliases(relative: &str) -> Vec<String> {
     aliases
 }
 
-fn lookup_asset<'a>(pack: &'a LoadedPack, relative: &str) -> Option<&'a [u8]> {
+fn lookup_asset<'a>(pack: &'a LoadedPack, relative: &str) -> Option<&'a Arc<[u8]>> {
     if let Some(bytes) = pack.assets.get(relative) {
         return Some(bytes);
     }
@@ -1297,7 +1025,7 @@ fn lookup_asset<'a>(pack: &'a LoadedPack, relative: &str) -> Option<&'a [u8]> {
     ];
     candidates
         .iter()
-        .find_map(|candidate| pack.assets.get(candidate).map(Vec::as_slice))
+        .find_map(|candidate| pack.assets.get(candidate))
 }
 
 #[cfg(test)]
@@ -1377,6 +1105,36 @@ mod tests {
         archive
     }
 
+    fn find_zip_end(bytes: &[u8]) -> Option<usize> {
+        find_zip_end_marker(bytes)
+    }
+
+    fn contains_zip64_extra(extra: &[u8]) -> bool {
+        contains_zip64_extra_field(extra)
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = u32::MAX;
+        for &byte in bytes {
+            crc ^= byte as u32;
+            for _ in 0..8 {
+                let mask = 0u32.wrapping_sub(crc & 1);
+                crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+            }
+        }
+        !crc
+    }
+
+    fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+        let end = offset.checked_add(2)?;
+        Some(u16::from_le_bytes(bytes.get(offset..end)?.try_into().ok()?))
+    }
+
+    fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+        let end = offset.checked_add(4)?;
+        Some(u32::from_le_bytes(bytes.get(offset..end)?.try_into().ok()?))
+    }
+
     fn central_offset(archive: &[u8]) -> usize {
         let eocd = find_zip_end(archive).expect("test archive should have EOCD");
         read_u32(archive, eocd + 16).unwrap() as usize
@@ -1389,7 +1147,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_and_dependency_order_are_deterministic() {
+    fn manifest_and_enabled_order_are_deterministic() {
         let root = temp_dir("packs");
         fs::write(root.join("pack.json"), manifest(BUILTIN_PACK_ID, &[])).unwrap();
         fs::write(root.join("stone.txt"), b"builtin").unwrap();
@@ -1397,11 +1155,7 @@ mod tests {
         fs::create_dir_all(user.join("base")).unwrap();
         fs::write(user.join("base/pack.json"), manifest("test.base", &[])).unwrap();
         fs::create_dir_all(user.join("theme")).unwrap();
-        fs::write(
-            user.join("theme/pack.json"),
-            manifest("test.theme", &["test.base"]),
-        )
-        .unwrap();
+        fs::write(user.join("theme/pack.json"), manifest("test.theme", &[])).unwrap();
         fs::create_dir_all(user.join("theme/lang")).unwrap();
         fs::write(user.join("theme/lang/de_de.json"), b"{}").unwrap();
         let manager = ResourcePackManager::discover(&root, &user);
@@ -1414,11 +1168,14 @@ mod tests {
             ["test.base", "test.theme"]
         );
         let mut manager = manager;
-        assert_eq!(manager.read_asset("lang/de_de.json"), Some(b"{}".to_vec()));
+        assert_eq!(
+            manager.read_asset("lang/de_de.json").as_deref(),
+            Some(b"{}".as_slice())
+        );
         manager
             .apply_enabled_order(["test.theme", "test.base"])
             .unwrap();
-        assert_eq!(manager.enabled_order(), ["test.base", "test.theme"]);
+        assert_eq!(manager.enabled_order(), ["test.theme", "test.base"]);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1463,9 +1220,18 @@ mod tests {
             .unwrap();
         let layers = manager.resolve_locale_layers("en_us");
         assert_eq!(layers.len(), 3);
-        assert_eq!(layers[0], br#"{"base":"high","high_only":"yes"}"#);
-        assert_eq!(layers[1], br#"{"base":"low","low_only":"yes"}"#);
-        assert_eq!(layers[2], br#"{"base":"builtin","builtin_only":"yes"}"#);
+        assert_eq!(
+            layers[0].as_ref(),
+            br#"{"base":"high","high_only":"yes"}"#.as_slice()
+        );
+        assert_eq!(
+            layers[1].as_ref(),
+            br#"{"base":"low","low_only":"yes"}"#.as_slice()
+        );
+        assert_eq!(
+            layers[2].as_ref(),
+            br#"{"base":"builtin","builtin_only":"yes"}"#.as_slice()
+        );
         assert_eq!(
             manager
                 .diagnostics()
@@ -1511,30 +1277,31 @@ mod tests {
         let mut manager = ResourcePackManager::discover(&root, &user);
         manager.apply_enabled_order(["test.override"]).unwrap();
         assert_eq!(
-            manager.resolve_texture("textures/stone.png"),
-            Some(texture.to_vec())
+            manager.resolve_texture("textures/stone.png").as_deref(),
+            Some(texture.as_slice())
         );
         assert_eq!(
-            manager.resolve_sound("sounds/click.wav"),
-            Some(sound.to_vec())
+            manager.resolve_sound("sounds/click.wav").as_deref(),
+            Some(sound.as_slice())
+        );
+        let locale_layers = manager.resolve_locale_layers("en_us");
+        assert_eq!(
+            locale_layers.first().map(AsRef::as_ref),
+            Some(br#"{"hello":"Hello"}"#.as_slice())
         );
         assert_eq!(
-            manager.resolve_locale("en_us"),
-            Some(br#"{"hello":"Hello"}"#.to_vec())
+            manager.resolve_model("models/block.json").as_deref(),
+            Some(br#"{"parent":"builtin"}"#.as_slice())
         );
         assert_eq!(
-            manager.resolve_model("models/block.json"),
-            Some(br#"{"parent":"builtin"}"#.to_vec())
-        );
-        assert_eq!(
-            manager.resolve_font("font/main.ttf"),
-            Some(b"OTTOfont".to_vec())
+            manager.resolve_font("font/main.ttf").as_deref(),
+            Some(b"OTTOfont".as_slice())
         );
         let diagnostics = manager.diagnostics().len();
         assert!(diagnostics >= 5);
         manager.resolve_texture("textures/stone.png");
         manager.resolve_sound("sounds/click.wav");
-        manager.resolve_locale("en_us");
+        let _ = manager.resolve_locale_layers("en_us");
         manager.resolve_model("models/block.json");
         manager.resolve_font("font/main.ttf");
         assert_eq!(manager.diagnostics().len(), diagnostics);
@@ -1680,10 +1447,16 @@ mod tests {
         let payload = b"payload";
         let archive = single_entry_zip(b"asset.txt", payload, 0);
         fs::write(&archive_path, archive).unwrap();
-        assert!(matches!(
-            load_zip_pack(&archive_path),
-            Err(PackError::Archive(message)) if message.contains("CRC mismatch")
-        ));
+        let crc_err = load_zip_pack(&archive_path);
+        assert!(
+            matches!(
+                &crc_err,
+                Err(PackError::Archive(message))
+                    if message.to_ascii_lowercase().contains("crc")
+                        || message.to_ascii_lowercase().contains("checksum")
+            ),
+            "crc mismatch got {crc_err:?}"
+        );
 
         let mut zip64 = single_entry_zip(b"asset.txt", payload, crc32(payload));
         let eocd = zip64.len() - 22;
@@ -1857,19 +1630,15 @@ mod tests {
         ));
 
         let user = root.join("resourcepacks");
-        fs::create_dir_all(user.join("missing-dep")).unwrap();
-        fs::write(
-            user.join("missing-dep/pack.json"),
-            manifest("missing.dep", &["not.present"]),
-        )
-        .unwrap();
+        fs::create_dir_all(user.join("bad-json")).unwrap();
+        fs::write(user.join("bad-json/pack.json"), b"invalid json").unwrap();
         fs::write(root.join("pack.json"), manifest(BUILTIN_PACK_ID, &[])).unwrap();
         let manager = ResourcePackManager::discover(&root, &user);
         assert!(manager.enabled_order().is_empty());
         assert!(manager
             .diagnostics()
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("missing dependency")));
+            .any(|diagnostic| diagnostic.source.contains("bad-json")));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1910,28 +1679,29 @@ mod tests {
     }
 
     #[test]
-    fn dependency_cycles_are_rejected() {
-        let root = temp_dir("cycle");
+    fn linear_overlay_and_selection_validation() {
+        let root = temp_dir("linear");
         fs::write(root.join("pack.json"), manifest(BUILTIN_PACK_ID, &[])).unwrap();
         let user = root.join("resourcepacks");
         fs::create_dir_all(user.join("one")).unwrap();
-        fs::write(user.join("one/pack.json"), manifest("one", &["two"])).unwrap();
+        fs::write(user.join("one/pack.json"), manifest("one", &[])).unwrap();
         fs::create_dir_all(user.join("two")).unwrap();
-        fs::write(user.join("two/pack.json"), manifest("two", &["one"])).unwrap();
-        let manager = ResourcePackManager::discover(&root, &user);
-        assert!(manager.enabled_order().is_empty());
-        assert!(manager
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("dependency cycle")));
-        let mut manager = manager;
+        fs::write(user.join("two/pack.json"), manifest("two", &[])).unwrap();
+        let mut manager = ResourcePackManager::discover(&root, &user);
+        assert_eq!(manager.enabled_order(), ["one", "two"]);
         manager
             .apply_enabled_order(std::iter::empty::<&str>())
             .unwrap();
         assert!(manager.enabled_order().is_empty());
+        manager.apply_enabled_order(["two", "one"]).unwrap();
+        assert_eq!(manager.enabled_order(), ["two", "one"]);
         assert!(matches!(
-            manager.apply_enabled_order(["one", "two"]),
-            Err(PackError::DependencyCycle(_))
+            manager.apply_enabled_order(["one", "one"]),
+            Err(PackError::InvalidManifest(_))
+        ));
+        assert!(matches!(
+            manager.apply_enabled_order(["missing"]),
+            Err(PackError::MissingDependency { .. })
         ));
         let _ = fs::remove_dir_all(root);
     }

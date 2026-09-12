@@ -10,7 +10,6 @@
 //! - `occlusion_shape` – used by the culling system to decide whether a face of
 //!   a neighbouring block is hidden. Only full-cube blocks occlude.
 
-use crate::chunk_manager::ChunkManager;
 use crate::physics::AABB;
 use crate::redstone::Direction;
 use crate::world::{BlockState, BlockType};
@@ -184,6 +183,16 @@ pub fn ray_intersects_aabb(
     } else {
         None
     }
+}
+
+/// Thin distance-only wrapper for entity / melee probes.
+pub fn ray_intersects_aabb_distance(
+    origin: Vec3,
+    dir: Vec3,
+    max_dist: f32,
+    box_aabb: &AABB,
+) -> Option<f32> {
+    ray_intersects_aabb(origin, dir, max_dist, box_aabb).map(|(t, _)| t)
 }
 
 pub fn aabb(min_x: f32, min_y: f32, min_z: f32, max_x: f32, max_y: f32, max_z: f32) -> AABB {
@@ -381,20 +390,29 @@ fn is_connectable(neighbor: BlockType, self_type: BlockType) -> bool {
 }
 
 /// Computes local connection flags `(north, south, west, east)` for fences/walls/panes.
-pub fn get_connections(
+pub fn get_connections_sampled(
     self_type: BlockType,
     (x, y, z): (i32, i32, i32),
-    chunk_manager: Option<&ChunkManager>,
+    sample: Option<&dyn Fn(i32, i32, i32) -> BlockType>,
 ) -> (bool, bool, bool, bool) {
-    if let Some(cm) = chunk_manager {
-        let n = is_connectable(cm.get_block(x, y, z - 1), self_type);
-        let s = is_connectable(cm.get_block(x, y, z + 1), self_type);
-        let w = is_connectable(cm.get_block(x - 1, y, z), self_type);
-        let e = is_connectable(cm.get_block(x + 1, y, z), self_type);
+    if let Some(sample) = sample {
+        let n = is_connectable(sample(x, y, z - 1), self_type);
+        let s = is_connectable(sample(x, y, z + 1), self_type);
+        let w = is_connectable(sample(x - 1, y, z), self_type);
+        let e = is_connectable(sample(x + 1, y, z), self_type);
         (n, s, w, e)
     } else {
         (true, true, true, true)
     }
+}
+
+/// Computes local connection flags `(north, south, west, east)` for fences/walls/panes.
+pub fn get_connections(
+    self_type: BlockType,
+    pos: (i32, i32, i32),
+    sample: Option<&dyn Fn(i32, i32, i32) -> BlockType>,
+) -> (bool, bool, bool, bool) {
+    get_connections_sampled(self_type, pos, sample)
 }
 
 // ---------------------------------------------------------------------------
@@ -406,7 +424,17 @@ pub fn block_collision_shape(
     block: BlockType,
     state_raw: u8,
     pos: (i32, i32, i32),
-    chunk_manager: Option<&ChunkManager>,
+    sample: Option<&dyn Fn(i32, i32, i32) -> BlockType>,
+) -> VoxelShape {
+    block_collision_shape_sampled(block, state_raw, pos, sample)
+}
+
+/// Physical collision shape with an arbitrary neighbor sampler (3×3 neighborhood).
+pub fn block_collision_shape_sampled(
+    block: BlockType,
+    state_raw: u8,
+    pos: (i32, i32, i32),
+    sample: Option<&dyn Fn(i32, i32, i32) -> BlockType>,
 ) -> VoxelShape {
     let (fx, fy, fz) = (pos.0 as f32, pos.1 as f32, pos.2 as f32);
 
@@ -424,14 +452,10 @@ pub fn block_collision_shape(
         | BlockType::PotatoCrop
         | BlockType::Torch
         | BlockType::RedstoneTorch
-        | BlockType::RedstoneTorchOff
         | BlockType::OakSign => VoxelShape::EMPTY,
 
-        BlockType::OakDoor | BlockType::OakDoorOpen => {
-            let mut state = BlockState::decode(state_raw);
-            if block == BlockType::OakDoorOpen {
-                state.is_open = true;
-            }
+        BlockType::OakDoor => {
+            let state = BlockState::decode(state_raw);
             const THICKNESS: f32 = 3.0 / 16.0;
             let (min_x, max_x, min_z, max_z) = if !state.is_open {
                 match state.facing {
@@ -458,11 +482,8 @@ pub fn block_collision_shape(
             VoxelShape::from_box(aabb(min_x, 0.0, min_z, max_x, 1.0, max_z))
         }
 
-        BlockType::OakTrapdoor | BlockType::OakTrapdoorOpen => {
-            let mut state = BlockState::decode(state_raw);
-            if block == BlockType::OakTrapdoorOpen {
-                state.is_open = true;
-            }
+        BlockType::OakTrapdoor => {
+            let state = BlockState::decode(state_raw);
             const THICKNESS: f32 = 3.0 / 16.0;
             if state.is_open {
                 let (min_x, max_x, min_z, max_z) = match state.facing {
@@ -508,7 +529,7 @@ pub fn block_collision_shape(
         }
 
         BlockType::OakFence => {
-            let (n, s, w, e) = get_connections(block, pos, chunk_manager);
+            let (n, s, w, e) = get_connections_sampled(block, pos, sample);
             fence_shape_connected(n, s, w, e)
         }
 
@@ -522,12 +543,12 @@ pub fn block_collision_shape(
         }
 
         BlockType::CobblestoneWall => {
-            let (n, s, w, e) = get_connections(block, pos, chunk_manager);
+            let (n, s, w, e) = get_connections_sampled(block, pos, sample);
             wall_shape_connected(n, s, w, e)
         }
 
         BlockType::GlassPane => {
-            let (n, s, w, e) = get_connections(block, pos, chunk_manager);
+            let (n, s, w, e) = get_connections_sampled(block, pos, sample);
             pane_shape_connected(n, s, w, e)
         }
 
@@ -576,7 +597,7 @@ pub fn block_selection_shape(
     block: BlockType,
     state_raw: u8,
     pos: (i32, i32, i32),
-    chunk_manager: Option<&ChunkManager>,
+    sample: Option<&dyn Fn(i32, i32, i32) -> BlockType>,
 ) -> VoxelShape {
     let (fx, fy, fz) = (pos.0 as f32, pos.1 as f32, pos.2 as f32);
 
@@ -598,11 +619,9 @@ pub fn block_selection_shape(
         }
 
         BlockType::OakDoor
-        | BlockType::OakDoorOpen
-        | BlockType::OakTrapdoor
-        | BlockType::OakTrapdoorOpen => VoxelShape::FULL_CUBE,
+        | BlockType::OakTrapdoor => VoxelShape::FULL_CUBE,
 
-        BlockType::Torch | BlockType::RedstoneTorch | BlockType::RedstoneTorchOff => {
+        BlockType::Torch | BlockType::RedstoneTorch => {
             VoxelShape::from_box(aabb(
                 6.0 * SIXTEENTH,
                 0.0,
@@ -629,7 +648,7 @@ pub fn block_selection_shape(
         )),
 
         _ => {
-            let col = block_collision_shape(block, state_raw, (0, 0, 0), chunk_manager);
+            let col = block_collision_shape(block, state_raw, (0, 0, 0), sample);
             if col.is_empty() {
                 VoxelShape::FULL_CUBE
             } else {
@@ -641,55 +660,6 @@ pub fn block_selection_shape(
     shape.translate(Vec3::new(fx, fy, fz))
 }
 
-/// Occlusion shape for face culling and line-of-sight calculation.
-pub fn block_occlusion_shape(block: BlockType, _state_raw: u8, pos: (i32, i32, i32)) -> VoxelShape {
-    let (fx, fy, fz) = (pos.0 as f32, pos.1 as f32, pos.2 as f32);
-
-    let shape = if block.properties().render_type == crate::world::RenderType::Opaque
-        && block.properties().is_solid
-        && matches!(
-            block,
-            BlockType::Grass
-                | BlockType::Dirt
-                | BlockType::Stone
-                | BlockType::Sand
-                | BlockType::Gravel
-                | BlockType::OakLog
-                | BlockType::OakPlanks
-                | BlockType::Cobblestone
-                | BlockType::Bedrock
-                | BlockType::CoalOre
-                | BlockType::IronOre
-                | BlockType::GoldOre
-                | BlockType::DiamondOre
-                | BlockType::RedstoneOre
-                | BlockType::Brick
-                | BlockType::StoneBrick
-                | BlockType::Clay
-                | BlockType::Sandstone
-                | BlockType::Obsidian
-                | BlockType::CraftingTable
-                | BlockType::Furnace
-                | BlockType::FurnaceLit
-                | BlockType::Chest
-                | BlockType::TNT
-                | BlockType::Bookshelf
-                | BlockType::BirchLog
-                | BlockType::BirchPlanks
-                | BlockType::SpruceLog
-                | BlockType::SprucePlanks
-                | BlockType::Netherrack
-                | BlockType::SoulSand
-                | BlockType::EndStone
-                | BlockType::Purpur
-        ) {
-        VoxelShape::FULL_CUBE
-    } else {
-        VoxelShape::EMPTY
-    };
-
-    shape.translate(Vec3::new(fx, fy, fz))
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -798,12 +768,4 @@ mod tests {
         assert!((t_step - 1.0).abs() < 1e-4); // hits top step at y = 1.0
     }
 
-    #[test]
-    fn non_full_blocks_have_empty_occlusion() {
-        assert!(block_occlusion_shape(BlockType::OakSlab, 0, (0, 0, 0)).is_empty());
-        assert!(block_occlusion_shape(BlockType::OakStair, 0, (0, 0, 0)).is_empty());
-        assert!(block_occlusion_shape(BlockType::OakFence, 0, (0, 0, 0)).is_empty());
-        assert!(block_occlusion_shape(BlockType::CobblestoneWall, 0, (0, 0, 0)).is_empty());
-        assert!(block_occlusion_shape(BlockType::GlassPane, 0, (0, 0, 0)).is_empty());
-    }
 }

@@ -1,6 +1,10 @@
-use crate::chunk_manager::ChunkManager;
+use crate::chunk_manager::{WorldColumns, ColumnNeighborhood};
 use crate::physics::AABB;
 use glam::Vec3;
+
+const DROPPED_ITEM_REST_VELOCITY_EPS: f32 = 1e-4;
+pub const ENTITY_GRAVITY: f32 = 32.0;
+pub const CHICKEN_GLIDE_GRAVITY: f32 = 8.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum EntityType {
@@ -516,7 +520,7 @@ impl Entity {
             && (self.entity_type.is_living() || self.entity_type == EntityType::EndCrystal)
     }
 
-    pub fn update_physics(&mut self, dt: f32, chunk_manager: &ChunkManager) {
+    pub fn update_physics(&mut self, dt: f32, neighborhood: &ColumnNeighborhood<'_>) {
         if self.entity_type == EntityType::HeartParticle {
             self.position += self.velocity * dt;
             return;
@@ -552,11 +556,31 @@ impl Entity {
             self.pickup_cooldown = (self.pickup_cooldown - dt).max(0.0);
         }
 
+        // Unloaded columns must not be sampled as Air. Freeze this tick so
+        // drops cannot fall through unmaterialized terrain.
+        if self.physics_region_unloaded(neighborhood, dt) {
+            return;
+        }
+
+        // Settled ground items skip XYZ integration until a supporting block
+        // disappears, a solid occupies their cell, or an external push
+        // applies velocity.
+        if self.entity_type == EntityType::DroppedItem
+            && self.on_ground
+            && self.velocity.length_squared() <= DROPPED_ITEM_REST_VELOCITY_EPS
+        {
+            if self.dropped_item_support_holds(neighborhood) {
+                self.velocity = Vec3::ZERO;
+                return;
+            }
+            self.on_ground = false;
+        }
+
         // Apply gravity
         let gravity = if self.entity_type == EntityType::Chicken && self.velocity.y < 0.0 {
-            8.0 // slow glide
+            CHICKEN_GLIDE_GRAVITY
         } else {
-            32.0
+            ENTITY_GRAVITY
         };
 
         self.velocity.y -= gravity * dt;
@@ -572,16 +596,16 @@ impl Entity {
 
         // Move X
         self.position.x += self.velocity.x * dt;
-        self.resolve_collisions(chunk_manager, 0);
+        self.resolve_collisions(neighborhood, 0);
 
         // Move Z
         self.position.z += self.velocity.z * dt;
-        self.resolve_collisions(chunk_manager, 2);
+        self.resolve_collisions(neighborhood, 2);
 
         // Move Y
         self.position.y += self.velocity.y * dt;
         self.on_ground = false;
-        self.resolve_collisions(chunk_manager, 1);
+        self.resolve_collisions(neighborhood, 1);
 
         // Friction / Deceleration (simulate ground/air drag)
         let friction = if self.on_ground { 0.6 } else { 0.9 };
@@ -589,73 +613,77 @@ impl Entity {
         self.velocity.z *= friction;
     }
 
-    fn resolve_collisions(&mut self, chunk_manager: &ChunkManager, axis: usize) {
-        let entity_aabb = self.get_aabb();
-        let min_x = entity_aabb.min.x.floor() as i32;
-        let max_x = entity_aabb.max.x.floor() as i32;
-        let min_y =
-            (entity_aabb.min.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
-        let max_y =
-            (entity_aabb.max.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
-        let min_z = entity_aabb.min.z.floor() as i32;
-        let max_z = entity_aabb.max.z.floor() as i32;
+    /// Convenience for tests / callers that still hold a full `WorldColumns`.
+    pub fn update_physics_in(&mut self, dt: f32, chunk_manager: &WorldColumns) {
+        let cx = (self.position.x / 16.0).floor() as i32;
+        let cz = (self.position.z / 16.0).floor() as i32;
+        let neighborhood = chunk_manager.column_neighborhood_view(cx, cz);
+        self.update_physics(dt, &neighborhood);
+    }
 
-        for x in min_x..=max_x {
-            for y in min_y..=max_y {
-                for z in min_z..=max_z {
-                    let block = chunk_manager.get_block(x, y, z);
-                    if block.properties().is_solid {
-                        let block_aabb = AABB::new(
-                            Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
-                            Vec3::ONE,
-                        );
+    fn physics_region_unloaded(&self, neighborhood: &ColumnNeighborhood<'_>, dt: f32) -> bool {
+        let current = self.get_aabb();
+        if aabb_touches_unloaded_column(neighborhood, &current) {
+            return true;
+        }
+        let gravity = if self.entity_type == EntityType::Chicken && self.velocity.y < 0.0 {
+            CHICKEN_GLIDE_GRAVITY
+        } else {
+            ENTITY_GRAVITY
+        };
+        let mut vel = self.velocity;
+        vel.y -= gravity * dt;
+        let mut predicted = current;
+        predicted.min += vel * dt;
+        predicted.max += vel * dt;
+        aabb_touches_unloaded_column(neighborhood, &predicted)
+    }
 
-                        if self.get_aabb().intersects(&block_aabb) {
-                            if axis == 0 {
-                                if self.velocity.x > 0.0 {
-                                    self.position.x = block_aabb.min.x - self.size.x * 0.5;
-                                } else {
-                                    self.position.x = block_aabb.max.x + self.size.x * 0.5;
-                                }
-                                self.velocity.x = 0.0;
-                            } else if axis == 2 {
-                                if self.velocity.z > 0.0 {
-                                    self.position.z = block_aabb.min.z - self.size.z * 0.5;
-                                } else {
-                                    self.position.z = block_aabb.max.z + self.size.z * 0.5;
-                                }
-                                self.velocity.z = 0.0;
-                            } else if axis == 1 {
-                                if self.velocity.y > 0.0 {
-                                    self.position.y = block_aabb.min.y - self.size.y;
-                                } else {
-                                    self.position.y = block_aabb.max.y;
-                                    self.on_ground = true;
-                                }
-                                self.velocity.y = 0.0;
-                            }
-                        }
-                    }
-                }
+    fn dropped_item_support_holds(&self, neighborhood: &ColumnNeighborhood<'_>) -> bool {
+        let x = self.position.x.floor() as i32;
+        let z = self.position.z.floor() as i32;
+        let below_y = (self.position.y - 0.001).floor() as i32;
+        let occupy_y = self.position.y.floor() as i32;
+        let below = neighborhood.get_block(x, below_y, z);
+        if !below.properties().is_solid {
+            return false;
+        }
+        let occupying = neighborhood.get_block(x, occupy_y, z);
+        occupying.properties().is_passable || !occupying.properties().is_solid
+    }
+
+    fn resolve_collisions(&mut self, neighborhood: &ColumnNeighborhood<'_>, axis: usize) {
+        crate::physics::resolve_axis_box_collision(
+            &mut self.position,
+            &mut self.velocity,
+            self.size,
+            &mut self.on_ground,
+            neighborhood,
+            axis,
+        );
+    }
+}
+
+fn aabb_touches_unloaded_column(neighborhood: &ColumnNeighborhood<'_>, aabb: &AABB) -> bool {
+    let min_x = aabb.min.x.floor() as i32;
+    let max_x = aabb.max.x.floor() as i32;
+    let min_z = aabb.min.z.floor() as i32;
+    let max_z = aabb.max.z.floor() as i32;
+    for x in min_x..=max_x {
+        for z in min_z..=max_z {
+            if !neighborhood.is_block_loaded(x, 0, z) {
+                return true;
             }
         }
     }
+    false
 }
 
 use std::collections::HashMap;
 
 #[derive(Default)]
-#[allow(dead_code)]
 pub struct EntityScratch {
-    pub arrows_to_spawn: Vec<(Vec3, Vec3)>,
-    pub explosions: Vec<Vec3>,
-    pub blocks_removed: Vec<(i32, i32, i32)>,
-    pub items_to_drop: Vec<(crate::inventory::Item, Vec3)>,
-    pub death_sounds: Vec<Vec3>,
-    pub hearts_to_spawn: Vec<Vec3>,
-    pub baby_mobs_to_spawn: Vec<(EntityType, Vec3)>,
     pub id_list: Vec<u64>,
-    pub usize_list: Vec<usize>,
 }
 
 /// Classification used by the R5.9 query audit.  Global simulation and
@@ -675,21 +703,6 @@ pub const fn is_global_entity_maintenance(kind: EntityIterationKind) -> bool {
     )
 }
 
-impl EntityScratch {
-    #[allow(dead_code)]
-    pub fn clear(&mut self) {
-        self.arrows_to_spawn.clear();
-        self.explosions.clear();
-        self.blocks_removed.clear();
-        self.items_to_drop.clear();
-        self.death_sounds.clear();
-        self.hearts_to_spawn.clear();
-        self.baby_mobs_to_spawn.clear();
-        self.id_list.clear();
-        self.usize_list.clear();
-    }
-}
-
 pub struct EntityManager {
     pub entities: Vec<Entity>,
     pub id_to_index: HashMap<u64, usize>,
@@ -698,11 +711,22 @@ pub struct EntityManager {
     /// Last bucket recorded for each entity. This lets position changes move a
     /// single id between buckets without rebuilding the whole index.
     entity_chunks: HashMap<u64, (i32, i32)>,
-    #[allow(dead_code)]
     pub scratch: EntityScratch,
     next_id: u64,
+    /// Bumped when spatial bucket membership changes (spawn / despawn /
+    /// chunk-crossing sync / rebuild). Interest routing uses this to skip
+    /// `query_radius` for stationary sessions while the index is quiet.
+    spatial_revision: u64,
+    /// Bumped when checksum-relevant entity inputs change: membership
+    /// (spawn / despawn), pose, or `ai_phase`. `ServerWorld::checksum` uses
+    /// this to reuse the sorted entity fingerprint while the set is idle.
+    checksum_epoch: u64,
+    /// Sorted-entity FNV fingerprint for the current `checksum_epoch`.
+    cached_entity_fingerprint: Option<u64>,
     #[cfg(test)]
     position_sync_visits: u64,
+    #[cfg(test)]
+    entity_fingerprint_builds: u64,
 }
 
 impl EntityManager {
@@ -719,8 +743,53 @@ impl EntityManager {
             entity_chunks: HashMap::new(),
             scratch: EntityScratch::default(),
             next_id: next_id.max(1),
+            spatial_revision: 0,
+            checksum_epoch: 0,
+            cached_entity_fingerprint: None,
             #[cfg(test)]
             position_sync_visits: 0,
+            #[cfg(test)]
+            entity_fingerprint_builds: 0,
+        }
+    }
+
+    pub fn spatial_revision(&self) -> u64 {
+        self.spatial_revision
+    }
+
+    pub(crate) fn checksum_epoch(&self) -> u64 {
+        self.checksum_epoch
+    }
+
+    fn bump_spatial_revision(&mut self) {
+        self.spatial_revision = self.spatial_revision.wrapping_add(1);
+    }
+
+    fn bump_checksum_epoch(&mut self) {
+        self.checksum_epoch = self.checksum_epoch.wrapping_add(1);
+        self.cached_entity_fingerprint = None;
+    }
+
+    /// Mark pose / `ai_phase` (or other checksum-hashed fields) dirty without
+    /// necessarily changing spatial bucket membership.
+    pub(crate) fn mark_checksum_inputs_changed(&mut self) {
+        self.bump_checksum_epoch();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn entity_fingerprint_builds(&self) -> u64 {
+        self.entity_fingerprint_builds
+    }
+
+    pub(crate) fn cached_entity_fingerprint(&self) -> Option<u64> {
+        self.cached_entity_fingerprint
+    }
+
+    pub(crate) fn store_entity_fingerprint(&mut self, fingerprint: u64) {
+        self.cached_entity_fingerprint = Some(fingerprint);
+        #[cfg(test)]
+        {
+            self.entity_fingerprint_builds = self.entity_fingerprint_builds.wrapping_add(1);
         }
     }
 
@@ -746,6 +815,8 @@ impl EntityManager {
                 .push(entity.id);
             self.entity_chunks.insert(entity.id, chunk_pos);
         }
+        self.bump_spatial_revision();
+        self.bump_checksum_epoch();
     }
 
     fn chunk_for(position: Vec3) -> (i32, i32) {
@@ -782,6 +853,8 @@ impl EntityManager {
         }
         self.spatial_buckets.entry(new_chunk).or_default().push(id);
         self.entity_chunks.insert(id, new_chunk);
+        self.bump_spatial_revision();
+        self.bump_checksum_epoch();
     }
 
     /// Synchronize only entities whose positions may have changed.
@@ -803,13 +876,6 @@ impl EntityManager {
         self.scratch.id_list = ids;
     }
 
-    /// Compatibility shim for callers outside the entity runtime. New code
-    /// should use `sync_entity_positions` when moved ids are available.
-    #[deprecated(note = "use sync_entity_positions when moved ids are available")]
-    pub fn update_spatial_indexes(&mut self) {
-        self.sync_positions();
-    }
-
     pub fn get_by_id(&self, id: u64) -> Option<&Entity> {
         self.id_to_index
             .get(&id)
@@ -824,11 +890,6 @@ impl EntityManager {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn get_index_by_id(&self, id: u64) -> Option<usize> {
-        self.id_to_index.get(&id).copied()
-    }
-
     pub fn spawn(&mut self, entity_type: EntityType, pos: Vec3) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -840,7 +901,29 @@ impl EntityManager {
         let chunk_pos = Self::chunk_for(pos);
         self.spatial_buckets.entry(chunk_pos).or_default().push(id);
         self.entity_chunks.insert(id, chunk_pos);
+        self.bump_spatial_revision();
+        self.bump_checksum_epoch();
         id
+    }
+
+    /// Insert a fully constructed entity with a caller-chosen id using the same
+    /// incremental index updates as [`Self::spawn`] / [`Self::add_restored_entity`].
+    pub fn insert_indexed_entity(&mut self, entity: Entity) {
+        let id = entity.id;
+        let entity_type = entity.entity_type;
+        let pos = entity.position;
+        let idx = self.entities.len();
+        self.entities.push(entity);
+        self.id_to_index.insert(id, idx);
+        self.type_buckets.entry(entity_type).or_default().push(id);
+        let chunk_pos = Self::chunk_for(pos);
+        self.spatial_buckets.entry(chunk_pos).or_default().push(id);
+        self.entity_chunks.insert(id, chunk_pos);
+        if id >= self.next_id {
+            self.next_id = id + 1;
+        }
+        self.bump_spatial_revision();
+        self.bump_checksum_epoch();
     }
 
     pub fn add_restored_entity(&mut self, data: &crate::save::EntitySaveData) -> u64 {
@@ -856,6 +939,8 @@ impl EntityManager {
         let chunk_pos = Self::chunk_for(pos);
         self.spatial_buckets.entry(chunk_pos).or_default().push(id);
         self.entity_chunks.insert(id, chunk_pos);
+        self.bump_spatial_revision();
+        self.bump_checksum_epoch();
         id
     }
 
@@ -891,6 +976,8 @@ impl EntityManager {
         {
             self.spatial_buckets.remove(&removed_chunk_pos);
         }
+        self.bump_spatial_revision();
+        self.bump_checksum_epoch();
         removed
     }
 
@@ -916,15 +1003,6 @@ impl EntityManager {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn clear(&mut self) {
-        self.entities.clear();
-        self.id_to_index.clear();
-        self.type_buckets.clear();
-        self.spatial_buckets.clear();
-        self.entity_chunks.clear();
-    }
-
     pub fn count_passive(&self) -> usize {
         self.type_buckets
             .iter()
@@ -945,19 +1023,6 @@ impl EntityManager {
     pub fn get_entities_by_type(&self, entity_type: EntityType) -> impl Iterator<Item = &Entity> {
         self.type_buckets
             .get(&entity_type)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.get_by_id(*id))
-    }
-
-    #[allow(dead_code)]
-    pub fn get_entities_in_chunk(
-        &self,
-        chunk_x: i32,
-        chunk_z: i32,
-    ) -> impl Iterator<Item = &Entity> {
-        self.spatial_buckets
-            .get(&(chunk_x, chunk_z))
             .into_iter()
             .flatten()
             .filter_map(|id| self.get_by_id(*id))
@@ -997,50 +1062,12 @@ impl EntityManager {
     }
 }
 
+/// Distance-only ray/AABB probe used by melee selection.
+///
+/// Delegates to [`crate::voxel_shape::ray_intersects_aabb`], which is safe for
+/// axis-aligned rays (the previous slab helper divided by `dir` components).
 pub fn ray_intersects_aabb(origin: Vec3, dir: Vec3, aabb: &AABB) -> Option<f32> {
-    let mut tmin = (aabb.min.x - origin.x) / dir.x;
-    let mut tmax = (aabb.max.x - origin.x) / dir.x;
-    if tmin > tmax {
-        std::mem::swap(&mut tmin, &mut tmax);
-    }
-
-    let mut tymin = (aabb.min.y - origin.y) / dir.y;
-    let mut tymax = (aabb.max.y - origin.y) / dir.y;
-    if tymin > tymax {
-        std::mem::swap(&mut tymin, &mut tymax);
-    }
-
-    if tmin > tymax || tymin > tmax {
-        return None;
-    }
-    if tymin > tmin {
-        tmin = tymin;
-    }
-    if tymax < tmax {
-        tmax = tymax;
-    }
-
-    let mut tzmin = (aabb.min.z - origin.z) / dir.z;
-    let mut tzmax = (aabb.max.z - origin.z) / dir.z;
-    if tzmin > tzmax {
-        std::mem::swap(&mut tzmin, &mut tzmax);
-    }
-
-    if tmin > tzmax || tzmin > tmax {
-        return None;
-    }
-    if tzmin > tmin {
-        tmin = tzmin;
-    }
-    if tzmax < tmax {
-        tmax = tzmax;
-    }
-
-    if tmax >= 0.0 {
-        Some(tmin.max(0.0))
-    } else {
-        None
-    }
+    crate::voxel_shape::ray_intersects_aabb_distance(origin, dir, f32::INFINITY, aabb)
 }
 
 #[cfg(test)]
@@ -1091,12 +1118,33 @@ mod tests {
 
         assert_eq!(em.position_sync_visits - visits, 1);
         assert!(!em
-            .get_entities_in_chunk(0, 0)
+            .query_radius(Vec3::new(1.0, 64.0, 1.0), 2.0)
             .any(|entity| entity.id == moved));
         assert!(em
-            .get_entities_in_chunk(1, 0)
+            .query_radius(Vec3::new(17.0, 64.0, 1.0), 2.0)
             .any(|entity| entity.id == moved));
         assert_eq!(em.entities.len(), 32);
+    }
+
+    #[test]
+    fn moved_entity_remains_findable_via_query_radius_after_incremental_sync() {
+        // Combat / pickup spatial queries must still see entities after a
+        // chunk-crossing move that only syncs the mover id list.
+        let mut em = EntityManager::new();
+        let id = em.spawn(EntityType::Pig, Vec3::new(15.0, 4.0, 0.0));
+        em.get_by_id_mut(id).unwrap().position = Vec3::new(17.0, 4.0, 0.0);
+        em.sync_entity_positions(&[id]);
+
+        assert!(
+            em.query_radius(Vec3::new(17.0, 4.0, 0.0), 0.5)
+                .any(|entity| entity.id == id),
+            "incremental sync must keep the mover in the destination bucket"
+        );
+        assert!(
+            !em.query_radius(Vec3::new(15.0, 4.0, 0.0), 0.5)
+                .any(|entity| entity.id == id),
+            "mover must leave the old bucket after incremental sync"
+        );
     }
 
     #[test]
@@ -1117,11 +1165,33 @@ mod tests {
     }
 
     #[test]
+    fn ray_aabb_accepts_axis_aligned_zero_components() {
+        let aabb = AABB::new(Vec3::ZERO, Vec3::ONE);
+        // Pure +X ray — old entity slab helper divided by dir.y/dir.z (== 0).
+        let hit = ray_intersects_aabb(Vec3::new(-2.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), &aabb);
+        assert!(hit.is_some());
+        assert!((hit.unwrap() - 1.5).abs() < 1e-5);
+        // Origin outside on a zero axis misses.
+        assert!(
+            ray_intersects_aabb(Vec3::new(-2.0, 2.0, 0.0), Vec3::new(1.0, 0.0, 0.0), &aabb)
+                .is_none()
+        );
+    }
+
+    fn loaded_air_column() -> WorldColumns {
+        let mut chunk_manager = WorldColumns::new(4);
+        chunk_manager
+            .chunks
+            .insert((0, 0), crate::world::Chunk::empty(0, 0));
+        chunk_manager
+    }
+
+    #[test]
     fn test_chicken_slow_fall() {
-        let mut chicken = Entity::new(1, EntityType::Chicken, Vec3::new(0.0, 10.0, 0.0));
+        let mut chicken = Entity::new(1, EntityType::Chicken, Vec3::new(0.5, 10.0, 0.5));
         chicken.velocity.y = -10.0;
-        let chunk_manager = ChunkManager::new(4);
-        chicken.update_physics(0.1, &chunk_manager);
+        let chunk_manager = loaded_air_column();
+        chicken.update_physics_in(0.1, &chunk_manager);
         assert!(chicken.velocity.y >= -2.01 && chicken.velocity.y <= -1.99);
     }
 
@@ -1137,9 +1207,9 @@ mod tests {
     fn dropped_item_falls_with_gravity() {
         let mut item = Entity::new(2, EntityType::DroppedItem, Vec3::new(0.5, 20.0, 0.5));
         item.dropped_item = Some(crate::inventory::Item::Stone);
-        let chunk_manager = ChunkManager::new(4);
-        // No solid block below within the chunk; gravity should pull it down.
-        item.update_physics(0.5, &chunk_manager);
+        let chunk_manager = loaded_air_column();
+        // Loaded air column; gravity should pull it down.
+        item.update_physics_in(0.5, &chunk_manager);
         assert!(
             item.velocity.y < 0.0,
             "dropped item should be falling under gravity"
@@ -1152,19 +1222,10 @@ mod tests {
 
     #[test]
     fn dropped_item_lands_on_solid_block() {
-        // Build a chunk manager with a single solid stone block at world
-        // (0, 10, 0). We start from a generated chunk but clear it so the only
-        // solid block is our test floor.
-        let mut chunk_manager = ChunkManager::new(4);
+        // Empty signed-Y column with a single solid stone floor at y=10.
+        let mut chunk_manager = loaded_air_column();
         let _ = chunk_manager.chunks.insert((0, 0), {
-            let mut c = crate::world::Chunk::new(0, 0);
-            for x in 0..crate::world::CHUNK_WIDTH {
-                for y in 0..crate::world::CHUNK_HEIGHT {
-                    for z in 0..crate::world::CHUNK_DEPTH {
-                        c.set_block_local(x, y as i32, z, crate::world::BlockType::Air);
-                    }
-                }
-            }
+            let mut c = crate::world::Chunk::empty(0, 0);
             // Place a 2x2 stone floor at y=10 covering the item's footprint.
             for fx in 0..2 {
                 for fz in 0..2 {
@@ -1177,7 +1238,7 @@ mod tests {
         item.dropped_item = Some(crate::inventory::Item::Stone);
         // Simulate several physics steps so the item falls onto the floor.
         for _ in 0..400 {
-            item.update_physics(0.05, &chunk_manager);
+            item.update_physics_in(0.05, &chunk_manager);
         }
         assert!(
             item.on_ground,
@@ -1193,11 +1254,111 @@ mod tests {
     }
 
     #[test]
+    fn dropped_item_lands_on_solid_block_below_y_zero() {
+        let mut chunk_manager = loaded_air_column();
+        let _ = chunk_manager.chunks.insert((0, 0), {
+            let mut c = crate::world::Chunk::empty(0, 0);
+            for fx in 0..2 {
+                for fz in 0..2 {
+                    c.set_block_local(fx, -10, fz, crate::world::BlockType::Stone);
+                }
+            }
+            c
+        });
+        let mut item = Entity::new(5, EntityType::DroppedItem, Vec3::new(0.5, -8.0, 0.5));
+        item.dropped_item = Some(crate::inventory::Item::Stone);
+        for _ in 0..400 {
+            item.update_physics_in(0.05, &chunk_manager);
+        }
+        assert!(
+            item.on_ground,
+            "dropped item should rest on the Y=-10 solid block"
+        );
+        assert!(
+            item.position.y >= -9.1 && item.position.y <= -8.9,
+            "dropped item should rest on top of y=-10 (got y={})",
+            item.position.y
+        );
+    }
+
+    #[test]
+    fn settled_dropped_item_skips_physics_until_support_changes_or_pushed() {
+        let mut chunk_manager = loaded_air_column();
+        let _ = chunk_manager.chunks.insert((0, 0), {
+            let mut c = crate::world::Chunk::empty(0, 0);
+            for fx in 0..2 {
+                for fz in 0..2 {
+                    c.set_block_local(fx, 10, fz, crate::world::BlockType::Stone);
+                }
+            }
+            c
+        });
+        let mut item = Entity::new(7, EntityType::DroppedItem, Vec3::new(0.5, 12.0, 0.5));
+        item.dropped_item = Some(crate::inventory::Item::Stone);
+        item.pickup_cooldown = 0.4;
+        for _ in 0..400 {
+            item.update_physics_in(0.05, &chunk_manager);
+        }
+        assert!(item.on_ground);
+        item.velocity = Vec3::ZERO;
+        let rest = item.position;
+        item.pickup_cooldown = 0.4;
+        for _ in 0..8 {
+            item.update_physics_in(0.05, &chunk_manager);
+        }
+        assert_eq!(item.position, rest);
+        assert!(item.on_ground);
+        assert!((item.pickup_cooldown - 0.0).abs() < 1e-4);
+
+        item.velocity = Vec3::new(4.0, 0.0, 0.0);
+        item.update_physics_in(0.05, &chunk_manager);
+        assert!(
+            item.position.x > rest.x,
+            "an external push must resume dropped-item physics"
+        );
+
+        let mut falling = Entity::new(8, EntityType::DroppedItem, rest);
+        falling.dropped_item = Some(crate::inventory::Item::Stone);
+        falling.on_ground = true;
+        falling.velocity = Vec3::ZERO;
+        if let Some(chunk) = chunk_manager.chunks.get_mut(&(0, 0)) {
+            for fx in 0..2 {
+                for fz in 0..2 {
+                    chunk.set_block_local(fx, 10, fz, crate::world::BlockType::Air);
+                }
+            }
+        }
+        falling.update_physics_in(0.05, &chunk_manager);
+        assert!(
+            falling.position.y < rest.y,
+            "removing the support block must resume falling"
+        );
+    }
+
+    #[test]
+    fn dropped_item_freezes_when_column_is_unloaded() {
+        // Policy: skip physics this tick when any occupied/predicted column is
+        // unloaded. Missing terrain must not be treated as air.
+        let chunk_manager = WorldColumns::new(4);
+        let mut item = Entity::new(6, EntityType::DroppedItem, Vec3::new(0.5, -9.0, 0.5));
+        item.dropped_item = Some(crate::inventory::Item::Stone);
+        item.velocity = Vec3::new(0.0, -8.0, 0.0);
+        let start = item.position;
+        item.update_physics_in(0.05, &chunk_manager);
+        assert_eq!(
+            item.position, start,
+            "unloaded column must freeze the entity instead of falling through air"
+        );
+        assert_eq!(item.velocity, Vec3::new(0.0, -8.0, 0.0));
+        assert!(!item.on_ground);
+    }
+
+    #[test]
     fn dropped_item_pickup_cooldown_decreases() {
         let mut item = Entity::new(4, EntityType::DroppedItem, Vec3::new(0.5, 20.0, 0.5));
         item.pickup_cooldown = 0.5;
-        let chunk_manager = ChunkManager::new(4);
-        item.update_physics(0.3, &chunk_manager);
+        let chunk_manager = loaded_air_column();
+        item.update_physics_in(0.3, &chunk_manager);
         assert!(
             (item.pickup_cooldown - 0.2).abs() < 1e-4,
             "pickup cooldown should decrement by dt"

@@ -60,10 +60,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         properties.online_mode = parse_bool_flag("--online-mode", &online_mode)?;
     }
     if let Some(whitelist) = value(&args, "--whitelist") {
-        properties.whitelist = parse_names(&whitelist);
+        properties.whitelist = parse_names(&whitelist)?;
     }
     if let Some(operators) = value(&args, "--operators") {
-        properties.operators = parse_names(&operators);
+        properties.operators = parse_names(&operators)?;
     }
     if let Some(seed) = value(&args, "--seed") {
         properties.seed = seed.parse::<i64>().map_err(|_| {
@@ -262,23 +262,30 @@ fn parse_difficulty(value: &str) -> Result<String, io::Error> {
 }
 
 fn parse_bool_flag(key: &str, value: &str) -> Result<bool, io::Error> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" | "on" => Ok(true),
-        "false" | "0" | "no" | "off" => Ok(false),
-        _ => Err(io::Error::new(
+    icraft::game_rules::parse_bool_flag(value).ok_or_else(|| {
+        io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("{key} must be true/false (got {value:?})"),
-        )),
-    }
+        )
+    })
 }
 
-fn parse_names(value: &str) -> HashSet<String> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect()
+fn parse_names(value: &str) -> Result<HashSet<String>, io::Error> {
+    let mut names = HashSet::new();
+    for raw in value.split(',') {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let identity = icraft::save::normalize_player_identity(raw).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid player name {raw:?}: {error}"),
+            )
+        })?;
+        names.insert(identity);
+    }
+    Ok(names)
 }
 
 fn validate_world_path(path: &Path) -> Result<(), io::Error> {
@@ -317,7 +324,7 @@ fn validate_world_path(path: &Path) -> Result<(), io::Error> {
 
 fn print_help() {
     println!(
-        "icraft-server [--config PATH] [--world PATH] [--bind IP] [--port PORT]\n  [--max-players N] [--view-distance N] [--simulation-distance N]\n  [--difficulty peaceful|easy|normal|hard] [--motd TEXT] [--pvp BOOL]\n  [--online-mode BOOL] [--whitelist USERS] [--operators USERS] [--seed N]\n  [--ticks N|--duration-seconds N|--once]\n\nRuns the headless authoritative server. Ctrl-C flushes player/level saves."
+        "icraft-server [--config PATH] [--world PATH] [--bind IP] [--port PORT]\n  [--max-players N] [--view-distance N] [--simulation-distance N]\n  [--difficulty peaceful|easy|normal|hard] [--motd TEXT] [--pvp BOOL]\n  [--online-mode false] [--whitelist USERS] [--operators USERS] [--seed N]\n  [--ticks N|--duration-seconds N|--once]\n\nRuns the headless authoritative server. Ctrl-C flushes player/level saves.\n--online-mode true is rejected: authentication is not implemented, so the\nflag cannot be used as a credential switch. false is LAN/offline (names are\naccounts; operators come only from the console `op` command)."
     );
 }
 
@@ -332,10 +339,12 @@ mod tests {
         assert!(parse_bool_flag("--pvp", "on").unwrap());
         assert!(!parse_bool_flag("--pvp", "off").unwrap());
         assert!(parse_bool_flag("--pvp", "maybe").is_err());
-        let names = parse_names(" Alex, steve, ,ALEX ");
+        let names = parse_names(" Alex, steve, ,ALEX ").unwrap();
         assert_eq!(names.len(), 2);
         assert!(names.contains("alex"));
         assert!(names.contains("steve"));
+        assert!(parse_names("foo.bar").is_err());
+        assert!(parse_names("CON").is_err());
         assert!(validate_args(&["--port".into()]).is_err());
         assert!(validate_args(&["--port".into(), "--once".into()]).is_err());
         assert!(validate_args(&["--duration-seconds".into(), "1".into()]).is_ok());

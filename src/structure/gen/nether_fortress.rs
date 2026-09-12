@@ -1,7 +1,7 @@
-use crate::block_entity::{BlockEntity, ChestBlockEntity, SpawnerBlockEntity};
+use crate::block_entity::{BlockEntity, SpawnerBlockEntity};
 use crate::entity::EntityType;
-use crate::inventory::ContainerInventory;
 use crate::loot::LootTableId;
+use crate::structure::gen::helpers::{finish_start, fill_box, place_loot_chest, push_block};
 use crate::structure::types::*;
 use crate::world::BlockType;
 
@@ -11,113 +11,96 @@ pub fn generate_nether_fortress(
     origin_z: i32,
     seed: u32,
 ) -> StructureStart {
-    let mut blocks = Vec::new();
     let length = 20;
+    let mut blocks = Vec::new();
 
-    let min_x = origin_x;
-    let min_y = origin_y;
-    let min_z = origin_z;
-    let max_x = origin_x + length - 1;
-    let max_y = origin_y + 8;
-    let max_z = origin_z + 10;
-
-    // Bridge / Corridor built from NetherBrick
     for dx in 0..length {
-        // Floor
-        for dz in 0..5 {
-            blocks.push(BlockPlacement {
-                world_x: origin_x + dx,
-                world_y: origin_y,
-                world_z: origin_z + dz,
-                block_type: BlockType::NetherBrick,
-                block_entity: None,
-            });
-        }
-        // Pillars & Walls
+        fill_box(
+            &mut blocks,
+            origin_x + dx,
+            origin_y,
+            origin_z,
+            1,
+            1,
+            5,
+            BlockType::NetherBrick,
+        );
         if dx % 5 == 0 {
             for dy in 1..4 {
-                blocks.push(BlockPlacement {
-                    world_x: origin_x + dx,
-                    world_y: origin_y + dy,
-                    world_z: origin_z,
-                    block_type: BlockType::NetherBrick,
-                    block_entity: None,
-                });
-                blocks.push(BlockPlacement {
-                    world_x: origin_x + dx,
-                    world_y: origin_y + dy,
-                    world_z: origin_z + 4,
-                    block_type: BlockType::NetherBrick,
-                    block_entity: None,
-                });
+                push_block(
+                    &mut blocks,
+                    origin_x + dx,
+                    origin_y + dy,
+                    origin_z,
+                    BlockType::NetherBrick,
+                );
+                push_block(
+                    &mut blocks,
+                    origin_x + dx,
+                    origin_y + dy,
+                    origin_z + 4,
+                    BlockType::NetherBrick,
+                );
             }
         }
     }
 
-    // Nether Wart Farm room
     let farm_x = origin_x + 8;
     let farm_z = origin_z + 6;
-    for dx in 0..4 {
-        for dz in 0..4 {
-            blocks.push(BlockPlacement {
-                world_x: farm_x + dx,
-                world_y: origin_y,
-                world_z: farm_z + dz,
-                block_type: BlockType::SoulSand,
-                block_entity: None,
-            });
-            blocks.push(BlockPlacement {
-                world_x: farm_x + dx,
-                world_y: origin_y + 1,
-                world_z: farm_z + dz,
-                block_type: BlockType::NetherWartCrop,
-                block_entity: None,
-            });
-        }
-    }
+    fill_box(
+        &mut blocks,
+        farm_x,
+        origin_y,
+        farm_z,
+        4,
+        1,
+        4,
+        BlockType::SoulSand,
+    );
+    fill_box(
+        &mut blocks,
+        farm_x,
+        origin_y + 1,
+        farm_z,
+        4,
+        1,
+        4,
+        BlockType::NetherWartCrop,
+    );
 
-    // Blaze Spawner platform
-    let spawner_x = origin_x + 16;
-    let spawner_z = origin_z + 2;
     blocks.push(BlockPlacement {
-        world_x: spawner_x,
+        world_x: origin_x + 16,
         world_y: origin_y + 1,
-        world_z: spawner_z,
+        world_z: origin_z + 2,
         block_type: BlockType::Spawner,
+        block_state: 0,
         block_entity: Some(BlockEntity::Spawner(SpawnerBlockEntity {
             entity_type: EntityType::Blaze,
             spawn_delay: 160,
         })),
     });
 
-    // Fortress Chest
-    let chest_entity = BlockEntity::Chest(ChestBlockEntity {
-        custom_name: None,
-        inventory: ContainerInventory::new(),
-        loot_table: Some(LootTableId::NetherBridge.as_str().to_string()),
-        loot_seed: Some(seed as u64 ^ 0x464F_5254),
-        revision: 0,
-    });
-    blocks.push(BlockPlacement {
-        world_x: origin_x + 3,
-        world_y: origin_y + 1,
-        world_z: origin_z + 2,
-        block_type: BlockType::Chest,
-        block_entity: Some(chest_entity),
-    });
+    place_loot_chest(
+        &mut blocks,
+        origin_x + 3,
+        origin_y + 1,
+        origin_z + 2,
+        LootTableId::NetherBridge.as_str(),
+        seed as u64 ^ 0x464F_5254,
+        None,
+    );
 
-    let bounding_box = BoundingBox::new(min_x, min_y, min_z, max_x, max_y, max_z);
-    let piece = StructurePiece {
-        bounding_box,
-        blocks,
-    };
-
-    StructureStart {
-        id: StructureId::NetherFortress,
+    finish_start(
+        StructureId::NetherFortress,
         origin_x,
         origin_y,
         origin_z,
-        bounding_box,
-        pieces: vec![piece],
-    }
+        origin_x,
+        origin_y,
+        origin_z,
+        origin_x + length - 1,
+        origin_y + 8,
+        origin_z + 10,
+        blocks,
+    )
 }

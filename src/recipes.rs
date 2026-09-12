@@ -1,4 +1,8 @@
+//! Crafting and smelting recipe tables (Plan 21).
+//! Pattern strings + wood-family expansion; shaped/smelting lookups are indexed.
+
 use crate::inventory::{Item, ItemStack};
+use std::collections::HashMap;
 
 pub type RecipeId = &'static str;
 
@@ -45,29 +49,29 @@ impl FuelDefinition {
 pub struct RecipeManager {
     pub crafting_recipes: Vec<CraftingRecipe>,
     pub smelting_recipes: Vec<SmeltingRecipe>,
+    /// (width, height, pattern[0][0]) → recipe indices into `crafting_recipes`.
+    shaped_index: HashMap<(usize, usize, Item), Vec<usize>>,
+    smelting_by_input: HashMap<Item, usize>,
 }
 
 fn add_shaped(
     recipes: &mut Vec<CraftingRecipe>,
     id: RecipeId,
-    pat: Vec<&str>,
-    mapping: &[(&str, Item)],
+    pat: &[&str],
+    mapping: &[(char, Item)],
     result: ItemStack,
 ) {
     let height = pat.len();
     let width = pat[0].len();
     let mut pattern = vec![vec![Item::Air; width]; height];
-    for r in 0..height {
-        let chars: Vec<char> = pat[r].chars().collect();
-        for c in 0..width {
-            let ch = chars[c].to_string();
-            if ch != " " {
-                let item = mapping
+    for (r, row) in pat.iter().enumerate() {
+        for (c, ch) in row.chars().enumerate() {
+            if ch != ' ' {
+                pattern[r][c] = mapping
                     .iter()
-                    .find(|(s, _)| s == &ch)
+                    .find(|(k, _)| *k == ch)
                     .map(|(_, it)| *it)
                     .unwrap_or(Item::Air);
-                pattern[r][c] = item;
             }
         }
     }
@@ -99,842 +103,894 @@ fn add_shapeless(
     });
 }
 
+#[derive(Clone, Copy)]
+struct WoodFamily {
+    name: &'static str,
+    log: Item,
+    planks: Item,
+}
+
+const WOODS: [WoodFamily; 3] = [
+    WoodFamily {
+        name: "oak",
+        log: Item::OakLog,
+        planks: Item::OakPlanks,
+    },
+    WoodFamily {
+        name: "birch",
+        log: Item::BirchLog,
+        planks: Item::BirchPlanks,
+    },
+    WoodFamily {
+        name: "spruce",
+        log: Item::SpruceLog,
+        planks: Item::SprucePlanks,
+    },
+];
+
+/// Static shaped recipe rows: (id, pattern rows, char→item map, result item, count).
+/// Wood-family plank recipes are expanded separately in `RecipeManager::new`.
+struct ShapedDef {
+    id: RecipeId,
+    pat: &'static [&'static str],
+    map: &'static [(char, Item)],
+    result: Item,
+    count: u32,
+}
+
+struct ShapelessDef {
+    id: RecipeId,
+    ingredients: &'static [Item],
+    result: Item,
+    count: u32,
+}
+
+struct SmeltDef {
+    id: RecipeId,
+    input: Item,
+    output: Item,
+    count: u32,
+    cook_time: u16,
+    experience: f32,
+}
+
+const SHAPED: &[ShapedDef] = &[
+    ShapedDef {
+        id: "crafting/bed",
+        pat: &["WWW", "PPP"],
+        map: &[('W', Item::Wool), ('P', Item::OakPlanks)],
+        result: Item::Bed,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/furnace",
+        pat: &["CCC", "C C", "CCC"],
+        map: &[('C', Item::Cobblestone)],
+        result: Item::Furnace,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/torch",
+        pat: &["C", "S"],
+        map: &[('C', Item::Coal), ('S', Item::Stick)],
+        result: Item::Torch,
+        count: 4,
+    },
+    // Stone tools
+    ShapedDef {
+        id: "crafting/stone_pickaxe",
+        pat: &["SSS", " t ", " t "],
+        map: &[('S', Item::Cobblestone), ('t', Item::Stick)],
+        result: Item::StonePickaxe,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/stone_axe",
+        pat: &["SS ", "St ", " t "],
+        map: &[('S', Item::Cobblestone), ('t', Item::Stick)],
+        result: Item::StoneAxe,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/stone_shovel",
+        pat: &["S", "t", "t"],
+        map: &[('S', Item::Cobblestone), ('t', Item::Stick)],
+        result: Item::StoneShovel,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/stone_sword",
+        pat: &["S", "S", "t"],
+        map: &[('S', Item::Cobblestone), ('t', Item::Stick)],
+        result: Item::StoneSword,
+        count: 1,
+    },
+    // Iron tools
+    ShapedDef {
+        id: "crafting/iron_pickaxe",
+        pat: &["III", " t ", " t "],
+        map: &[('I', Item::IronIngot), ('t', Item::Stick)],
+        result: Item::IronPickaxe,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/iron_axe",
+        pat: &["II ", "It ", " t "],
+        map: &[('I', Item::IronIngot), ('t', Item::Stick)],
+        result: Item::IronAxe,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/iron_shovel",
+        pat: &["I", "t", "t"],
+        map: &[('I', Item::IronIngot), ('t', Item::Stick)],
+        result: Item::IronShovel,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/iron_sword",
+        pat: &["I", "I", "t"],
+        map: &[('I', Item::IronIngot), ('t', Item::Stick)],
+        result: Item::IronSword,
+        count: 1,
+    },
+    // Diamond tools
+    ShapedDef {
+        id: "crafting/diamond_pickaxe",
+        pat: &["DDD", " t ", " t "],
+        map: &[('D', Item::Diamond), ('t', Item::Stick)],
+        result: Item::DiamondPickaxe,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/diamond_axe",
+        pat: &["DD ", "Dt ", " t "],
+        map: &[('D', Item::Diamond), ('t', Item::Stick)],
+        result: Item::DiamondAxe,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/diamond_shovel",
+        pat: &["D", "t", "t"],
+        map: &[('D', Item::Diamond), ('t', Item::Stick)],
+        result: Item::DiamondShovel,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/diamond_sword",
+        pat: &["D", "D", "t"],
+        map: &[('D', Item::Diamond), ('t', Item::Stick)],
+        result: Item::DiamondSword,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/stone_brick",
+        pat: &["SS", "SS"],
+        map: &[('S', Item::Stone)],
+        result: Item::StoneBrick,
+        count: 4,
+    },
+    ShapedDef {
+        id: "crafting/brick",
+        pat: &["CC", "CC"],
+        map: &[('C', Item::Clay)],
+        result: Item::Brick,
+        count: 4,
+    },
+    ShapedDef {
+        id: "crafting/sandstone",
+        pat: &["SS", "SS"],
+        map: &[('S', Item::Sand)],
+        result: Item::Sandstone,
+        count: 4,
+    },
+    ShapedDef {
+        id: "crafting/snow_block",
+        pat: &["SS", "SS"],
+        map: &[('S', Item::Snow)],
+        result: Item::Snow,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/tnt",
+        pat: &["RSR", "SRS", "RSR"],
+        map: &[('R', Item::Redstone), ('S', Item::Sand)],
+        result: Item::TNT,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/bread",
+        pat: &["WWW"],
+        map: &[('W', Item::Wheat)],
+        result: Item::Bread,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/enchanting_table",
+        pat: &[" B ", "D D", "OOO"],
+        map: &[
+            ('B', Item::Bookshelf),
+            ('D', Item::Diamond),
+            ('O', Item::Obsidian),
+        ],
+        result: Item::EnchantingTable,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/brewing_stand",
+        pat: &[" B ", "CCC"],
+        map: &[('B', Item::BlazePowder), ('C', Item::Cobblestone)],
+        result: Item::BrewingStand,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/anvil",
+        pat: &["III", " I ", "III"],
+        map: &[('I', Item::IronIngot)],
+        result: Item::Anvil,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/glass_bottle",
+        pat: &["G G", " G "],
+        map: &[('G', Item::Glass)],
+        result: Item::GlassBottle,
+        count: 3,
+    },
+    ShapedDef {
+        id: "crafting/iron_helmet",
+        pat: &["III", "I I"],
+        map: &[('I', Item::IronIngot)],
+        result: Item::IronHelmet,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/iron_chestplate",
+        pat: &["I I", "III", "III"],
+        map: &[('I', Item::IronIngot)],
+        result: Item::IronChestplate,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/iron_leggings",
+        pat: &["III", "I I", "I I"],
+        map: &[('I', Item::IronIngot)],
+        result: Item::IronLeggings,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/iron_boots",
+        pat: &["I I", "I I"],
+        map: &[('I', Item::IronIngot)],
+        result: Item::IronBoots,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/leather_helmet",
+        pat: &["LLL", "L L"],
+        map: &[('L', Item::Leather)],
+        result: Item::LeatherHelmet,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/leather_chestplate",
+        pat: &["L L", "LLL", "LLL"],
+        map: &[('L', Item::Leather)],
+        result: Item::LeatherChestplate,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/leather_leggings",
+        pat: &["LLL", "L L", "L L"],
+        map: &[('L', Item::Leather)],
+        result: Item::LeatherLeggings,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/leather_boots",
+        pat: &["L L", "L L"],
+        map: &[('L', Item::Leather)],
+        result: Item::LeatherBoots,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/diamond_helmet",
+        pat: &["DDD", "D D"],
+        map: &[('D', Item::Diamond)],
+        result: Item::DiamondHelmet,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/diamond_chestplate",
+        pat: &["D D", "DDD", "DDD"],
+        map: &[('D', Item::Diamond)],
+        result: Item::DiamondChestplate,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/diamond_leggings",
+        pat: &["DDD", "D D", "D D"],
+        map: &[('D', Item::Diamond)],
+        result: Item::DiamondLeggings,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/diamond_boots",
+        pat: &["D D", "D D"],
+        map: &[('D', Item::Diamond)],
+        result: Item::DiamondBoots,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/shield",
+        pat: &["PIP", "PPP", " P "],
+        map: &[('P', Item::OakPlanks), ('I', Item::IronIngot)],
+        result: Item::Shield,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/wooden_sword",
+        pat: &["W", "W", "S"],
+        map: &[('W', Item::OakPlanks), ('S', Item::Stick)],
+        result: Item::WoodenSword,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/wooden_pickaxe",
+        pat: &["WWW", " S ", " S "],
+        map: &[('W', Item::OakPlanks), ('S', Item::Stick)],
+        result: Item::WoodenPickaxe,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/wooden_axe",
+        pat: &["WW", "WS", " S"],
+        map: &[('W', Item::OakPlanks), ('S', Item::Stick)],
+        result: Item::WoodenAxe,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/wooden_shovel",
+        pat: &["W", "S", "S"],
+        map: &[('W', Item::OakPlanks), ('S', Item::Stick)],
+        result: Item::WoodenShovel,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/arrow",
+        pat: &["G", "S", "F"],
+        map: &[
+            ('G', Item::Gravel),
+            ('S', Item::Stick),
+            ('F', Item::Feather),
+        ],
+        result: Item::Arrow,
+        count: 4,
+    },
+    ShapedDef {
+        id: "crafting/wooden_hoe",
+        pat: &["WW", " S", " S"],
+        map: &[('W', Item::OakPlanks), ('S', Item::Stick)],
+        result: Item::WoodenHoe,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/stone_hoe",
+        pat: &["CC", " S", " S"],
+        map: &[('C', Item::Cobblestone), ('S', Item::Stick)],
+        result: Item::StoneHoe,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/iron_hoe",
+        pat: &["II", " S", " S"],
+        map: &[('I', Item::IronIngot), ('S', Item::Stick)],
+        result: Item::IronHoe,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/golden_hoe",
+        pat: &["GG", " S", " S"],
+        map: &[('G', Item::GoldIngot), ('S', Item::Stick)],
+        result: Item::GoldenHoe,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/diamond_hoe",
+        pat: &["DD", " S", " S"],
+        map: &[('D', Item::Diamond), ('S', Item::Stick)],
+        result: Item::DiamondHoe,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/glowstone",
+        pat: &["DD", "DD"],
+        map: &[('D', Item::GlowstoneDust)],
+        result: Item::Glowstone,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/end_crystal",
+        pat: &["GGG", "GEG", "GTG"],
+        map: &[
+            ('G', Item::Glass),
+            ('E', Item::EyeOfEnder),
+            ('T', Item::GhastTear),
+        ],
+        result: Item::EndCrystal,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/redstone_torch",
+        pat: &["R", "S"],
+        map: &[('R', Item::RedstoneDust), ('S', Item::Stick)],
+        result: Item::RedstoneTorch,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/repeater",
+        pat: &["TRT", "SSS"],
+        map: &[
+            ('T', Item::RedstoneTorch),
+            ('R', Item::RedstoneDust),
+            ('S', Item::Stone),
+        ],
+        result: Item::Repeater,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/comparator",
+        pat: &[" T ", "TRT", "SSS"],
+        map: &[
+            ('T', Item::RedstoneTorch),
+            ('R', Item::RedstoneDust),
+            ('S', Item::Stone),
+        ],
+        result: Item::Comparator,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/lever",
+        pat: &["S", "C"],
+        map: &[('S', Item::Stick), ('C', Item::Cobblestone)],
+        result: Item::Lever,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/pressure_plate",
+        pat: &["SS"],
+        map: &[('S', Item::Stone)],
+        result: Item::PressurePlate,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/piston",
+        pat: &["PPP", "CIC", "CRC"],
+        map: &[
+            ('P', Item::OakPlanks),
+            ('C', Item::Cobblestone),
+            ('I', Item::IronIngot),
+            ('R', Item::RedstoneDust),
+        ],
+        result: Item::Piston,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/redstone_lamp",
+        pat: &[" R ", "RGR", " R "],
+        map: &[('R', Item::RedstoneDust), ('G', Item::GlowstoneDust)],
+        result: Item::RedstoneLamp,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/oak_door",
+        pat: &["PP", "PP", "PP"],
+        map: &[('P', Item::OakPlanks)],
+        result: Item::OakDoor,
+        count: 3,
+    },
+    ShapedDef {
+        id: "crafting/oak_trapdoor",
+        pat: &["PPP", "PPP"],
+        map: &[('P', Item::OakPlanks)],
+        result: Item::OakTrapdoor,
+        count: 2,
+    },
+    ShapedDef {
+        id: "crafting/dispenser",
+        pat: &["CCC", "CBC", "CRC"],
+        map: &[
+            ('C', Item::Cobblestone),
+            ('B', Item::Bow),
+            ('R', Item::RedstoneDust),
+        ],
+        result: Item::Dispenser,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/dropper",
+        pat: &["CCC", "C C", "CRC"],
+        map: &[('C', Item::Cobblestone), ('R', Item::RedstoneDust)],
+        result: Item::Dropper,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/note_block",
+        pat: &["PPP", "PRP", "PPP"],
+        map: &[('P', Item::OakPlanks), ('R', Item::RedstoneDust)],
+        result: Item::NoteBlock,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/oak_slab",
+        pat: &["PPP"],
+        map: &[('P', Item::OakPlanks)],
+        result: Item::OakSlab,
+        count: 6,
+    },
+    ShapedDef {
+        id: "crafting/cobblestone_slab",
+        pat: &["CCC"],
+        map: &[('C', Item::Cobblestone)],
+        result: Item::CobblestoneSlab,
+        count: 6,
+    },
+    ShapedDef {
+        id: "crafting/oak_stair",
+        pat: &["P  ", "PP ", "PPP"],
+        map: &[('P', Item::OakPlanks)],
+        result: Item::OakStair,
+        count: 4,
+    },
+    ShapedDef {
+        id: "crafting/cobblestone_stair",
+        pat: &["C  ", "CC ", "CCC"],
+        map: &[('C', Item::Cobblestone)],
+        result: Item::CobblestoneStair,
+        count: 4,
+    },
+    ShapedDef {
+        id: "crafting/oak_fence",
+        pat: &["PSP", "PSP"],
+        map: &[('P', Item::OakPlanks), ('S', Item::Stick)],
+        result: Item::OakFence,
+        count: 3,
+    },
+    ShapedDef {
+        id: "crafting/oak_fence_gate",
+        pat: &["SPS", "SPS"],
+        map: &[('P', Item::OakPlanks), ('S', Item::Stick)],
+        result: Item::OakFenceGate,
+        count: 1,
+    },
+    ShapedDef {
+        id: "crafting/cobblestone_wall",
+        pat: &["CCC", "CCC"],
+        map: &[('C', Item::Cobblestone)],
+        result: Item::CobblestoneWall,
+        count: 6,
+    },
+    ShapedDef {
+        id: "crafting/glass_pane",
+        pat: &["GGG", "GGG"],
+        map: &[('G', Item::Glass)],
+        result: Item::GlassPane,
+        count: 16,
+    },
+    ShapedDef {
+        id: "crafting/oak_ladder",
+        pat: &["S S", "SSS", "S S"],
+        map: &[('S', Item::Stick)],
+        result: Item::OakLadder,
+        count: 3,
+    },
+    ShapedDef {
+        id: "crafting/oak_sign",
+        pat: &["PPP", "PPP", " S "],
+        map: &[('P', Item::OakPlanks), ('S', Item::Stick)],
+        result: Item::OakSign,
+        count: 3,
+    },
+];
+
+const SHAPELESS: &[ShapelessDef] = &[
+    ShapelessDef {
+        id: "crafting/bone_meal",
+        ingredients: &[Item::Bone],
+        result: Item::BoneMeal,
+        count: 3,
+    },
+    ShapelessDef {
+        id: "crafting/flint_and_steel",
+        ingredients: &[Item::IronIngot, Item::Gravel],
+        result: Item::FlintAndSteel,
+        count: 1,
+    },
+    ShapelessDef {
+        id: "crafting/blaze_powder",
+        ingredients: &[Item::BlazeRod],
+        result: Item::BlazePowder,
+        count: 2,
+    },
+    ShapelessDef {
+        id: "crafting/eye_of_ender",
+        ingredients: &[Item::Diamond, Item::BlazePowder],
+        result: Item::EyeOfEnder,
+        count: 1,
+    },
+    ShapelessDef {
+        id: "crafting/sugar",
+        ingredients: &[Item::SugarCane],
+        result: Item::Sugar,
+        count: 1,
+    },
+    ShapelessDef {
+        id: "crafting/redstone_wire",
+        ingredients: &[Item::RedstoneDust],
+        result: Item::RedstoneWire,
+        count: 1,
+    },
+    ShapelessDef {
+        id: "crafting/stone_button",
+        ingredients: &[Item::Stone],
+        result: Item::StoneButton,
+        count: 1,
+    },
+    ShapelessDef {
+        id: "crafting/sticky_piston",
+        ingredients: &[Item::Piston, Item::SugarCane],
+        result: Item::StickyPiston,
+        count: 1,
+    },
+];
+
+const SMELTING: &[SmeltDef] = &[
+    SmeltDef {
+        id: "smelting/iron_ingot",
+        input: Item::IronOre,
+        output: Item::IronIngot,
+        count: 1,
+        cook_time: 200,
+        experience: 0.7,
+    },
+    SmeltDef {
+        id: "smelting/gold_ingot",
+        input: Item::GoldOre,
+        output: Item::GoldIngot,
+        count: 1,
+        cook_time: 200,
+        experience: 1.0,
+    },
+    SmeltDef {
+        id: "smelting/glass",
+        input: Item::Sand,
+        output: Item::Glass,
+        count: 1,
+        cook_time: 200,
+        experience: 0.1,
+    },
+    SmeltDef {
+        id: "smelting/stone",
+        input: Item::Cobblestone,
+        output: Item::Stone,
+        count: 1,
+        cook_time: 200,
+        experience: 0.1,
+    },
+    SmeltDef {
+        id: "smelting/brick",
+        input: Item::Clay,
+        output: Item::Brick,
+        count: 1,
+        cook_time: 200,
+        experience: 0.3,
+    },
+    SmeltDef {
+        id: "smelting/charcoal_oak",
+        input: Item::OakLog,
+        output: Item::Coal,
+        count: 1,
+        cook_time: 200,
+        experience: 0.15,
+    },
+    SmeltDef {
+        id: "smelting/cooked_porkchop",
+        input: Item::RawPorkchop,
+        output: Item::CookedPorkchop,
+        count: 1,
+        cook_time: 200,
+        experience: 0.35,
+    },
+    SmeltDef {
+        id: "smelting/cooked_beef",
+        input: Item::RawBeef,
+        output: Item::CookedBeef,
+        count: 1,
+        cook_time: 200,
+        experience: 0.35,
+    },
+    SmeltDef {
+        id: "smelting/cooked_mutton",
+        input: Item::RawMutton,
+        output: Item::CookedMutton,
+        count: 1,
+        cook_time: 200,
+        experience: 0.35,
+    },
+    SmeltDef {
+        id: "smelting/cooked_chicken",
+        input: Item::RawChicken,
+        output: Item::CookedChicken,
+        count: 1,
+        cook_time: 200,
+        experience: 0.35,
+    },
+    SmeltDef {
+        id: "smelting/baked_potato",
+        input: Item::Potato,
+        output: Item::BakedPotato,
+        count: 1,
+        cook_time: 200,
+        experience: 0.35,
+    },
+    SmeltDef {
+        id: "smelting/charcoal_birch",
+        input: Item::BirchLog,
+        output: Item::Coal,
+        count: 1,
+        cook_time: 200,
+        experience: 0.15,
+    },
+    SmeltDef {
+        id: "smelting/charcoal_spruce",
+        input: Item::SpruceLog,
+        output: Item::Coal,
+        count: 1,
+        cook_time: 200,
+        experience: 0.15,
+    },
+    SmeltDef {
+        id: "smelting/nether_brick",
+        input: Item::Netherrack,
+        output: Item::NetherBrick,
+        count: 1,
+        cook_time: 200,
+        experience: 0.1,
+    },
+];
+
 impl RecipeManager {
     pub fn new() -> Self {
         let mut crafting_recipes = Vec::new();
         let mut smelting_recipes = Vec::new();
 
-        // --- Crafting Recipes ---
+        // Wood family expansion — registration order matches the locked golden:
+        // all planks → bed → sticks → crafting tables → chests → rest.
+        for w in WOODS {
+            let id: RecipeId = match w.name {
+                "oak" => "crafting/oak_planks",
+                "birch" => "crafting/birch_planks",
+                "spruce" => "crafting/spruce_planks",
+                _ => unreachable!(),
+            };
+            add_shaped(
+                &mut crafting_recipes,
+                id,
+                &["L"],
+                &[('L', w.log)],
+                ItemStack::new(w.planks, 4),
+            );
+        }
 
-        // 1. Logs -> Planks
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/oak_planks",
-            vec!["L"],
-            &[("L", Item::OakLog)],
-            ItemStack::new(Item::OakPlanks, 4),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/birch_planks",
-            vec!["L"],
-            &[("L", Item::BirchLog)],
-            ItemStack::new(Item::BirchPlanks, 4),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/spruce_planks",
-            vec!["L"],
-            &[("L", Item::SpruceLog)],
-            ItemStack::new(Item::SprucePlanks, 4),
-        );
+        for def in SHAPED {
+            // Bed is the first SHAPED entry and must sit between planks and sticks.
+            if def.id == "crafting/bed" {
+                add_shaped(
+                    &mut crafting_recipes,
+                    def.id,
+                    def.pat,
+                    def.map,
+                    ItemStack::new(def.result, def.count),
+                );
+                break;
+            }
+        }
 
-        // Bed
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/bed",
-            vec!["WWW", "PPP"],
-            &[("W", Item::Wool), ("P", Item::OakPlanks)],
-            ItemStack::new(Item::Bed, 1),
-        );
+        for w in WOODS {
+            let id: RecipeId = match w.name {
+                "oak" => "crafting/stick_oak",
+                "birch" => "crafting/stick_birch",
+                "spruce" => "crafting/stick_spruce",
+                _ => unreachable!(),
+            };
+            add_shaped(
+                &mut crafting_recipes,
+                id,
+                &["P", "P"],
+                &[('P', w.planks)],
+                ItemStack::new(Item::Stick, 4),
+            );
+        }
+        for w in WOODS {
+            let id: RecipeId = match w.name {
+                "oak" => "crafting/crafting_table_oak",
+                "birch" => "crafting/crafting_table_birch",
+                "spruce" => "crafting/crafting_table_spruce",
+                _ => unreachable!(),
+            };
+            add_shaped(
+                &mut crafting_recipes,
+                id,
+                &["PP", "PP"],
+                &[('P', w.planks)],
+                ItemStack::new(Item::CraftingTable, 1),
+            );
+        }
+        for w in WOODS {
+            let id: RecipeId = match w.name {
+                "oak" => "crafting/chest_oak",
+                "birch" => "crafting/chest_birch",
+                "spruce" => "crafting/chest_spruce",
+                _ => unreachable!(),
+            };
+            add_shaped(
+                &mut crafting_recipes,
+                id,
+                &["PPP", "P P", "PPP"],
+                &[('P', w.planks)],
+                ItemStack::new(Item::Chest, 1),
+            );
+        }
 
-        // 2. Sticks
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/stick_oak",
-            vec!["P", "P"],
-            &[("P", Item::OakPlanks)],
-            ItemStack::new(Item::Stick, 4),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/stick_birch",
-            vec!["P", "P"],
-            &[("P", Item::BirchPlanks)],
-            ItemStack::new(Item::Stick, 4),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/stick_spruce",
-            vec!["P", "P"],
-            &[("P", Item::SprucePlanks)],
-            ItemStack::new(Item::Stick, 4),
-        );
+        for def in SHAPED {
+            if def.id == "crafting/bed" {
+                continue; // already registered above
+            }
+            add_shaped(
+                &mut crafting_recipes,
+                def.id,
+                def.pat,
+                def.map,
+                ItemStack::new(def.result, def.count),
+            );
+        }
+        for def in SHAPELESS {
+            add_shapeless(
+                &mut crafting_recipes,
+                def.id,
+                def.ingredients.to_vec(),
+                ItemStack::new(def.result, def.count),
+            );
+        }
+        for def in SMELTING {
+            smelting_recipes.push(SmeltingRecipe {
+                id: def.id,
+                input: def.input,
+                output: ItemStack::new(def.output, def.count),
+                cook_time: def.cook_time,
+                experience: def.experience,
+            });
+        }
 
-        // 3. Crafting Table
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/crafting_table_oak",
-            vec!["PP", "PP"],
-            &[("P", Item::OakPlanks)],
-            ItemStack::new(Item::CraftingTable, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/crafting_table_birch",
-            vec!["PP", "PP"],
-            &[("P", Item::BirchPlanks)],
-            ItemStack::new(Item::CraftingTable, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/crafting_table_spruce",
-            vec!["PP", "PP"],
-            &[("P", Item::SprucePlanks)],
-            ItemStack::new(Item::CraftingTable, 1),
-        );
+        let mut shaped_index: HashMap<(usize, usize, Item), Vec<usize>> = HashMap::new();
+        for (idx, recipe) in crafting_recipes.iter().enumerate() {
+            if recipe.shapeless {
+                continue;
+            }
+            let key = (recipe.width, recipe.height, recipe.pattern[0][0]);
+            shaped_index.entry(key).or_default().push(idx);
+        }
 
-        // 4. Chest
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/chest_oak",
-            vec!["PPP", "P P", "PPP"],
-            &[("P", Item::OakPlanks)],
-            ItemStack::new(Item::Chest, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/chest_birch",
-            vec!["PPP", "P P", "PPP"],
-            &[("P", Item::BirchPlanks)],
-            ItemStack::new(Item::Chest, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/chest_spruce",
-            vec!["PPP", "P P", "PPP"],
-            &[("P", Item::SprucePlanks)],
-            ItemStack::new(Item::Chest, 1),
-        );
-
-        // 5. Furnace
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/furnace",
-            vec!["CCC", "C C", "CCC"],
-            &[("C", Item::Cobblestone)],
-            ItemStack::new(Item::Furnace, 1),
-        );
-
-        // 6. Torch
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/torch",
-            vec!["C", "S"],
-            &[("C", Item::Coal), ("S", Item::Stick)],
-            ItemStack::new(Item::Torch, 4),
-        );
-
-        // NOTE: Ore shapeless conversions (IronOre -> IronIngot, GoldOre -> GoldIngot)
-        // have been explicitly removed per Plan 03 requirement.
-
-        // 7. Stone Tools
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/stone_pickaxe",
-            vec!["SSS", " t ", " t "],
-            &[("S", Item::Cobblestone), ("t", Item::Stick)],
-            ItemStack::new(Item::StonePickaxe, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/stone_axe",
-            vec!["SS ", "St ", " t "],
-            &[("S", Item::Cobblestone), ("t", Item::Stick)],
-            ItemStack::new(Item::StoneAxe, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/stone_shovel",
-            vec!["S", "t", "t"],
-            &[("S", Item::Cobblestone), ("t", Item::Stick)],
-            ItemStack::new(Item::StoneShovel, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/stone_sword",
-            vec!["S", "S", "t"],
-            &[("S", Item::Cobblestone), ("t", Item::Stick)],
-            ItemStack::new(Item::StoneSword, 1),
-        );
-
-        // 8. Iron Tools
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/iron_pickaxe",
-            vec!["III", " t ", " t "],
-            &[("I", Item::IronIngot), ("t", Item::Stick)],
-            ItemStack::new(Item::IronPickaxe, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/iron_axe",
-            vec!["II ", "It ", " t "],
-            &[("I", Item::IronIngot), ("t", Item::Stick)],
-            ItemStack::new(Item::IronAxe, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/iron_shovel",
-            vec!["I", "t", "t"],
-            &[("I", Item::IronIngot), ("t", Item::Stick)],
-            ItemStack::new(Item::IronShovel, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/iron_sword",
-            vec!["I", "I", "t"],
-            &[("I", Item::IronIngot), ("t", Item::Stick)],
-            ItemStack::new(Item::IronSword, 1),
-        );
-
-        // 9. Diamond Tools
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/diamond_pickaxe",
-            vec!["DDD", " t ", " t "],
-            &[("D", Item::Diamond), ("t", Item::Stick)],
-            ItemStack::new(Item::DiamondPickaxe, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/diamond_axe",
-            vec!["DD ", "Dt ", " t "],
-            &[("D", Item::Diamond), ("t", Item::Stick)],
-            ItemStack::new(Item::DiamondAxe, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/diamond_shovel",
-            vec!["D", "t", "t"],
-            &[("D", Item::Diamond), ("t", Item::Stick)],
-            ItemStack::new(Item::DiamondShovel, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/diamond_sword",
-            vec!["D", "D", "t"],
-            &[("D", Item::Diamond), ("t", Item::Stick)],
-            ItemStack::new(Item::DiamondSword, 1),
-        );
-
-        // 10. Block Conversions & Miscellaneous
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/stone_brick",
-            vec!["SS", "SS"],
-            &[("S", Item::Stone)],
-            ItemStack::new(Item::StoneBrick, 4),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/brick",
-            vec!["CC", "CC"],
-            &[("C", Item::Clay)],
-            ItemStack::new(Item::Brick, 4),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/sandstone",
-            vec!["SS", "SS"],
-            &[("S", Item::Sand)],
-            ItemStack::new(Item::Sandstone, 4),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/snow_block",
-            vec!["SS", "SS"],
-            &[("S", Item::Snow)],
-            ItemStack::new(Item::Snow, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/tnt",
-            vec!["RSR", "SRS", "RSR"],
-            &[("R", Item::Redstone), ("S", Item::Sand)],
-            ItemStack::new(Item::TNT, 1),
-        );
-
-        // Bread (3 Wheat) - Corrected from 3 Apples per Plan 03 requirement.
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/bread",
-            vec!["WWW"],
-            &[("W", Item::Wheat)],
-            ItemStack::new(Item::Bread, 1),
-        );
-
-        // Workstations & Equipment
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/enchanting_table",
-            vec![" B ", "D D", "OOO"],
-            &[
-                ("B", Item::Bookshelf),
-                ("D", Item::Diamond),
-                ("O", Item::Obsidian),
-            ],
-            ItemStack::new(Item::EnchantingTable, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/brewing_stand",
-            vec![" B ", "CCC"],
-            &[("B", Item::BlazePowder), ("C", Item::Cobblestone)],
-            ItemStack::new(Item::BrewingStand, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/anvil",
-            vec!["III", " I ", "III"],
-            &[("I", Item::IronIngot)],
-            ItemStack::new(Item::Anvil, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/glass_bottle",
-            vec!["G G", " G "],
-            &[("G", Item::Glass)],
-            ItemStack::new(Item::GlassBottle, 3),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/iron_helmet",
-            vec!["III", "I I"],
-            &[("I", Item::IronIngot)],
-            ItemStack::new(Item::IronHelmet, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/iron_chestplate",
-            vec!["I I", "III", "III"],
-            &[("I", Item::IronIngot)],
-            ItemStack::new(Item::IronChestplate, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/iron_leggings",
-            vec!["III", "I I", "I I"],
-            &[("I", Item::IronIngot)],
-            ItemStack::new(Item::IronLeggings, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/iron_boots",
-            vec!["I I", "I I"],
-            &[("I", Item::IronIngot)],
-            ItemStack::new(Item::IronBoots, 1),
-        );
-
-        // Leather Armor
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/leather_helmet",
-            vec!["LLL", "L L"],
-            &[("L", Item::Leather)],
-            ItemStack::new(Item::LeatherHelmet, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/leather_chestplate",
-            vec!["L L", "LLL", "LLL"],
-            &[("L", Item::Leather)],
-            ItemStack::new(Item::LeatherChestplate, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/leather_leggings",
-            vec!["LLL", "L L", "L L"],
-            &[("L", Item::Leather)],
-            ItemStack::new(Item::LeatherLeggings, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/leather_boots",
-            vec!["L L", "L L"],
-            &[("L", Item::Leather)],
-            ItemStack::new(Item::LeatherBoots, 1),
-        );
-
-        // Diamond Armor
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/diamond_helmet",
-            vec!["DDD", "D D"],
-            &[("D", Item::Diamond)],
-            ItemStack::new(Item::DiamondHelmet, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/diamond_chestplate",
-            vec!["D D", "DDD", "DDD"],
-            &[("D", Item::Diamond)],
-            ItemStack::new(Item::DiamondChestplate, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/diamond_leggings",
-            vec!["DDD", "D D", "D D"],
-            &[("D", Item::Diamond)],
-            ItemStack::new(Item::DiamondLeggings, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/diamond_boots",
-            vec!["D D", "D D"],
-            &[("D", Item::Diamond)],
-            ItemStack::new(Item::DiamondBoots, 1),
-        );
-
-        // Shield
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/shield",
-            vec!["PIP", "PPP", " P "],
-            &[("P", Item::OakPlanks), ("I", Item::IronIngot)],
-            ItemStack::new(Item::Shield, 1),
-        );
-
-        // Wooden Tools
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/wooden_sword",
-            vec!["W", "W", "S"],
-            &[("W", Item::OakPlanks), ("S", Item::Stick)],
-            ItemStack::new(Item::WoodenSword, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/wooden_pickaxe",
-            vec!["WWW", " S ", " S "],
-            &[("W", Item::OakPlanks), ("S", Item::Stick)],
-            ItemStack::new(Item::WoodenPickaxe, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/wooden_axe",
-            vec!["WW", "WS", " S"],
-            &[("W", Item::OakPlanks), ("S", Item::Stick)],
-            ItemStack::new(Item::WoodenAxe, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/wooden_shovel",
-            vec!["W", "S", "S"],
-            &[("W", Item::OakPlanks), ("S", Item::Stick)],
-            ItemStack::new(Item::WoodenShovel, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/arrow",
-            vec!["G", "S", "F"],
-            &[
-                ("G", Item::Gravel),
-                ("S", Item::Stick),
-                ("F", Item::Feather),
-            ],
-            ItemStack::new(Item::Arrow, 4),
-        );
-
-        // Farming tools & Bone Meal
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/wooden_hoe",
-            vec!["WW", " S", " S"],
-            &[("W", Item::OakPlanks), ("S", Item::Stick)],
-            ItemStack::new(Item::WoodenHoe, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/stone_hoe",
-            vec!["CC", " S", " S"],
-            &[("C", Item::Cobblestone), ("S", Item::Stick)],
-            ItemStack::new(Item::StoneHoe, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/iron_hoe",
-            vec!["II", " S", " S"],
-            &[("I", Item::IronIngot), ("S", Item::Stick)],
-            ItemStack::new(Item::IronHoe, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/golden_hoe",
-            vec!["GG", " S", " S"],
-            &[("G", Item::GoldIngot), ("S", Item::Stick)],
-            ItemStack::new(Item::GoldenHoe, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/diamond_hoe",
-            vec!["DD", " S", " S"],
-            &[("D", Item::Diamond), ("S", Item::Stick)],
-            ItemStack::new(Item::DiamondHoe, 1),
-        );
-        add_shapeless(
-            &mut crafting_recipes,
-            "crafting/bone_meal",
-            vec![Item::Bone],
-            ItemStack::new(Item::BoneMeal, 3),
-        );
-
-        // Dimension progression
-        add_shapeless(
-            &mut crafting_recipes,
-            "crafting/flint_and_steel",
-            vec![Item::IronIngot, Item::Gravel],
-            ItemStack::new(Item::FlintAndSteel, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/glowstone",
-            vec!["DD", "DD"],
-            &[("D", Item::GlowstoneDust)],
-            ItemStack::new(Item::Glowstone, 1),
-        );
-        add_shapeless(
-            &mut crafting_recipes,
-            "crafting/blaze_powder",
-            vec![Item::BlazeRod],
-            ItemStack::new(Item::BlazePowder, 2),
-        );
-        add_shapeless(
-            &mut crafting_recipes,
-            "crafting/eye_of_ender",
-            vec![Item::Diamond, Item::BlazePowder],
-            ItemStack::new(Item::EyeOfEnder, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/end_crystal",
-            vec!["GGG", "GEG", "GTG"],
-            &[
-                ("G", Item::Glass),
-                ("E", Item::EyeOfEnder),
-                ("T", Item::GhastTear),
-            ],
-            ItemStack::new(Item::EndCrystal, 1),
-        );
-
-        // SugarCane -> Sugar (Standard)
-        add_shapeless(
-            &mut crafting_recipes,
-            "crafting/sugar",
-            vec![Item::SugarCane],
-            ItemStack::new(Item::Sugar, 1),
-        );
-
-        // Redstone components
-        add_shapeless(
-            &mut crafting_recipes,
-            "crafting/redstone_wire",
-            vec![Item::RedstoneDust],
-            ItemStack::new(Item::RedstoneWire, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/redstone_torch",
-            vec!["R", "S"],
-            &[("R", Item::RedstoneDust), ("S", Item::Stick)],
-            ItemStack::new(Item::RedstoneTorch, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/repeater",
-            vec!["TRT", "SSS"],
-            &[
-                ("T", Item::RedstoneTorch),
-                ("R", Item::RedstoneDust),
-                ("S", Item::Stone),
-            ],
-            ItemStack::new(Item::Repeater, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/comparator",
-            vec![" T ", "TRT", "SSS"],
-            &[
-                ("T", Item::RedstoneTorch),
-                ("R", Item::RedstoneDust),
-                ("S", Item::Stone),
-            ],
-            ItemStack::new(Item::Comparator, 1),
-        );
-        add_shapeless(
-            &mut crafting_recipes,
-            "crafting/stone_button",
-            vec![Item::Stone],
-            ItemStack::new(Item::StoneButton, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/lever",
-            vec!["S", "C"],
-            &[("S", Item::Stick), ("C", Item::Cobblestone)],
-            ItemStack::new(Item::Lever, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/pressure_plate",
-            vec!["SS"],
-            &[("S", Item::Stone)],
-            ItemStack::new(Item::PressurePlate, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/piston",
-            vec!["PPP", "CIC", "CRC"],
-            &[
-                ("P", Item::OakPlanks),
-                ("C", Item::Cobblestone),
-                ("I", Item::IronIngot),
-                ("R", Item::RedstoneDust),
-            ],
-            ItemStack::new(Item::Piston, 1),
-        );
-        add_shapeless(
-            &mut crafting_recipes,
-            "crafting/sticky_piston",
-            vec![Item::Piston, Item::SugarCane],
-            ItemStack::new(Item::StickyPiston, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/redstone_lamp",
-            vec![" R ", "RGR", " R "],
-            &[("R", Item::RedstoneDust), ("G", Item::GlowstoneDust)],
-            ItemStack::new(Item::RedstoneLamp, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/oak_door",
-            vec!["PP", "PP", "PP"],
-            &[("P", Item::OakPlanks)],
-            ItemStack::new(Item::OakDoor, 3),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/oak_trapdoor",
-            vec!["PPP", "PPP"],
-            &[("P", Item::OakPlanks)],
-            ItemStack::new(Item::OakTrapdoor, 2),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/dispenser",
-            vec!["CCC", "CBC", "CRC"],
-            &[
-                ("C", Item::Cobblestone),
-                ("B", Item::Bow),
-                ("R", Item::RedstoneDust),
-            ],
-            ItemStack::new(Item::Dispenser, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/dropper",
-            vec!["CCC", "C C", "CRC"],
-            &[("C", Item::Cobblestone), ("R", Item::RedstoneDust)],
-            ItemStack::new(Item::Dropper, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/note_block",
-            vec!["PPP", "PRP", "PPP"],
-            &[("P", Item::OakPlanks), ("R", Item::RedstoneDust)],
-            ItemStack::new(Item::NoteBlock, 1),
-        );
-
-        // Building blocks (Plan 06)
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/oak_slab",
-            vec!["PPP"],
-            &[("P", Item::OakPlanks)],
-            ItemStack::new(Item::OakSlab, 6),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/cobblestone_slab",
-            vec!["CCC"],
-            &[("C", Item::Cobblestone)],
-            ItemStack::new(Item::CobblestoneSlab, 6),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/oak_stair",
-            vec!["P  ", "PP ", "PPP"],
-            &[("P", Item::OakPlanks)],
-            ItemStack::new(Item::OakStair, 4),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/cobblestone_stair",
-            vec!["C  ", "CC ", "CCC"],
-            &[("C", Item::Cobblestone)],
-            ItemStack::new(Item::CobblestoneStair, 4),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/oak_fence",
-            vec!["PSP", "PSP"],
-            &[("P", Item::OakPlanks), ("S", Item::Stick)],
-            ItemStack::new(Item::OakFence, 3),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/oak_fence_gate",
-            vec!["SPS", "SPS"],
-            &[("P", Item::OakPlanks), ("S", Item::Stick)],
-            ItemStack::new(Item::OakFenceGate, 1),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/cobblestone_wall",
-            vec!["CCC", "CCC"],
-            &[("C", Item::Cobblestone)],
-            ItemStack::new(Item::CobblestoneWall, 6),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/glass_pane",
-            vec!["GGG", "GGG"],
-            &[("G", Item::Glass)],
-            ItemStack::new(Item::GlassPane, 16),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/oak_ladder",
-            vec!["S S", "SSS", "S S"],
-            &[("S", Item::Stick)],
-            ItemStack::new(Item::OakLadder, 3),
-        );
-        add_shaped(
-            &mut crafting_recipes,
-            "crafting/oak_sign",
-            vec!["PPP", "PPP", " S "],
-            &[("P", Item::OakPlanks), ("S", Item::Stick)],
-            ItemStack::new(Item::OakSign, 3),
-        );
-
-        // --- Smelting Recipes ---
-
-        smelting_recipes.push(SmeltingRecipe {
-            id: "smelting/iron_ingot",
-            input: Item::IronOre,
-            output: ItemStack::new(Item::IronIngot, 1),
-            cook_time: 200,
-            experience: 0.7,
-        });
-
-        smelting_recipes.push(SmeltingRecipe {
-            id: "smelting/gold_ingot",
-            input: Item::GoldOre,
-            output: ItemStack::new(Item::GoldIngot, 1),
-            cook_time: 200,
-            experience: 1.0,
-        });
-
-        smelting_recipes.push(SmeltingRecipe {
-            id: "smelting/glass",
-            input: Item::Sand,
-            output: ItemStack::new(Item::Glass, 1),
-            cook_time: 200,
-            experience: 0.1,
-        });
-
-        smelting_recipes.push(SmeltingRecipe {
-            id: "smelting/stone",
-            input: Item::Cobblestone,
-            output: ItemStack::new(Item::Stone, 1),
-            cook_time: 200,
-            experience: 0.1,
-        });
-
-        smelting_recipes.push(SmeltingRecipe {
-            id: "smelting/brick",
-            input: Item::Clay,
-            output: ItemStack::new(Item::Brick, 1),
-            cook_time: 200,
-            experience: 0.3,
-        });
-
-        smelting_recipes.push(SmeltingRecipe {
-            id: "smelting/charcoal_oak",
-            input: Item::OakLog,
-            output: ItemStack::new(Item::Coal, 1),
-            cook_time: 200,
-            experience: 0.15,
-        });
-
-        smelting_recipes.push(SmeltingRecipe {
-            id: "smelting/cooked_porkchop",
-            input: Item::RawPorkchop,
-            output: ItemStack::new(Item::CookedPorkchop, 1),
-            cook_time: 200,
-            experience: 0.35,
-        });
-
-        smelting_recipes.push(SmeltingRecipe {
-            id: "smelting/cooked_beef",
-            input: Item::RawBeef,
-            output: ItemStack::new(Item::CookedBeef, 1),
-            cook_time: 200,
-            experience: 0.35,
-        });
-
-        smelting_recipes.push(SmeltingRecipe {
-            id: "smelting/cooked_chicken",
-            input: Item::RawChicken,
-            output: ItemStack::new(Item::CookedChicken, 1),
-            cook_time: 200,
-            experience: 0.35,
-        });
-
-        smelting_recipes.push(SmeltingRecipe {
-            id: "smelting/cooked_mutton",
-            input: Item::RawMutton,
-            output: ItemStack::new(Item::CookedMutton, 1),
-            cook_time: 200,
-            experience: 0.35,
-        });
-
-        smelting_recipes.push(SmeltingRecipe {
-            id: "smelting/baked_potato",
-            input: Item::Potato,
-            output: ItemStack::new(Item::BakedPotato, 1),
-            cook_time: 200,
-            experience: 0.35,
-        });
-
-        smelting_recipes.push(SmeltingRecipe {
-            id: "smelting/charcoal_birch",
-            input: Item::BirchLog,
-            output: ItemStack::new(Item::Coal, 1),
-            cook_time: 200,
-            experience: 0.15,
-        });
-
-        smelting_recipes.push(SmeltingRecipe {
-            id: "smelting/charcoal_spruce",
-            input: Item::SpruceLog,
-            output: ItemStack::new(Item::Coal, 1),
-            cook_time: 200,
-            experience: 0.15,
-        });
-
-        smelting_recipes.push(SmeltingRecipe {
-            id: "smelting/nether_brick",
-            input: Item::Netherrack,
-            output: ItemStack::new(Item::NetherBrick, 1),
-            cook_time: 200,
-            experience: 0.1,
-        });
+        let mut smelting_by_input = HashMap::new();
+        for (idx, recipe) in smelting_recipes.iter().enumerate() {
+            smelting_by_input.insert(recipe.input, idx);
+        }
 
         Self {
             crafting_recipes,
             smelting_recipes,
+            shaped_index,
+            smelting_by_input,
         }
     }
 
@@ -946,19 +1002,13 @@ impl RecipeManager {
         FuelDefinition::burn_time(item) > 0
     }
 
-    pub fn match_smelting(&self, item: Item) -> Option<&SmeltingRecipe> {
-        self.find_smelting_recipe(item)
-    }
-
     pub fn find_smelting_recipe(&self, input: Item) -> Option<&SmeltingRecipe> {
         if input == Item::Air {
             return None;
         }
-        self.smelting_recipes.iter().find(|r| r.input == input)
-    }
-
-    pub fn match_recipe(&self, grid: &[Option<ItemStack>], grid_size: usize) -> Option<ItemStack> {
-        self.match_crafting_recipe(grid, grid_size)
+        self.smelting_by_input
+            .get(&input)
+            .map(|&idx| &self.smelting_recipes[idx])
     }
 
     pub fn match_crafting_recipe(
@@ -979,16 +1029,14 @@ impl RecipeManager {
         }
         active_items.sort_by_key(|&it| it as i32);
 
-        // 1. Shapeless match
+        // 1. Shapeless match (small set — linear is fine)
         for recipe in &self.crafting_recipes {
-            if recipe.shapeless {
-                if recipe.pattern[0] == active_items {
-                    return Some(recipe.result);
-                }
+            if recipe.shapeless && recipe.pattern[0] == active_items {
+                return Some(recipe.result);
             }
         }
 
-        // 2. Shaped Match: bounding box
+        // 2. Shaped match via (w, h, first-cell) index
         let mut min_r = grid_size;
         let mut max_r = 0;
         let mut min_c = grid_size;
@@ -1000,18 +1048,10 @@ impl RecipeManager {
                 if let Some(stack) = grid[r * grid_size + c] {
                     if stack.item != Item::Air {
                         has_items = true;
-                        if r < min_r {
-                            min_r = r;
-                        }
-                        if r > max_r {
-                            max_r = r;
-                        }
-                        if c < min_c {
-                            min_c = c;
-                        }
-                        if c > max_c {
-                            max_c = c;
-                        }
+                        min_r = min_r.min(r);
+                        max_r = max_r.max(r);
+                        min_c = min_c.min(c);
+                        max_c = max_c.max(c);
                     }
                 }
             }
@@ -1033,26 +1073,12 @@ impl RecipeManager {
             }
         }
 
-        for recipe in &self.crafting_recipes {
-            if recipe.shapeless {
-                continue;
-            }
-            if recipe.width == w_size && recipe.height == h_size {
-                let mut match_ok = true;
-                for r in 0..h_size {
-                    for c in 0..w_size {
-                        if recipe.pattern[r][c] != cropped[r][c] {
-                            match_ok = false;
-                            break;
-                        }
-                    }
-                    if !match_ok {
-                        break;
-                    }
-                }
-                if match_ok {
-                    return Some(recipe.result);
-                }
+        let key = (w_size, h_size, cropped[0][0]);
+        let candidates = self.shaped_index.get(&key)?;
+        for &idx in candidates {
+            let recipe = &self.crafting_recipes[idx];
+            if recipe.pattern == cropped {
+                return Some(recipe.result);
             }
         }
 
@@ -1064,6 +1090,7 @@ impl RecipeManager {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    use std::fmt::Write as _;
 
     #[test]
     fn test_recipe_id_uniqueness() {
@@ -1102,14 +1129,12 @@ mod tests {
     #[test]
     fn test_bread_recipe_requires_wheat() {
         let manager = RecipeManager::new();
-        // 3 Apples in a row should NOT yield Bread
         let mut apple_grid = vec![None; 9];
         apple_grid[0] = Some(ItemStack::new(Item::Apple, 1));
         apple_grid[1] = Some(ItemStack::new(Item::Apple, 1));
         apple_grid[2] = Some(ItemStack::new(Item::Apple, 1));
         assert!(manager.match_crafting_recipe(&apple_grid, 3).is_none());
 
-        // 3 Wheat in a row SHOULD yield Bread
         let mut wheat_grid = vec![None; 9];
         wheat_grid[0] = Some(ItemStack::new(Item::Wheat, 1));
         wheat_grid[1] = Some(ItemStack::new(Item::Wheat, 1));
@@ -1130,7 +1155,6 @@ mod tests {
         grid_gold[0] = Some(ItemStack::new(Item::GoldOre, 1));
         assert!(manager.match_crafting_recipe(&grid_gold, 2).is_none());
 
-        // But ore SHOULD be smeltable
         let iron_smelt = manager.find_smelting_recipe(Item::IronOre);
         assert!(iron_smelt.is_some());
         assert_eq!(iron_smelt.unwrap().output.item, Item::IronIngot);
@@ -1147,5 +1171,93 @@ mod tests {
         assert_eq!(FuelDefinition::burn_time(Item::OakPlanks), 300);
         assert_eq!(FuelDefinition::burn_time(Item::Stick), 100);
         assert_eq!(FuelDefinition::burn_time(Item::Dirt), 0);
+    }
+
+    #[test]
+    fn recipe_golden_snapshot_is_byte_identical() {
+        let mgr = RecipeManager::new();
+        let mut craft_entries: Vec<(String, String, String)> = Vec::new();
+        for r in &mgr.crafting_recipes {
+            let pattern = if r.shapeless {
+                format!(
+                    "shapeless:{}",
+                    r.pattern[0]
+                        .iter()
+                        .map(|i| format!("{i:?}"))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            } else {
+                r.pattern
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .map(|i| {
+                                if *i == Item::Air {
+                                    ".".into()
+                                } else {
+                                    format!("{i:?}")
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(";")
+            };
+            let head = format!(
+                "craft|{}|{}x{}|{}|{:?}|{}",
+                r.id, r.width, r.height, r.shapeless as u8, r.result.item, r.result.count
+            );
+            craft_entries.push((r.id.to_string(), head, format!("  pattern|{pattern}")));
+        }
+        craft_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut smelt_entries: Vec<(String, String)> = Vec::new();
+        for r in &mgr.smelting_recipes {
+            let head = format!(
+                "smelt|{}|{:?}|{:?}|{}|{}|{:.3}",
+                r.id, r.input, r.output.item, r.output.count, r.cook_time, r.experience
+            );
+            smelt_entries.push((r.id.to_string(), head));
+        }
+        smelt_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut out = String::new();
+        for (_, head, pat) in &craft_entries {
+            writeln!(out, "{head}").unwrap();
+            writeln!(out, "{pat}").unwrap();
+        }
+        for (_, head) in &smelt_entries {
+            writeln!(out, "{head}").unwrap();
+        }
+        let snapshot = out.trim_end().to_string();
+        let expected = include_str!("recipe_golden_snapshot.txt")
+            .replace("\r\n", "\n")
+            .trim_end()
+            .to_string();
+        assert_eq!(
+            snapshot, expected,
+            "Recipe table drifted from the locked golden snapshot"
+        );
+    }
+
+    #[test]
+    fn recipe_manager_new_stays_compact() {
+        // Guardrail: registration body should stay table-driven (~200 lines).
+        let src = include_str!("recipes.rs");
+        let start = src
+            .find("pub fn new() -> Self {")
+            .expect("RecipeManager::new");
+        let rest = &src[start..];
+        let end = rest
+            .find("\n    pub fn get_smelting_recipes")
+            .expect("next method");
+        let new_body = &rest[..end];
+        let lines = new_body.lines().count();
+        assert!(
+            lines <= 200,
+            "RecipeManager::new is {lines} lines; keep ≤200 via tables"
+        );
     }
 }

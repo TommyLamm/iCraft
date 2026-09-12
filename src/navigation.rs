@@ -1,6 +1,8 @@
 use crate::dimension::Dimension;
 use glam::Vec3;
+#[cfg(test)]
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::collections::HashMap;
 
 pub const MAP_SIZE: usize = 128;
@@ -50,7 +52,8 @@ pub fn calculate_clock_fraction(game_time: u64, dimension: Dimension) -> f32 {
     day_time / 24000.0
 }
 
-/// Single persistent map data.
+/// Presentation-only map manager. Never ticked by authority; kept for unit tests.
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MapData {
     pub id: u32,
@@ -61,6 +64,7 @@ pub struct MapData {
     pub colors: Vec<u8>, // MAP_SIZE * MAP_SIZE
 }
 
+#[cfg(test)]
 impl MapData {
     pub fn new(id: u32, dimension: Dimension, center_x: i32, center_z: i32, scale: u8) -> Self {
         Self {
@@ -127,13 +131,16 @@ impl MapData {
     }
 }
 
-/// Persistent manager for map data collection.
+/// Persistent manager for map data collection. Dead outside tests: no State field
+/// and ServerWorld never constructs or ticks it.
+#[cfg(test)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MapManager {
     maps: HashMap<u32, MapData>,
     next_map_id: u32,
 }
 
+#[cfg(test)]
 impl MapManager {
     pub fn new() -> Self {
         Self::default()

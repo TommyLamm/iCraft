@@ -1,5 +1,6 @@
 use crate::inventory::{Item, ItemStack};
 use crate::village::poi::VillagerProfession;
+#[cfg(test)]
 use std::collections::HashMap;
 
 #[derive(
@@ -332,6 +333,7 @@ pub fn generate_offers_for_level(
     offers
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct ActiveMerchantSession {
     pub player_id: u64,
@@ -339,11 +341,14 @@ pub struct ActiveMerchantSession {
     pub villager_pos: glam::Vec3,
 }
 
+/// Dead outside tests: open_session had no live caller after SimHarness removal.
+#[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub struct MerchantSessionManager {
     pub sessions: HashMap<u64, ActiveMerchantSession>,
 }
 
+#[cfg(test)]
 impl MerchantSessionManager {
     pub fn new() -> Self {
         Self::default()

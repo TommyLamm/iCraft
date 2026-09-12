@@ -48,9 +48,6 @@ unsafe impl GlobalAlloc for AllocTracker {
     }
 }
 
-#[global_allocator]
-static GLOBAL_ALLOCATOR: AllocTracker = AllocTracker;
-
 pub fn alloc_count() -> u64 {
     ALLOC_COUNT.load(Ordering::Relaxed)
 }
@@ -387,11 +384,6 @@ pub struct PerfCounters {
     pub cancelled: u64,
     pub stale_results: u64,
     pub upload_bytes_frame: u64,
-    pub save_queue_depth: u64,
-    pub save_queue_bytes: u64,
-    pub save_in_flight: u64,
-    pub save_in_flight_bytes: u64,
-    pub save_drop: u64,
     pub network_queue_depth: u64,
     /// Reliable FIFO events waiting in the persistent inbound inbox.
     pub network_inbound_reliable_pending: u64,
@@ -409,7 +401,6 @@ pub struct PerfCounters {
     pub observer_pulses: u64,
     pub redstone_scheduled_backlog: u64,
     pub observer_pending_pulses: u64,
-    pub loaded_region_cache_bytes: u64,
     pub frame_allocations: u64,
     pub gpu_sky_ns: u64,
     pub gpu_opaque_ns: u64,
@@ -692,6 +683,24 @@ pub fn tracked_send<T>(
     }
 }
 
+/// Account a tokio producer using try_send.
+pub fn tracked_try_send_tokio<T>(
+    tx: &tokio::sync::mpsc::Sender<T>,
+    value: T,
+    bytes: u64,
+    stats: &SharedQueueStats,
+) -> Result<(), tokio::sync::mpsc::error::TrySendError<T>> {
+    stats.enqueue(bytes, monotonic_millis());
+    match tx.try_send(value) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            stats.dequeue(bytes);
+            stats.drop_item();
+            Err(error)
+        }
+    }
+}
+
 /// Account a synchronous consumer after removing an item from the channel.
 pub fn tracked_try_recv<T>(
     rx: &std::sync::mpsc::Receiver<T>,
@@ -751,20 +760,6 @@ mod tests {
         let p = PerfRecorder::<4>::new().summary(ScopeId::Lighting);
         assert_eq!(p.samples, 0);
         assert_eq!(p.average_nanos, 0);
-    }
-
-    #[test]
-    fn thread_alloc_count_is_local_to_calling_thread() {
-        let handle = std::thread::spawn(|| {
-            let _allocation = Box::new([0u8; 64]);
-        });
-        let caller_after_spawn = thread_alloc_count();
-        handle.join().unwrap();
-        assert_eq!(thread_alloc_count(), caller_after_spawn);
-
-        let before = thread_alloc_count();
-        let _allocation = Box::new([0u8; 64]);
-        assert!(thread_alloc_count() > before);
     }
 
     #[test]

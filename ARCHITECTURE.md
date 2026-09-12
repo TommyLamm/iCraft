@@ -1,718 +1,543 @@
 # Architecture
 
-> Last verified: 2026-08-12
-> Git baseline: tommy-dev
->
-> This document is a concise navigation map. Source code remains authoritative.
+iCraft is a Rust voxel game: desktop client (`icraft`) plus headless server
+(`icraft-server`). Shared simulation is a deterministic 20 Hz authority over
+Tokio TCP. Source and tests are the contract; `plans/` is history.
 
-## System overview
+## Where to put code
 
-`iCraft` is a Rust voxel game plus a headless dedicated-server binary:
+| Target | Entrypoint | Owns |
+| --- | --- | --- |
+| `icraft` | `src/main.rs` | winit/wgpu/rodio loop, menu, input, presentation. `--microbench` is feature-gated (`microbench`). |
+| `icraft-server` | `src/bin/icraft-server.rs` | Headless `ServerRuntime`, TCP, console, autosave/shutdown. |
+| `icraft` lib | `src/lib.rs` | Shared authority, world, network, persistence. |
 
-- `winit` owns the desktop event loop and input.
-- `wgpu` renders the menu, terrain, entities, particles, and immediate-mode UI.
-- `authority::AuthorityCore` owns the GPU-independent gameplay contract; the
-  desktop `State` is a presentation/input composition root and projects
-  Singleplayer/Host authority snapshots into renderer caches.
-- Rayon workers generate/load chunks and build terrain meshes.
-- Dedicated Tokio threads run TCP host/client networking.
-- `src/lib.rs` exposes the simulation/network contract to `icraft-server`.
-- `authority::{AuthorityCore, contract}` and `server_world.rs` own the
-  headless fixed tick, authenticated request sequencing, world mutations,
-  rules, commands, entities, block entities, and automation. `server_runtime.rs`
-  owns transport/session scheduling, save and metrics boundaries without
-  constructing a GPU, window, or audio device.
-- A background save worker handles autosaves and chunk-unload writes.
-- Terrain, the texture atlas, and missing audio assets can be generated
-  procedurally. `resources.rs` discovers the built-in `assets/` pack and
-  workspace-relative `resourcepacks/` entries, validates manifests/dependency
-  order and bounded ZIP contents, and resolves selected textures, sounds,
-  language, model, and font descriptors. Locale resolution exposes both the
-  legacy first-valid language payload and a high-to-low validated layer list;
-  `TranslationCatalog` merges layers low-to-high with English fallback. Selected
-  model descriptors are captured in an immutable registry shared by background
-  L0/L1/L2 mesh jobs; selected
-  bitmap glyphs feed Menu and State text renderers. `ICRAFT_RESOURCE_PACK` is an
-  explicit development/test override only. Missing assets retain procedural or
-  built-in fallbacks and are diagnosed once; shader overrides are not supported.
+Desktop `main.rs` re-exports the library (`pub use icraft::{world, …}`) so
+desktop files keep `crate::world` paths. Shared source compiles once.
 
-There is no database. Multiplayer supports both the existing listen-server
-model and `icraft-server`: the host/runtime owns authoritative simulation,
-while joining clients render a synchronized local copy.
+**Do not add to `lib.rs`:** `menu`, `camera`, `audio`, `texture`,
+`gpu_frame_resources`, `presentation_click`, `src/presentation/`,
+`accessibility`, `localization`, `advancements`, `weather`, or desktop
+section-visibility traversal (`presentation/visibility.rs`). That would
+compile wgpu/UI/lang / presentation climate into `icraft-server`.
+Lib `culling::is_los_blocked` stays shared for authority; the old desktop
+`EntityLosManager` worker is gone.
+`presentation_inventory_policy` is the thin, GPU-free policy cut used by
+server and tests. Save keeps only `AdvancementProgressData` (unlock set);
+the advancement tree UI is desktop-only. Presentation weather is a
+`TimeSync.weather`-driven enum (hosts currently always send Clear) — not a
+second `ClimateSystem` authority.
 
-## Entrypoints and ownership
+`lib.rs` has two `pub` layers: the server/tests contract (authority, world,
+network, save, `presentation_inventory_policy`, …) and extra `pub` modules so
+the desktop crate can re-export them. `loot`, `voxel_shape`, `worldgen`,
+`fluid`, `mob`, and `world_tick` are `pub(crate)`. `rail` and presentation
+shells (`vehicle`, `container_sessions`, POI/raid managers, map manager,
+presentation `FishingManager`) are `cfg(test)` only — desktop `State` no
+longer owns them; live container viewers and fishing hooks live on
+`ServerWorld` / session overlay. `recipes` stays `pub` because desktop
+`State` and `ServerWorld` expose `RecipeManager`.
+Desktop `--microbench` is `src/main.rs`'s `mod microbench` behind feature
+`microbench` (`cargo run --features microbench -- --microbench`); it is not
+compiled into the library or `icraft-server`. Settings keys
+`dynamic_resolution` and `render_scale` were removed; leftover lines in old
+`settings.txt` are ignored on load. Leftover renderer-owned world simulation
+(`legacy_sim` / `legacy_interaction` / `legacy_systems`) and feature
+`legacy_owner` are gone. The old empty `harness` feature and recipe/physics
+smoke modules `sim_harness` / `final_acceptance` are gone.
 
-```text
-src/main.rs
-  -> App (src/app.rs)
-     -> Menu (src/menu.rs)
-     -> State (src/state.rs)
-        -> update(dt): networking + simulation + streaming
-        -> render(): visibility + GPU passes + UI
-```
+New gameplay belongs in `AuthorityCore` / `ServerWorld`. Start in the narrow
+domain module, then check projection, save, and protocol. Do not add
+cross-domain logic to `state.rs` or `server_runtime` (root + workers).
 
-`src/bin/icraft-server.rs` loads `server.properties`, starts
-`server_runtime::ServerRuntime`, and runs the same network authority without
-the desktop composition root. Ctrl-C and console `save`/`stop` synchronously
-flush level and per-player files.
-
-- `main` declares modules and starts `EventLoop::run_app`.
-- `App` owns the `Menu`/`Game` runtime transition, frame timing, OS events,
-  input priority, cursor mode, resize, and surface-error handling.
-- `Menu` owns world discovery/creation, settings, controls, and multiplayer
-  launch options.
-- `State` is the composition root and main coupling hotspot. It owns GPU
-  resources, camera, loaded chunks, mesh/render caches, player/inventory,
-  entities, dimensions, weather, redstone, advancements, audio, networking
-  bridges, and in-game UI.
-
-`AuthorityBoundary` is the in-process bridge used by Singleplayer and the
-listen-server host. It registers a local pseudo-session and submits the same
-`GameplayRequest`/fixed-tick path as `AuthorityCore` in the dedicated binary.
-Accepted request mutations and fixed-tick snapshots are projected one-way into
-`State` for lighting, mesh invalidation, block-entity UI, and local input
-feedback. Boundary worlds disable the renderer's legacy redstone, fluid,
-random-tick, furnace, mob, vehicle, village, and dropped-entity authority
-paths; unsupported presentation interactions are rejected by the core. `SaveManager`
-v2 now owns dedicated player current-dimension/effects files, checked authority
-chunk/entity restore, and atomic region-cache commit/retry semantics. The runtime
-maintains dimension-aware view/simulation/container interest and exposes a bounded
-`RoutedInterestUpdate` ledger for the transport owner. Targeted wire-packet encoding
-and concurrent login reservation remain Plan 18 B/D follow-up work; this ledger must
-not be presented as a completed network E2E migration.
-
-On Windows, menu and game GPU initialization intentionally select DX12 because
-the primary Vulkan path has caused a verified NVIDIA driver crash.
-
-## Runtime flow
-
-### Startup
-
-`App::resumed` creates the menu. A selected `WorldLaunch` is applied from
-`about_to_wait`, after the window callback returns. `State::new` then:
-
-1. Creates wgpu pipelines, buffers, atlas, and audio state.
-2. Loads world/player/dimension data and eligible saved entities.
-3. Restores or generates the initial chunks and lighting.
-4. Builds initial terrain meshes and starts background services.
-5. Streams the remaining render distance incrementally.
-
-Joining clients wait for a successful protocol-v19 login before using the host's
-seed and synchronized world state.
-
-### Per-frame update
-
-`State::update` drains network events first, then advances the major systems:
-
-1. Fixed/budgeted authority ticks are scheduled by `AuthorityCore` (or
-   `ServerRuntime` for dedicated) and mutation/snapshot deltas are projected
-   into renderer caches.
-2. Player local input/physics presentation and chunk streaming.
-3. Camera/uniform synchronization, UI, and continuous mining.
-
-The legacy renderer simulation remains available only for a compatibility path
-without an `AuthorityBoundary`; Singleplayer and listen-host worlds do not
-enter it.
-
-Paused/dead/UI states gate gameplay input, but maintenance work that must remain
-safe across pauses is handled before the relevant early return. Inspect
-`State::update` before changing ordering.
-
-### Rendering
-
-Terrain CPU work is separated from GPU ownership:
+## Runtimes
 
 ```text
-ChunkManager chunks
-  -> SectionIdentity + owned 18³ halo snapshot
-  -> Rayon 16³ section mesh job
-  -> dimension/lifetime/section-revision validation
-  -> per-section RenderRegion GPU arena upload
-  -> frustum/section visibility + LOD draw plan
-  -> wgpu render passes
+Singleplayer
+  App -> State -> EmbeddedRuntimeBridge -> ServerRuntime (no socket)
+
+Listen host
+  App -> State -> EmbeddedRuntimeBridge -> ServerRuntime -> NetworkServer
+                                                        ^
+Join client                                             | TCP
+  App -> State -> NetworkClient ------------------------+
+
+Dedicated
+  icraft-server -> ServerRuntime -> NetworkServer
+
+All server paths -> AuthorityCore -> BTreeMap<Dimension, ServerWorld>
 ```
 
-The renderer then generates mob mesh data, camera-facing particle quads, and all
-immediate-mode UI vertices (including remote-player name tags, chat, disconnect
-UI, and advancement toasts/screen) on the CPU.
-The render pass order is: sky ->
-opaque/cutout chunks -> mobs (including dropped items) -> translucent chunks ->
-alpha-blended particles -> multiply-blended mining crack overlay -> colored UI ->
-textured UI -> crosshair -> line/text UI -> present. The shader entrypoints
-and packed camera, lighting, fog, time, underwater, and damage behavior are in
-`src/shader.wgsl`. Terrain uses the separate `TerrainVertex` layout and
-`vs_terrain`/`fs_terrain`; AO remains smooth, while atlas tile and packed
-sky/block/face lighting remain flat. Mob, hand, particle, and UI geometry keep
-their existing vertex layouts.
+- `App` owns the menu/game transition and the OS/window loop.
+- `State` is the desktop composition root: GPU, input, camera, UI, render
+  caches, interpolation. It is not the world authority. Desktop `State` does
+  not hold `RedstoneSystem`; live redstone ticks only in `ServerWorld`.
+  Join/embedded block facing comes from projected columns / mutations /
+  block-entity events, not client-side redstone restore. Embedded columns
+  arrive as in-process `PresentationEvent::ChunkColumn(Arc<Chunk>)`; join
+  clients still decode revision-gated `ChunkData`.
+- Singleplayer and listen-host use `ServerRuntime::new_embedded`. Local and
+  socket input share one bounded FIFO.
+- A join client never runs authority, worldgen, or `SaveManager`. It sends
+  `GameplayRequest`s and applies revision-gated projections.
+- Desktop `State` has no `SaveManager`. Embedded saves go through
+  `ServerRuntime`; join clients persist nothing locally.
+- Embedded presentation peeks `dimension.dat` so the first projected columns
+  are not dropped. Player and terrain arrive from `ServerRuntime`.
+  `State::new` does not generate spawn chunks, place a bonus chest, or collect
+  dropped items / XP locally. Pickup is authority-only
+  (`inventory_decision(Pickup)` is always `Reject`). Presentation does not
+  Q-drop ghost entities, scan void/lava/cactus for local damage, tick
+  brew/effects/`world_time` on join, or worldgen on dimension switch —
+  health/time/effects arrive from session projection; portal/respawn teardown
+  is `reset_presented_dimension` only. F3 no longer hard-zeros absent
+  desktop save-queue counters.
+- `NetworkHandle` is `None` (embedded singleplayer / listen-host) or `Client`
+  (join). Listen-host TCP is owned by `ServerRuntime`, not a GPU-thread server.
+- `State::tick_authority_boundary` is the embedded 20 Hz tick. There is no
+  separate `AuthorityBoundary` type.
 
-`world.rs` produces terrain mesh data; `chunk_render.rs` defines terrain
-vertices, bounds, LOD data, draw planning, and region allocations.
-`culling.rs` performs bounded section visibility traversal and conservative
-snapshot-based entity LOS. Dirty connectivity fails open until the matching
-world revision is available.
-`chunk_schedule.rs` prioritizes bounded load/mesh work.
-`State::render` owns final submission. Per-section terrain allocations carry
-exact generation/lifetime/revision identity; instance buffers use a bounded
-completion-protected frame-resource pool. The held-item base mesh is cached by
-item/model key and walk/swing animation is applied through a uniform instead of
-rebuilding CPU geometry.
+`PresentationTopology` is `Embedded` or `JoinClient`, derived from role
+(Join wins) plus in-process runtime. Non-join launches are Embedded.
+There is no `LegacyOwner`, no `is_authoritative()`, and no
+`AuthorityTopology`. Listen vs embedded is `TransportMode::{Disabled, Listen}`.
+Chunk load policy is only `PresentationTopology::chunk_load_policy()`
+(Join awaits `ChunkData`; Embedded may generate locally). Presentation never
+mutates authority-owned world/container slots locally; `set_item_at_slot`
+no-ops `ContainerSlot` and all join-client writes. Inventory click writeback
+uses `resolve_inventory_hit` (shared probe) so Embedded player-inventory
+`LocalMutate` and Join `Reject` stay on one hit path. `Pickup` remains an
+inventory target that is always `Reject`; farmland-trample / unsupported-break
+policy variants are gone.
 
-The event loop owns the optional FPS deadline while simulation consumes real
-elapsed time. The former viewport-only dynamic-resolution path is forced to
-native scale; it must not be re-enabled without an offscreen render target,
-upscale pass, and native-resolution UI.
+## Ownership
 
-The high-level pass order is sky, opaque terrain, entities, translucent terrain,
-particles/effects, mining overlay, UI, and present.
-
-## World mutation rules
-
-`ServerWorld::chunks` is authoritative for the headless authority path. The
-renderer `ChunkManager::chunks` is a one-way presentation projection; terrain
-meshes, visibility sets, GPU allocations, and particle vertices are always
-derived caches.
-
-`AuthorityCore` owns an active compatibility `ServerWorld` plus a
-dimension-keyed map of independent headless worlds, a deterministic 20 Hz tick,
-sorted session/entity iteration, per-dimension `RevisionClock`s, bounded response
-cache, and the `SessionContract` dimension/position/permission gates. Requests
-route by the authenticated session dimension; `world_ref`/`world_mut` read a
-dimension without switching the compatibility view and `with_world` restores the
-caller's active view after a bounded operation. `ServerRuntime` submits
-authenticated envelopes and schedules/saves/metrics the core; it does not
-mutate a second authoritative block or entity map.
-
-For authoritative block mutations:
-
-```text
-world_mutation::apply_batch / BlockMutationRequest
-  -> validate positions, loaded chunks, and block entity types
-  -> atomic commit of block, state, and BlockEntity
-  -> update sky/block lighting
-  -> perform support cascade (unsupported block break)
-  -> invalidate dependent meshes (boundary/AO)
-  -> trigger redstone notifications & bump chunk mutation revision
-  -> broadcast authoritative BlockChange & BlockEntityDelta when hosting
-```
-
-`ServerWorld::chunks` is authoritative world state, including per-chunk
-`block_entities` keyed by `(u8, i16, u8)` local coordinates. The renderer
-`ChunkManager::chunks` carries a projection for mesh and UI consumption; it is
-not a second authority. Terrain meshes, visibility sets, GPU allocations, and
-particle vertices are derived caches.
-`chunk_manager::mark_block_mesh_dependencies` is the shared mesh dependency rule.
-Redstone returns `BlockMutation` records and side-effect actions applied via host transaction handlers.
-
-Container automation keeps `BlockEntity` slots, revisions, hopper cooldown/power,
-facing, and observer baselines as authoritative state. `ContainerAccess` is the
-shared sided-capability gate for UI clicks and hopper transfers; complete slot
-vectors are committed atomically. A host redstone tick runs observers, bounded
-hopper work (one item per transfer), furnace progression, and dispenser/dropper
-actions. Joining clients never simulate these mutations; they only apply the
-host's revision-gated `BlockEntityDelta`/slot updates. Comparator dependencies are
-woken by container revision notifications rather than a world-wide per-tick scan.
-
-`BlockState` encodes facing (2 bits), is_top (1), is_right_hinge (1), is_open (1), and chest_type (2 bits: Single/Left/Right) in a single byte. Bit 7 is reserved. For Farmland and Crops (Wheat, Carrot, Potato), state byte `u8` stores moisture level (0..7) and crop growth age (0..7) in bits `0..2`.
-
-Plan26 completes the container lifecycle seam without changing protocol v16:
-`ContainerSessionManager::close_by_block` is dimension-scoped and
-`close_exact` is player/position-scoped; `ServerWorld` emits closure intents for
-block replacement and `ServerRuntime` routes targeted `ContainerClose` packets
-for distance/invalid-dimension rejection, interest departure, transfer, logout,
-and disconnect. `NetworkClient` accepts a forced close only when its active
-`(dimension, x, y, z)` key matches and bypasses the normal container revision
-gate. `State::force_close_inventory` is an idempotent transient-UI cleanup path
-that never submits another close or returns/drops a cursor item. First/last
-viewers toggle both halves of a double chest through `is_open`; the renderer
-uses deterministic binary chest geometry and `audio.rs` emits one deterministic
-ChestOpen/ChestClose edge fallback. The v16 packet has no epoch/reason/cursor,
-so same-key stale-close disambiguation remains a v17 follow-up; smooth lid,
-GPU/audio-device, and Host+Join visual evidence remain outside headless claims.
-
-Plan27 adds the minimal waterlogging authority lane without changing the
-`BlockState` bit layout. Only `OakSlab` and `CobblestoneSlab` interpret bit 7 of
-the chunk raw-fluid byte as `WATERLOGGED`; level/falling bits and reserved bits
-retain their existing masks. `GameplayOperation::FluidUse` validates the exact
-selected `SlotRefWire`, hand, face, reach, and dimension before atomically
-committing a `WaterBucket`/`Bucket` transaction through `ServerWorld`. A
-waterlogged slab remains solid while the fixed fluid tick may source adjacent
-air, including across chunk boundaries; raw-only fluid transitions still carry
-their own revision-bearing `WorldMutation`. Save v3 persists the byte unchanged,
-and protocol v17 carries it through `BlockChange.raw_fluid` and
-`ChunkData.fluid_levels` in both embedded and socket projection paths. The
-complement translucent slab mesh reuses the existing halo/translucent pass while
-collision, voxel shape, and light values stay on the host slab semantics.
-
-`src/voxel_shape.rs` defines `VoxelShape` (holding up to 8 AABBs without heap allocation) to provide unified `block_collision_shape`, `block_selection_shape`, and `block_occlusion_shape`. Player physics (`physics.rs`) iterates over all constituent AABBs for movement collision and ladder climbing. DDA raycasting (`interaction.rs`) queries `block_selection_shape.ray_intersects` at each voxel step. Non-full blocks (Slabs, Stairs, Fences, Fence Gates, Walls, Panes, Ladders, Signs) bypass greedy meshing via `is_greedy_cube` and generate faces via `src/block_model.rs` (`append_custom_block_mesh`).
-
-`SignBlockEntity` in `src/block_entity.rs` provides text storage (4 lines of up to 15 UTF-8 characters) with full save persistence and backward compatibility.
-
-`src/world_tick.rs` implements the `RandomTickEngine` and deterministic random tick sampling (`sample_random_ticks`). On each simulation tick, loaded chunk sections with `random_tick_count > 0` are sampled (3 voxels/section/tick standard). Sampling uses a deterministic PRNG seeded by `(world_seed, game_tick, dimension, section_id)` with a maximum section budget (512 sections/tick) to prevent frame drops at large render distances. Random ticks update farmland hydration/degradation and crop age progression.
-
-Food items define `FoodProperties` (hunger, saturation, eating duration ticks, always_edible, return_item). Hold-to-eat right click state machine tracks continuous usage duration, supporting item/slot/death cancellation and triggering `AdvancementTrigger::EatFood` on completion.
-
-## Multiplayer authority
-
-The shared headless authority lives in `authority::AuthorityCore` and
-`ServerWorld`:
-
-- Singleplayer and listen-server hosts use `AuthorityBoundary` in-process;
-  dedicated mode constructs the same `AuthorityCore` without `State`.
-- `SessionContract` validates authenticated identity, dimension, reach,
-  permissions, client sequence/revision, and the bounded response cache.
-- Each loaded dimension ticks in stable wire order with its own revision/time
-  namespace; snapshots aggregate mutations/checksums deterministically while
-  clients gate deltas by `(dimension, revision)`, never by the aggregate max.
-- `SaveManager` persists dedicated player payloads (current dimension separate
-  from spawn dimension), authoritative chunk/block-entity/entity snapshots, and
-  a dimension-scoped mutation-revision index. `ServerRuntime` traverses all
-  loaded dimensions, merges the revision index once, and restores the active
-  compatibility dimension. Region caches are committed only after an atomic
-  replacement succeeds, preserving the previous snapshot for a retry on failure.
-- `InterestSet` tracks per-session view/simulation chunks, simulation entities,
-  and open container viewers. `ServerRuntime::drain_routed_updates` exposes the
-  bounded, dimension-checked routing ledger; the network packet adapter remains
-  a separate Plan 18 B/D seam.
-- `authority::{fishing,transactions,combat}` are the gameplay-domain seams:
-  fishing and brewing advance exactly one fixed 20 Hz step, rich workstation
-  sources are compare-and-committed atomically, and combat derives damage from
-  authenticated pose/cooldown/equipment before publishing session/entity death,
-  drops, XP, shield durability, and respawn deltas. Brew action `2` is the
-  explicit ready-output take operation in protocol v16; fixed ticks never debit
-  reserved inputs on their own. `GameplayOperation::FluidUse` is the protocol
-  v17 typed water-bucket seam for the bounded slab waterlogging set.
-- `ServerRuntime` is transport/session/scheduling/save/metrics glue. It does
-  not maintain a parallel authoritative block/entity map.
-
-The Phase A boundary cutover and Phase C persistence/interest seams are covered by
-headless authority/projection tests, including simultaneous Overworld/Nether
-sessions and active-view restoration. Atomic concurrent login, bounded transport,
-fault injection and metrics have automated evidence; Plan25 now also supplies the
-server-owned difficulty consumer (strict properties parse/persistence, Peaceful
-hostile cleanup, and Easy/Normal/Hard chase policy). GPU Host+Join, complete
-multi-dimension reconnect/failure matrices, and remaining topology acceptance
-are still manual or follow-up work. Headless tests must not be presented as a
-GPU/manual pass.
-
-`src/network/` contains a versioned bincode protocol over length-prefixed TCP:
-
-- `NetworkServer` and `NetworkClient` each run Tokio on a background thread.
-- Main-thread `State` communicates with them through synchronous channels.
-- Player poses are sequenced, timestamped, coalesced, and rendered from a
-  bounded interpolation buffer.
-- Reliable queues carry login, chat, chunk, block, container transactions (open/click/close/slot update), and time/weather state.
-- `GameplayRequest`/`GameplayResponse` is the common request/ACK envelope for
-  block, container, item-use, combat, sleep, trade, mount, and command
-  operations. It carries request ID, client sequence, authenticated session,
-  dimension/revision and bounded rejection reasons; the server keeps a bounded
-  idempotency cache and per-session request rate limiter.
-- `ServerListPingRequest`/`ServerListPingResponse` reports protocol version,
-  MOTD, and online/max player counts.
-
-Container operations (open/click/close) use host-authoritative transactions with `ContainerOpenRequest`/`SendContainerOpenResult`, `ContainerClickRequest`/`SendContainerClickResult`, `BroadcastContainerSlotUpdate`, and `ContainerClose` packets over protocol v17 (the container fields retain their v16 shape). Slot updates carry the container entity revision; duplicate, stale, wrong-dimension, or out-of-range updates are discarded before any local mutation. The click result updates only the cursor; the authoritative slot value arrives through the revision-bearing update/delta. `WorldRulesSync` carries the host's serialized `WorldRules` snapshot to clients; clients apply it for display/runtime policy and cannot submit rule mutations. Trading and raid packets remain versioned under the same protocol.
-`ContainerSessionManager` and `MerchantSessionManager` track player ID, dimension, villager ID, and active trade offers.
-`PoiManager` (`src/village/poi.rs`) indexes Bed and JobSite POIs by chunk with max-distance spatial hashing, maintaining spatial village clusters for villager assignment and bed count tracking.
-`RaidManager` (`src/village/raid.rs`) tracks active village raids, wave progression (Pillager/Ravager counts), Bad Omen triggers, and raid victory/defeat states.
-`Villager` entities execute profession claiming, food harvest, restocking, bed sleeping, breeding, and level progression based on trade XP.
-The host validates reach distance (<= 8.0 blocks), dimension, top-block solid obstruction, and container block presence before committing slot mutations.
-Rejected requests return `success: false` without partial side effects. When a chest is broken, destroyed, too far away, leaves the interest set, or a player disconnects/switches dimensions, only the matching player/dimension/position sessions close automatically; a late close cannot tear down a different active key. Forced client cleanup is deliberately non-recursive and does not mint or duplicate cursor items.
-
-The host is the sole authority for world mutations. Remote break/place requests
-are validated against authenticated player state, reach, loaded chunks,
-placement support, and player collision. Rejected requests must not consume
-inventory, create drops, play action sounds, or mutate/broadcast the world.
-Clients apply inventory/tool/advancement side effects only after a successful
-host result.
-
-Clients apply synchronized blocks through the storage/light/mesh path only.
-Redstone, fluids, weather placement, random ticks, explosions, mob world
-changes, and unsupported-block cascades remain host-side. Unloaded-chunk changes
-are deferred and replayed after stream-in.
-
-## Modes, world rules, and commands (Plan 15)
-
-`game_rules.rs` is the single runtime policy layer. `GameModePolicy` derives
-collision, phase/noclip, damage, hunger, flight, interaction, pickup, and mob
-targeting decisions from the player's `GameMode` and the host's `WorldRules`.
-Adventure item stacks carry compact `can_break`/`can_place_on` block masks;
-Spectator is read-only and cannot open or mutate containers. Hardcore is a
-persisted world property (with Hard difficulty) and a persisted player death
-marker, so reconnect/respawn cannot silently return a dead player to Survival.
-
-`commands/` contains the bounded typed parser and dispatcher used by host
-commands. Commands are accepted only from the host/authorized operator or when
-single-player cheats are enabled; ordinary client chat is never interpreted as
-an administrative command. Rule changes are saved with `LevelData` and sent to
-clients through `WorldRulesSync`. The menu persists Default/Superflat creation
-options and validates world copy/backup/delete paths beneath the canonical
-`saves/` root.
-
-## Persistence and configuration
-
-| Path | Authoritative contents |
+| Owner | Canonical state |
 | --- | --- |
-| `settings.txt` | Display, audio, difficulty, language, view, and related `GameSettings` values. |
-| `controls.config` | Configurable key bindings; loaded and saved by `GameSettings`. |
-| `saves/<world>/world.meta` | World-list name, seed, game mode, difficulty, world type, structure/bonus/cheat flags, Hardcore flag, and last-played time. |
-| `saves/<world>/level.dat` | Bincode `LevelData`: seed, game time, world spawn coordinates, dimension, yaw, format version, world type/structure flags, Hardcore flag, and the serialized `WorldRules` snapshot. |
-| `saves/<world>/player.dat` | Bincode player, inventory/item metadata (including Adventure break/place masks), game mode, XP, spawn point, spawn dimension, unlocked_recipes, advancement progress, and the persistent death marker used by Hardcore. |
-| `world/players/<username>.dat` | Dedicated-runtime v2 per-player atomic save: current dimension plus the complete `PlayerData` payload (including separate spawn dimension) and active effects. Version-1 files migrate using the saved spawn dimension; username is sanitized and duplicate logins are explicitly rejected. |
-| `server.properties` | MOTD, bind/port, player cap, difficulty, online-mode placeholder, whitelist/operators, view/simulation distance, PvP, world path, and seed. |
-| `saves/<world>/dimension.dat` | Active dimension; missing legacy files default to Overworld. |
-| `saves/<world>/entities.dat` | Persistent Overworld living/persistent/dropped entities. |
-| `saves/<world>/regions/` | Overworld region data; authoritative chunk payloads include block entities and per-chunk mutation revisions. Failed replacements leave the prior region/cache snapshot available for retry. |
-| `saves/<world>/regions/` (block_entities) | Per-chunk `BlockEntity` data (chest/furnace inventories and progress, hopper 5-slot transfer state, dispenser/dropper 9-slot inventories, observer baseline/pulse state, sign text) serialized via `ChunkSaveData`; legacy block-entity decoding and serde defaults preserve older saves. |
-| `saves/<world>/dimensions/{nether,end}/` | Dimension-specific entities and regions. |
+| `ServerRuntime` | Transport, sessions, interest, tick schedule, projection, saves, metrics. |
+| `AuthorityCore` | Authenticated sessions, request sequencing, gameplay, dimension routing, fixed-tick order, `AuthoritySnapshot`, global entity IDs. |
+| `ServerWorld` | Dimension simulation via `WorldColumns` (dense grid, fluids, save dirty, `simulation_distance`), entities, revisions, time, redstone, hoppers, random ticks, furnaces, spawning, AI/physics. `tick` returns a snapshot; `AuthorityCore` stores it. |
+| `State` / `PresentationChunks` | Presentation copies: dense grid, section mesh dirty, `view_distance`, meshes, GPU, particles, UI, interpolation. |
+| `SaveManager` | Durable level, player, chunk, entity, dimension, mutation-revision data. |
 
-`SaveManager` owns serialization, legacy-player upgrades, dedicated player files,
-atomic sidecar writes, compressed chunk data, region caching, and dimension-aware
-paths. It also exposes checked authority restore and a bounded mutation-revision
-index for `ServerRuntime`. Five-minute
-autosaves and unload saves use a bounded latest-wins queue with per-Chunk
-dirty/in-flight/persisted revisions. Worker ACKs carry real save errors; failed
-snapshots remain retryable. Window close and “Save and Quit” flush synchronously,
-and a failed flush stays in-game with retry/abandon controls.
+Resident columns use a sliding dense 2-D `Vec<Option<Chunk>>` indexed by
+`(cx - origin_x, cz - origin_z)`, sized `2 * (distance + RESIDENCY_HYSTERESIS) + 1`
+(same Chebyshev ring as `chunk_schedule::UNLOAD_HYSTERESIS`). Presentation
+recenters on the camera chunk; authority `cover_session_centers` grows the
+window to the session-center union. Columns that leave the window stay in a
+rare overflow map until eviction flushes dirty data and removes them.
+Shared reads (`get_block` / `highest_solid_y` / `column_neighborhood`) live on
+`ColumnQuery`. Authority `set_block` does not record mesh invalidation;
+presentation `apply_presentation_cell` does not enqueue fluids or mark save
+dirty. Loaded-column iteration is row-major then sorted overflow so order
+cannot feed RNG / checksum.
 
-Transient state includes projectiles, particles, remote-player snapshots,
-workstation progress, active effects, advancement UI state, and Creative flight.
+Worlds live in a `BTreeMap` keyed by `Dimension`. Callers pass an explicit
+`Dimension` (or `&mut ServerWorld`); there is no ambient active-world pointer.
 
-## Module map
+One contract plus a runtime overlay stay separate because interest, Instant
+pose clocks, and the save codec cannot enter the deterministic core:
 
-| Area | Primary files |
-| --- | --- |
-| App lifecycle and menu | `main.rs`, `app.rs`, `menu.rs` |
-| Composition, presentation/input, UI, GPU submission | `state.rs` |
-| Headless authority, fixed tick, sessions, revisions, interest routing | `authority/{mod,contract,interest,combat,fishing,transactions}.rs`, `server_world.rs`, `server_runtime.rs` |
-| World/chunks/generation & structures | `world.rs`, `chunk_manager.rs`, `dimension.rs`, `worldgen/{mod, climate, density, surface, carver, ore, feature}.rs`, `structure/{types, placement, gen/*, manager, locate}.rs`, `loot.rs` |
-| Lighting, fluids, block targeting | `lighting.rs`, `fluid.rs`, `interaction.rs` |
-| Terrain scheduling/rendering | `chunk_schedule.rs`, `chunk_render.rs`, `culling.rs`, `shader.wgsl` |
-| Player, recipes, gameplay data | `physics.rs`, `player.rs`, `inventory.rs`, `recipes.rs`, `crafting.rs` |
-| Equipment and effects | `enchantment.rs`, `brewing.rs`, `hand_renderer.rs` |
-| Entities and AI | `entity.rs`, `spawning.rs`, `ai/{mod, goal, brain, navigation}.rs`, `mob.rs`, `passive_mob.rs`, `boss.rs`, `mob_renderer.rs` |
-| Container & automation system | `block_entity.rs` (ContainerAccess, Chest/Furnace/Hopper/Dispenser/Dropper/Observer entities), `container_sessions.rs` (atomic UI transactions), `inventory.rs` (ContainerInventory/ItemStack), `world_tick.rs` (bounded hopper transfers), `redstone.rs` (comparators/observers/actions), `recipes.rs` (CraftingRecipe, SmeltingRecipe, FuelDefinition, RecipeManager), `state.rs` (host furnace/dispense loop and revision-gated replication) |
-| Transport, mounts, navigation & fishing | `vehicle.rs` (MountManager, BoatState), `rail.rs` (MinecartState, RailShape), `navigation.rs` (Compass, Clock, MapData), `fishing.rs` (FishingManager, loot rolling) |
-| Networking and dedicated runtime | `network/{protocol,transport,server,client}.rs`, `server_runtime.rs`, `bin/icraft-server.rs` |
-| Persistence and assets | `save.rs`, `texture.rs`, `audio.rs`, `resources.rs` |
-| Localization and accessibility | `localization.rs`, `accessibility.rs`, `menu.rs`, `state.rs` |
-| Modes, rules, commands | `game_rules.rs`, `commands/`, `state.rs`, `menu.rs` |
-| Performance instrumentation | `perf.rs`, `performance/` |
+- `SessionContract` in `AuthorityCore` owns username, pose, dimension,
+  game mode, the accepted client sequence, and the single 128-deep
+  `GameplayResponse` cache.
+- `PlayerSessionState` in `ServerRuntime` is keyed by `PlayerId` and owns
+  interest, the save codec (`PlayerData`), Instant pose clocks
+  (`last_pose_position` / teleport allowance), and projection scratch.
+  It does not mirror id / username / live pose / dimension / game_mode.
 
-Start with the exact symbol related to the task; avoid reading all of
-`state.rs`.
+Pose / dimension / game mode / gameplay overlays go only through
+`write_pose`, `sync_pose_from_authority`, `sync_dimension`, `sync_game_mode`,
+and `sync_gameplay_projection` in `src/server_runtime/session_sync.rs`.
+`write_pose` updates the contract (and pose clocks / interest); it does not
+dual-write live pose into `PlayerData`. `sync_gameplay_projection` overlays
+game_mode, gameplay, and pose onto `PlayerData` for projection/save.
+`teleport_session` grants `teleport_allowance` before `write_pose`.
 
-## Signed vertical world (Plan 08)
+TCP ingress keeps rate-limit, in-flight dedupe, a completed-request-id set
+(for forwarding retransmits to the authority cache), and a sequence watermark
+filter. It does not store `GameplayResponse` bodies. Bounds / revision /
+reach / spectator gates live in authority `preflight` (`dispatch/`).
+Block / combat handlers use `SessionActionView` (`Copy`) instead of cloning
+the full contract.
 
-The world now uses a signed `min_y=-64, height=384` scheme for the Overworld
-(`dimension.rs:38-101`). `WorldHeight` provides `contains_y`, `section_index`,
-`section_y_at_index`, `min_section_y`, `max_section_y_exclusive` helpers.
+Float→milli pose conversion and the milli abs bound live in
+`authority::contract` (`position_to_milli` / `POSITION_MILLI_ABS_LIMIT`).
+Scalar health / hunger milli helpers (`scalar_to_milli`, `milli_to_scalar`,
+`quantize_health`, `milli_to_vec3`) share that module — NaN policies differ
+on purpose (`quantize_health` → `u32::MAX`, scalars → `0`).
+Block↔chunk XZ helpers are `world::chunk_xz` / `local_xz` / `chunk_origin`.
+Six-neighbor offsets come from `redstone::Direction::ALL` /
+`Direction::all_deltas` (lighting / redstone). Shared FNV-1a and LCG live in
+`rng`; bool flag parsing is `game_rules::parse_bool_flag`.
+Block / interaction reach is `interaction::PLAYER_REACH` (still 8.0) with
+`player_reach_squared()` for squared comparisons.
 
-`Chunk` (`world.rs:3279`) stores sparse `Vec<Option<ChunkSection>>` indexed by
-`min_section_y` rather than a dense `[ChunkSection; 16]`. Empty sections are
-`None` and consume no storage. The `SectionKey.section_y` field is `i8`.
-
-`Chunk` methods (`get_block_local`, `set_block_local`, `get_sky_light`, etc.)
-accept `wy: i32` world-Y and use `world_y_to_section_y`/`world_y_to_local_y`
-checked helpers. The chunk `heightmap` uses `i16` with `NO_HEIGHT = -9999`
-sentinel.
-
-All dimension-bound systems (physics collision, void damage, mob spawn, portal
-placement, fluid tick, light propagation, world mutation validation) now use
-`dimension.height()` / `WorldHeight::contains_y` instead of hardcoded
-`0..CHUNK_HEIGHT`.
-
-Network protocol v17: `ChunkData` packet carries explicit `min_section_y: i8`,
-`section_count: u16`, and raw `fluid_levels`; `BlockChange` carries the raw
-fluid byte alongside block/state. Block-entity variants and container updates
-carry stable revisions. Save format v3: `ChunkSaveData::data_version = 3` with
-height-aware flat arrays, compressed block entities, and redstone metadata.
-Legacy 0..255 format (data_version 0/1/2)
-maps into Y=0..255 with Y<0 and Y>=256 remaining empty/Air. SaveManager creates `.bin.bak`
-backups before modifying existing region files and aborts on deserialization corruption without overwriting.
-
-```rust
-// Safe checked helpers in world.rs:
-world_y_to_section_y(y: i32) -> i8;        // y >> 4
-world_y_to_local_y(y: i32) -> u8;          // y.rem_euclid(16)
-section_and_local_y_to_world_y(sy: i8, ly: u8) -> i32;
-```
-
-## Architectural invariants and hotspots
-
-- `State` is intentionally central for presentation/input but still mixes the
-  legacy renderer simulation with GPU setup, networking, UI, and interactions
-  during the Plan 18 cutover; preserve ordering and authority boundaries.
-- Chunk and entity collections are authoritative; meshes and render data are
-  disposable caches.
-- Background chunk/mesh results carry generation/revision identity. Discard
-  stale results rather than uploading them.
-- GPU buffers and wgpu submission stay on the main thread.
-- Host-only systems must not run authoritatively on joining clients.
-- Entity persistence includes living, explicitly persistent, dropped-item (with full `ItemStack` metadata and 5-minute loaded-chunk despawn timer), and experience-orb entities; remote players and short-lived projectiles are not saved.
-- Advancement definitions do not subscribe automatically. New event producers
-  must call `State::trigger_advancement` at the authoritative mutation point.
-- Dimension switches must keep chunk/entity saving, runtime reset, portal
-  placement, and `dimension.dat` updates together.
-- Redstone component metadata is stored with chunk data; legacy saves may not
-  contain it.
-- Hopper/dispenser/dropper/observer fields are part of the v3 block-entity
-  payload; missing fields use serde defaults, and legacy `LegacyBlockEntity`
-  entries are migrated before insertion. Slot metadata (count, durability,
-  enchantments, potion data, and custom names) is copied unchanged by every
-  automation transfer.
-- The host is the only authority for automation, comparator output, observer
-  pulses, item consumption, drops, and furnace progression. Hopper work is
-  capped per tick and observer scheduling is bounded; stale chunk/network
-  revisions are ignored rather than partially committed.
-- `Inventory` and `InventoryData` feature `offhand: Option<ItemStack>`, with `#[serde(default)]` backward compatibility for legacy save formats. F key swaps selected hotbar item with offhand item.
-- Combat calculation (`calculate_damage_reduction`, `can_shield_block`, `calculate_attack_damage`, `calculate_bow_shot`) is host-authoritative and uses pure functions in `player.rs`.
-- Shield blocking (180° facing arc) reduces damage by 100% for blockable sources and degrades shield durability; Axe attacks trigger a 5-second (100 ticks) shield disable.
-- `settings.txt` and `controls.config` are working-directory-relative. Keep
-  parsing defaults and sanitization backward compatible.
-
-Plan 17 settings also persist `ui_scale`, `chat_scale`, `chat_opacity`,
-`subtitles`, `high_contrast`, `reduce_flashing`, `toggle_sprint`,
-`toggle_sneak`, `camera_bobbing`, `damage_tilt`, and selected
-`resource_packs` IDs. `ResourcePackManager` keeps pack bytes in bounded maps;
-ZIPs are never extracted to disk and unsafe paths, symlinks, oversized entries,
-compression bombs, missing dependencies, and cycles are rejected.
-
-## Overworld terrain & biomes (Plan 09)
-
-The terrain generator uses continuous 2D climate noise and 3D density sampling encapsulated in `src/worldgen/`:
-
-- `climate.rs`: `ClimateSystem` samples `temperature`, `humidity`, `continentalness`, `erosion`, and `weirdness` to continuously select 16 Overworld biomes (`Plains`, `Forest`, `BirchForest`, `Taiga`, `SnowyPlains`, `Desert`, `Savanna`, `Swamp`, `Jungle`, `Badlands`, `Meadow`, `WindsweptHills`, `River`, `Beach`, `Ocean`, `DeepOcean`). `WeatherSystem` shares this `ClimateSystem` for unified rain/snow precipitation queries.
-- `density.rs` & `carver.rs`: 3D density fields combine continental landmass, erosion, ridges, and cave carvers (`cheese/cavern`, `tunnel`, `ravine`) with deep lava lake thresholds (`y <= 0`).
-- `surface.rs` & `ore.rs`: Surface layers (top, filler, underwater) are data-driven per biome. Ores (`Coal`, `Iron`, `Gold`, `Redstone`, `Diamond`) distribute across negative Y Y-ranges using deterministic per-chunk vein algorithms.
-- `feature.rs`: Tree and plant feature placer handles multi-chunk tree boundary placement and column flora.
-- `world_tick.rs`: Evaluates natural block simulation (grass spread/decay, leaf decay based on log proximity, sapling growth, cactus/sugar cane growth, ice/snow melt, fire spread, falling sand/gravel step movement).
-
-## Mob ecology, spawning & pets (Plan 11)
-
-- `spawning.rs`: `MobCategory` caps (`Monster`: 70, `Creature`: 10, `Ambient`: 15, `WaterCreature`: 5 per player), natural spawn checks (biome, light <= 7 for monsters, surface, fluid, distance 24..128 blocks from player), difficulty rules (Peaceful despawns/prevents hostile), and despawn evaluation (>128 blocks instant despawn unless persistent; >32 blocks soft despawn after 30s).
-- `ai/`: Priority-sorted `Brain` scheduler managing modular goals (`SwimGoal`, `SitGoal`, `FollowOwnerGoal`, `MeleeAttackGoal`, `WanderGoal`) and `BoundedPathfinder` with node evaluation caps to prevent A* frame spikes.
-- Representative Mobs & Pets: `Spider` (climbing/leaping), `Slime` / `MagmaCube` (size-based splitting on death), `Witch` (potion drinking & splash potion throwing), `Drowned` (water/land toggle), `Ghast` (flying & fireball), `WitherSkeleton` (Wither effect), `Wolf` (tameable with bone, standing follow/sit toggle, attacks targets, dye collar), `Cat` (tameable with fish, Creeper repulsion within 8 blocks), `Horse` (tameable/rideable attributes), `Bat` (ambient cavern flight), `Squid` (water swimming).
-- Persistence: `EntitySaveData` serialized with `#[serde(default)]` backward compatibility for `owner_id`, `owner_uuid`, `is_tamed`, `is_sitting`, `collar_color`, `slime_size`, and `is_persistent`.
-
-
-## Verification
-
-Behavioral tests are mostly inline `#[cfg(test)]` tests. The library target
-now exposes the headless authority and protocol to multiplayer-core tests;
-those tests do not construct a wgpu device/window/audio graph. The passive-mob
-placeholder remains unrelated to the dedicated binary.
-
-The performance plans 01–14 remain `Partial` until their fixed-scene GPU/window
-and PGO artifacts exist; this status is not a claim that their runtime repair
-work is absent. The authoritative status and outstanding artifact gates are
-tracked in
-[`performance/performance_track.md`](performance/performance_track.md) and
-[`performance/15_performance_audit_repair_plan.md`](performance/15_performance_audit_repair_plan.md).
-The host-authoritative model above remains the invariant; R4 repaired the
-joining-client simulation/replication and pause/death-policy gaps.
-
-Plan 14 headless verification covers the hopper smelting chain, unloaded-chunk
-atomicity, sided capability/transaction validation, comparator revision wake-up,
-observer edge/budget behavior, container revision ordering, and v3 save/snapshot
-round trips. A GPU/window Host+Join-client scene still requires manual execution
-outside the headless test environment.
-
-Plan 17/19 adds `final_acceptance.rs`, a deterministic headless harness for real
-foundation, progression, and social/automation workflows, including inventory,
-block-entity and save/reload assertions. Singleplayer runs in CI. A separate
-Plan18 harness runs a real dedicated authority with two TCP clients for
-block/container/revision/interest/reconnect coverage. Plan30 extends that
-transport evidence to a bounded gameplay-domain vector; the complete
-three-scenario listen/dedicated rows remain blocked by the player-authored
-ingress gaps tracked in Plan31/32. Resource
-packs, localization, subtitles, reduced motion, and keyboard-focus behavior
-have unit coverage. Plan29 additionally covers partial EN/DE locale layers and a
-bounded `VISIBLE_REQUIRED_KEYS` contract for stable menu/HUD/inventory/station/
-command labels; parser/debug/raw-input literals remain explicit non-goals. Visual
-4:3/16:9/21:9/high-DPI, audio-device, GPU-performance, and manual Host+Join
-presentation still require the steps in
-`plans/minecraft_foundation_gap/17_qa_checklist.md`; Plan24 closes the automated
-runtime parity/soak lanes and Plan30 supplies bounded true-TCP evidence, not a
-blanket three-scenario E2E claim.
-Plan21 Phase A additionally keeps simultaneous dimension worlds and per-session
-interest/revision routing isolated in headless tests, with persistence and
- topology/reconnect regression coverage. Plan30 verifies the reachable TCP
- fishing/workstation/combat subset; Plan32 closes authoritative player travel and
- Plan33 closes the fishing reel revision lifecycle.
-Plan22 adds `tests/authority_gameplay_domains.rs`, a dedicated headless vector
-for fishing fixed-tick cast/bite/reel idempotency, furnace/craft/enchant/anvil
-transactions, explicit brew-ready take and reconnect cleanup, and combat
-shield/knockback/death/keep-inventory/respawn behavior. The vector and the
-authority domain suites pass; GPU/window, transport-topology, and 30-minute
-soak artifacts remain outside this plan.
-Plan23 completes the State/NetworkClient authority cutover for Join Client
-inputs: each mutating input emits one typed `GameplayRequest`, while embedded
-and socket roots share the ACK/session/world/entity/container projection lane.
-Session snapshots are gated by dimension, sequence, and revision; a dimension
-transfer clears presentation caches before ordered ChunkData/entity deltas
-repopulate them. The listen + two-client headless vector is an embedded
-`RuntimeInput` parity fixture for request delivery, interest isolation,
-duplicate/stale rejection, and owner-private session payloads. Plan30 separately
-verifies these bounded domains through true TCP, including station transactions
-and reconnect; full-scenario and GPU/window artifacts remain explicit follow-up
-boundaries. Plan24 records the automated topology, transport-metrics, and
-dedicated-headless-soak closures.
-
-Plan24 closes the automated portions of those follow-ups. The shared
-`ServerRuntime` fixed-tick/request/ACK/snapshot vector runs the fishing,
-workstation, brew, combat/death/respawn, stale/duplicate, dimension-transfer,
-and reconnect cases in Singleplayer, ListenServer, and Dedicated *embedded*
-topology modes; owner-private session projections carry the workstation results
-and metadata. Plan30 adds the same assertions through true TCP for the bounded
-domain subset (including Craft/Enchant/Anvil). Plans31–33 close the bounded
-Foundation/Social block ingress, Progression travel/completion, and fishing reel
-revision lifecycle follow-ups respectively.
-Outbound network counters reserve publication before a frame write and roll
-back on write failure, with all production writer paths using the same guard;
-the TCP metrics test passed 50 isolated release runs. Debug/release suites and
-checks are green, and the dated dedicated headless 1800-second soak ended with
-zero queue depth, zero queue-full events, six saves, and no panic/error. The
-raw soak log and command/metrics record live under
-`plans/minecraft_foundation_gap/artifacts/`. GPU/window/audio/DPI and real
-Host+Join visual evidence remain manual and are intentionally not claimed.
-
-Plan25 makes `ServerDifficulty` a server-owned value parsed from
-`server.properties` and passed through `AuthorityConfig` to every
-`ServerWorld`, without changing the existing binary `level.dat` layout or
-protocol version. The existing hostile AI lane consumes it deterministically:
-Peaceful removes loaded hostiles on the next fixed tick, while Easy/Normal/Hard
-use bounded `0.9/1.0/1.1` chase multipliers. `do_mob_spawning=false` remains a
-spawn gate and does not freeze already-loaded hostiles; PvP remains an
-independent `WorldRules` setting. Tests cover strict fail-before-world config,
-server.properties save/reload, checksum/policy observability, and embedded vs
-dedicated parity. There is no autonomous spawn-table, vanilla damage, hunger,
-GPU, audio, or visual implementation claim in this plan.
-
-Plan26 adds the remaining container lifecycle and chest feedback contract. The
-pre-review baseline debug library suite passed 665 tests (3 ignored), the
-release library suite passed 666 (3 ignored), and the complete pre-review
-`cargo test --release` lanes passed, including the 797-test binary lane plus
-all server/integration/doc-test lanes. Review-fix narrow gates then passed
-`container_sessions` (9), chest/forced-viewer `server_world` tests (3),
-`server_runtime::tests` (14), `headless_server_authority` (1), and
-`runtime_topology_parity` (5); `cargo check --release`, `cargo fmt --all
--- --check`, and `git diff --check` also passed. No direct `State`
-GPU-constructor unit test is claimed; client, runtime, server, and headless
-vectors cover the forced-close routing. Smooth lid interpolation, audio-device
-and Host+Join visual evidence, and v17 same-key close epoch/reason/cursor
-fields remain explicit follow-ups.
-
-Plan27 adds a bounded slab-waterlogging vector. `fluid::tests` (6),
-`chunk_manager::tests` (15), `block_model::tests` (5), and
-`server_world::tests` (11) cover raw bit masks, v3 save carriers, fixed-tick
-same-block mutations, cross-chunk source flow, mesh complement/invalidation,
-and atomic world checksums. Protocol/client/server/runtime lanes pass 28/17/35/14
-tests respectively; authority/persistence/headless/topology/waterlogging
-integration lanes pass 3/3/1/5/5. The v17 packet carries raw fluid bytes and
-rejects the prior handshake version, while `RevisionGate` preserves latest-wins
-ordering for raw-fluid block/chunk projections. Debug/release/check and diff
-gates all pass as recorded in Plan27; GPU/window/audio/DPI, full vanilla
-waterlogging parity, and a 30-minute soak are explicitly outside this plan.
-
-Plan28 closes the narrow authoritative Dispenser/Dropper lane without another
-protocol bump: Plan27+28 finalize the same unpublished development v17
-sequence, while the intermediate Plan27 `b77c38f` EntityStateWire shape is not
-claimed binary-compatible. `RedstoneAction::Dispense` is drained in sorted
-position/facing order on a rising edge only; source/front chunks and matching
-block entities must be loaded before an atomic source/target/entity commit.
-Dispenser behavior is deliberately limited to Arrow, SplashPotion, source-only
-Water/Lava buckets, Flint and Steel fire placement, and metadata-preserving
-ordinary DroppedItem fallback. Dropper insertion is merge-first/lowest-empty,
-otherwise one DroppedItem is spawned. The authority allocator owns global
-entity ids; `EntityStateWire.item` carries complete ItemStack metadata so
-embedded, TCP, and three-topology projections converge. Redstone `last_powered`
-and block/entity payloads retain their save/reload semantics, and powered reload
-does not phantom-fire. Targeted evidence is 10 `authoritative_` unit tests,
-2 bucket atomicity/flow tests, one latch roundtrip, one wire roundtrip, one real
-TCP two-client projection, and one Singleplayer/ListenServer/Dedicated topology
-projection; full vanilla dispenser behavior, cauldron/waterlogging integration,
-hopper rewrites, GPU/window/audio, and manual visual acceptance remain outside
-this plan. Final serial debug/release suites each pass 1,524 tests (684 library,
-815 client binary, 2 server binary, 23 integration, zero doc-tests) with six
-ignored benchmark/crash-child tests; `cargo check --all-targets` and
-`cargo check --release --locked` pass. The serial test setting isolates an
-existing process-local save-failure injection race; it does not change
-production save behavior.
-
-Plan29 closes the narrow Plan17 locale/consumer gap. `ResourcePackManager` retains
-the existing first-valid `resolve_locale` API and adds validated high-to-low locale
-layers; malformed layers are skipped with one deduplicated diagnostic. The catalog
-merges lower layers first, then selected-pack overrides, and falls back to merged
-English for missing active-language keys. `VISIBLE_REQUIRED_KEYS` bounds the
-player-visible contract to stable menu/world/create/options/accessibility/resource
-pack/controls/delete labels, save/connection/death/pause HUD, inventory/stations,
-and command prefix/status templates. Unit coverage exercises partial layers,
-invalid diagnostics, selected-pack sentinels, EN/DE key coverage, and language
-switch formatting. This is headless evidence only; GPU/window/audio/DPI, clean
-checkout startup, visual artifacts, and full three-scenario topology E2E remain
-Plan17/19 plus Plan31/32; Plan30 supplies only bounded true-TCP domain evidence.
-Final serial debug and release suites each pass 1,532 tests (688 library,
-819 client binary, 2 server binary, 23 integration, zero doc-tests) with six
-ignored tests; resource/localization/menu targeted lanes pass 18/10/30 and the
-state-only filter matches zero pure tests. `cargo check --all-targets`,
-`cargo check --release --locked`, `cargo fmt --all -- --check`, and
-`git diff --check` pass.
-
-Plan31 completes authoritative player-authored block placement, mining progress,
-block drops, experience, and real TCP projections (Singleplayer, ListenServer TCP,
-Dedicated TCP). Protocol bumped to v18 for typed `BlockAction` (`StartBreak`, `CancelBreak`, `Place`)
-and owner-private `MiningProgressWire`. Stale v17 handshakes are rejected. Fixed-tick mining
-verifies range, LOS, loaded chunk, expected block state, held tool slot, and Survival/Creative/Adventure policies.
-Single-commit block breaking guarantees drop & XP conservation in release mode (fixing a release-build
-`debug_assert!` side-effect bug). All 3 integration tests in `tests/plan31_authoritative_block_actions.rs`
-(Embedded, Listen TCP, Dedicated TCP) and all 698 library unit tests pass in release mode.
-`cargo check --release --all-targets`, `cargo fmt --all -- --check`, and `git diff --check` pass cleanly.
-Plan31 deliberately does not claim inventory conservation when a non-empty container block is
-broken: the block entity is removed and projected, but its slots are not yet converted to dropped
-items. That bounded authority/duplicate/save gap is tracked explicitly by Plan34.
-
-Plan32 completes the bounded authoritative progression/travel lane. Protocol v19 adds typed portal
-ignition, Ender Eye insertion, portal entry, and owner-private dimension transfer. Authority owns
-portal contact/cooldown, linked-portal mutations, transfer intents, operator progression commands,
-combat damage, and dragon completion; transport and client revision namespaces reset on dimension
-transfer. Generated fortress and End City chests materialize loot lazily with a revisioned mutation
-and persist it across reload. Five debug and five release integration vectors cover Singleplayer,
-Listen TCP, and Dedicated TCP, including duplicate ACK, stale rejection, observer privacy,
-disconnect/reconnect persistence, generated dragon completion, and fortress/End City loot. This
-does not claim full vanilla structure/dragon AI, renderer/GPU/window/audio/DPI, or visual evidence.
-Plan33 closes the bounded fishing reel revision lifecycle without changing protocol v19 or
-weakening anti-stale gates. Fresh `client_sequence == 0` gameplay input is allocated and rebound
-to the latest accepted owner revision immediately before TCP egress, while explicit nonzero
-sequence/revision probes remain untouched. Accepted local `PlayerSessionUpdate` projections advance
-the client's revision high-water. Authority autonomous fixed ticks publish `gameplay.revision` but
-do not advance the client-authored `last_revision` baseline. Embedded, Listen TCP, and Dedicated TCP
-tests cover cast-to-nibble-to-reel, loot/XP/rod durability, cached duplicates, cancel, owner privacy,
-and continued stale/out-of-order rejection.
-
-Plan34 closes the bounded container-break inventory conservation seam. Before
-`AuthorityCore::commit_mining_break` mutates a Chest, Furnace, Hopper, Dispenser, or
-Dropper to Air, it snapshots every non-empty slot as the complete `ItemStack` value;
-block and container drops reserve their entity IDs together and prepare all dropped
-entities before the Air mutation. Any prepare or mutation failure rolls back prepared
-entities and leaves the source block entity intact; only a successful Air mutation
-commits the pending mutation and session result. The block-entity removal remains the same authoritative mutation
-and is projected as `BlockEntityDelta(None)`, while the existing `EntityStateWire.item`
-path carries durability, enchantments, potion, custom-name, count, and Adventure masks
-without a protocol bump. Authority and real TCP Listen/Dedicated evidence cover cached
-duplicates, stale requests, owner/observer interest convergence, owner-private session
-isolation, reconnect, and save/shutdown/reload. Full vanilla scatter behavior and
-repo-wide suite results remain outside this bounded Plan34 record.
-
-Use:
+## Mutation path
 
 ```text
-cargo test
-cargo test --release --lib server_runtime network::protocol
-cargo run --bin icraft-server -- --once --world /tmp/icraft-world
-cargo check --release
-cargo run
+input
+  -> bounded runtime/network queue
+  -> TCP: rate-limit + in_flight + sequence watermark (no response cache)
+  -> authenticated GameplayRequest
+  -> authority preflight (bounds + sequence + dimension + revision +
+     spectator + reach/state) then single response-cache lookup
+  -> atomic AuthorityCore / ServerWorld mutation
+  -> dimension-scoped revision + cached GameplayResponse (authority only)
+  -> AuthoritySnapshot / targeted presentation event
+  -> embedded State: `ChunkColumn(Arc<Chunk>)` + snapshot `WorldMutation`
+     (TCP/join: `ChunkData` / `BlockChange`)
+  -> presentation apply (no `PresentationChunks` fluid side effects)
 ```
 
-`cargo run` requires a window/GPU and optionally an audio device; audio can
-degrade to silent operation.
+- Reject before mutating. A rejection must not consume inventory, spawn
+  drops, or partially write the world.
+- Place/break is `GameplayOperation::BlockAction`.
+- Container open/close is `GameplayOperation::Container` with typed
+  `ContainerAction` (Open / Close). Clicks are `ContainerClick` only.
+  Clicks are conserving session transactions: clone player +
+  container, verify the claimed cursor, apply brew/viewer locks, commit both
+  sides or roll back. Client-supplied item data is never echoed as truth.
+- Revisions are `(dimension, revision)`. The aggregate snapshot revision is
+  a summary only.
+- `AuthorityCore::tick` walks worlds by `BTreeMap` key. Each dimension uses an
+  explicit `world_mut(dimension)` lookup; there is no tick-end restore of an
+  active key. Request routing (`submit_request`, session dimension change,
+  respawn) also takes an explicit `Dimension`.
+- Session chat commands: `AuthorityCore::apply_command`. Dedicated console
+  is a separate admin surface. `commands::Command::surface` marks
+  `GameplayAllowed` vs `ConsoleOnly`; console-only strings and non-food
+  `ItemUse` fail in `GameplayRequest::validate_bounds` before sequencing
+  (desktop Help UI stays local via `commands::parse` / `help_text`).
+- Per-session interest is both the projection boundary and the chunk
+  materialization gate. Random ticks, fluids, hoppers, and furnaces walk the
+  simulation union, not the unbounded residency map. Columns that leave every
+  session's view/simulation sets (plus `interest::RESIDENCY_HYSTERESIS`, same
+  Chebyshev ring as client unload) are flushed if dirty and evicted.
+- Interest caches a column key
+  `(dimension, chunk_x, chunk_z, view_distance, simulation_distance)`. When a
+  session stays on that key, chunk HashSets are not rebuilt and
+  `chunks_around` is not re-run. Entity interest skips both `query_radius`
+  calls while that key and `EntityManager::spatial_revision` are unchanged;
+  otherwise it diffs ids into the live sets without `mem::take`. Teleport
+  (`write_pose` with refresh), dimension change, and view/simulation distance
+  changes invalidate the anchor and force a full refresh.
+- `ServerRuntime` keeps a reverse map
+  `(dimension, ChunkCoord) → session_ids`, updated on chunk enter/depart and
+  join/leave. Mutation / block-entity / container fanout looks up that map
+  instead of scanning every player. Block-entity payloads are cloned only when
+  at least one interested session exists (encode once per mutation, then
+  fan out). Container slot updates still require an open viewer; non-viewers
+  with only chunk interest never receive private inventory slots.
+- `AuthorityCore` keeps a `BTreeMap<u8, Vec<PlayerId>>` session index, updated
+  on register / remove / `set_session_dimension`. The four per-dimension tick
+  phases look it up instead of filtering the full session table. Snapshot
+  `session_updates` lists only sessions whose gameplay changed this tick
+  (join, dimension change, and mining / brew / fishing / cooldown revision
+  bumps). `last_snapshot` is replaced in place so the previous session vector
+  is not cloned.
+- Entity spawn/despawn follows view-distance interest. `EntityState` follows
+  simulation-distance and is sent only when pose, health, or animation
+  changed, or when the entity newly entered that session's simulation set.
+  Stationary entities are not re-encoded every tick.
+- Hopper `transfer_cooldown` countdown is memory-only. A column is marked dirty
+  only when hopper slots change or cooldown is armed `0→N` after a transfer.
+  Reload restores the last persisted cooldown (typically 8 after a transfer),
+  so a hopper may wait up to 8 extra ticks. Hoppers are discovered from a
+  compact per-chunk `hopper_positions` index (same encoding as furnaces /
+  torches), so zero-hopper simulation columns do not walk `block_entities`.
+  Furnaces are ticked from a compact
+  per-chunk index with the same encoding as torches. Random ticks sample from a
+  per-chunk ascending `section_y` index (`random_tick_sections`) maintained on
+  load / `set_block_local` / unload; authority walks the simulation-union
+  columns and takes at most 128 already-ordered eligible sections without
+  rescanning empty sections or sorting each tick. Sleeping redstone skips
+  comparator/observer refresh until a container mutation, plate occupancy
+  change, scheduled/dirty work, or loaded-chunk set change wakes it.
+  `WorldColumns` carries a monotonic `load_generation` bumped on resident
+  insert/remove; sleeping redstone compares that counter instead of probing
+  every known chunk key. Awake redstone keeps comparator and transition-
+  capable component indexes, runs transitions only for settle-evaluated /
+  due positions, and collects persistent metadata from a per-column sidecar.
+  Block mutation revisions are stored per-column so eviction is O(that
+  column). Grounded
+  dropped items with near-zero velocity skip XYZ physics until the support
+  block changes or an external push applies velocity. Living entities that are
+  sitting, anchored, grounded (or flying with zero velocity), and not in
+  hostile chase skip `update_physics` and `ai_phase` bumps; hostiles only write
+  chase velocity when a player is within range and the desired speed differs.
+  Dimension boss / Enderman updates use nearest-player pose plus actual look
+  direction and skip entirely when the dimension has no players.
+  `tick_entities` syncs spatial buckets via a mover id list
+  (`sync_entity_positions`), not a full-table `sync_positions` scan.
+- `EmbeddedRuntimeBridge::sync_local_inventory` may write back only
+  inventory, cursor, and selected hotbar. Health, hunger, XP, mining, and
+  mounts stay server-owned. Join clients never use this path.
+- Inventory UI topology is `PresentationTopology::inventory_decision`.
+  Container slots send `ContainerClick`. Merchant offers submit `Trade` on
+  both topologies (they are not `Workstation`, which would Reject). A UI
+  hit is never itself an authoritative commit.
 
+Leftover renderer-owned world simulation is gone. World mutation belongs in
+`AuthorityCore` / `ServerWorld`. Desktop `State` has no `SaveManager` and no
+presentation mutation index. Random ticks emit `world_tick::BlockMutationRequest` `{ pos, new_block, new_state }`,
+which `ServerWorld` applies; durable writes stay on `ServerRuntime`.
 
+## Tick vs frame
+
+`ServerRuntime::tick_with_output` (50 ms):
+
+1. Drain save-worker acks (clear dirty only after successful persist).
+2. Schedule pending async worldgen and collect completed Rayon results.
+3. Drain at most the bounded inbound budget.
+4. Build per-dimension simulation unions from cached interest
+   `simulation_chunks` (rebuilt only when a session's chunk anchor changes),
+   then `AuthorityCore::tick` applies up to `MAX_INITIAL_CHUNK_PROJECTIONS_PER_TICK`
+   completed columns (session-id / nearest-first), then every loaded dimension
+   (session domains, mining, portals, then world time/redstone/hoppers/fluids/
+   random ticks/furnaces/spawning/entities; then deferred dispenser/dropper
+   actions). `ServerWorld::tick` takes the interest union as `&BTreeSet` and
+   returns `Vec<WorldMutation>` (dispenser actions stay on the pending queue);
+   plate occupants rebuild their column key only when a player crosses a chunk.
+5. Apply dimension transfers, route snapshots by interest, evict uninteresting
+   columns (residency keep-set is cached until anchors/distances change; when
+   every resident is inside keep and `load_generation` is unchanged, eviction
+   is an O(1) skip), close invalid containers, update metrics from the walked
+   worlds (refreshed after eviction), enqueue autosave every 6,000 ticks
+   (failures increment metrics; shutdown / console `save-all` still block on a
+   save-worker barrier). Over-budget ticks only bump timing counters — no
+   tick-thread `eprintln!`.
+  `ServerWorld::checksum` is computed only by `AuthorityCore` after pending
+  redstone dispense mutations are folded in. The hash mixes a running XOR of
+  block-revision fingerprints (updated on mutation/evict) plus a cached
+  sorted-entity fingerprint. Idle ticks skip the resident-map scan and, when
+  there is no entity spawn / despawn / pose / `ai_phase` change, reuse the
+  prior entity fingerprint instead of sorting and re-hashing the full table.
+  Entity physics samples a 3×3 `ColumnNeighborhood` (same halo pattern as
+  lighting/mesh) instead of per-voxel `chunks.get`. Movable entities run
+  `update_physics` in parallel via Rayon over read-only chunk refs; collected
+  `moved_ids` are sorted before `sync_entity_positions`. Redstone / fluid /
+  random tick stay sequential. Authority entity ids trust the monotonic
+  counter and only probe the target world plus the optional owner fishing
+  hook (`debug_assert` keeps the old full scan).
+
+Worldgen for interest projection is off the tick thread: `ensure_chunk` in
+`WorldgenMode::Async` only registers demand; Rayon workers generate; results
+carry `(dimension, generation, lifetime)` and are discarded when stale.
+Gameplay mutations that need a missing column (`set_block`, fluid use, spawn
+Y, spawn bootstrap) still call `materialize_chunk` synchronously.
+
+Desktop: `App -> State::update(dt) -> State::render()`. Drain events, run
+capped 20 Hz catch-up (listen-host keeps ticking in pause/death UI;
+Singleplayer pauses), then interpolation / particles / streaming / one main
+pass.
+
+Terrain is derived only:
+
+```text
+PresentationChunks -> 9-column halo snapshot -> Rayon mesh (the currently
+  selected LOD; L1/L2 wait until first selected) -> identity check
+  -> GPU region upload -> visibility + LOD -> wgpu
+```
+
+GPU objects stay on the main thread. Terrain vertex Y is relative to
+`REGION_ORIGIN_Y` (`WorldHeight::OVERWORLD.min_y`, `-64`). Visibility uses
+the current dimension `WorldHeight`. Client unload uses
+`chunk_schedule::within_unload_hysteresis`.
+
+Windows menu/game init forces DX12 (Vulkan NVIDIA crash). Swapchains are at
+least 1×1. `App` creates one `GpuContext` (`presentation/bootstrap.rs`:
+device / queue / surface / config / present-mode policy) and menu↔game
+transitions move it through `Menu::from_gpu` / `into_gpu_context` and
+`State::new` / `into_gpu_context` — no second `request_adapter`. Menu UI
+uses `shader.wgsl` `vs_ui` / `fs_ui` (no duplicate menu `UI_SHADER`).
+Desktop menu lives under `src/menu/` (`mod.rs`, `widgets.rs` screen
+tables, `controls.rs` binding table, `settings.rs`).
+
+## World
+
+A chunk is a 16×16 column of sparse 16-high paletted `ChunkSection`s. Block
+entities live in the owning chunk. Use signed-Y helpers in `src/world/`
+(`world_y_to_section_y`, `section_and_local_y_to_world_y`,
+`Chunk::world_y_range()`, `Dimension::height()`), not hard-coded `0..256`.
+`BlockType` is `#[repr(u8)]` with stable wire/save discriminants; static
+gameplay/render fields live in `BLOCK_TABLE` (`src/world/block_table.rs`),
+indexed by discriminant after `canonicalize()`. `BlockType::def()` /
+`properties()` return `&'static` rows (no per-voxel struct rebuild).
+Behavioral helpers (`can_stay_on`, `support_status_at`) stay as code.
+`Item` static fields (name / stack / block / atlas / creative tab / tool /
+armor / food) live in `ITEM_DEFS` (`src/inventory/item_table.rs`), indexed by
+discriminant. `Item::def()` and the former six property match arms read that
+table; `Item::from_block` builds a reverse map once (`OnceLock`) from
+`ITEM_DEFS` plus a small set of non-1:1 overrides. Crafting / smelting recipes
+are pattern tables in `src/recipes.rs` (wood-family expansion for planks /
+sticks / table / chest); shaped lookup is keyed by `(width, height,
+pattern[0][0])` and smelting by `HashMap<Item, _>`.
+
+Open / powered / lit / extended / filled no longer use paired `BlockType`
+variants. Bit 4 of `BlockState` (`is_open` / `BLOCK_STATE_OPEN_BIT`) carries
+that flag for doors, trapdoors, lamps, furnaces, pistons, end-portal frames,
+levers, buttons, plates, repeaters, and comparators. Redstone torches invert
+the bit (set = extinguished) so legacy id 49 stays lit. The thirteen former
+variant discriminants remain as `Reserved50`…`Reserved90` holes;
+`from_wire` / `migrate_saved` map them to the base type plus the open bit.
+State-aware helpers: `light_emission_for`, `face_tex_for`, `is_solid_for`,
+`is_passable_for`.
+Nether and End generation fill paletted `ChunkSection`s directly (no
+full-column dense scratch). Overworld and Superflat do the same via
+`set_block_local`; Superflat starts from `Chunk::empty_in_dimension` instead
+of running full Overworld gen. Nether block light uses
+`recompute_direct_column_lighting` plus `propagate_chunk_lighting`.
+`WorldHeight` fields are private; callers use `min_y()` /
+`max_y_exclusive()` / `section_count()`. Column save/network flatten walks
+section storage in SoA order (byte-identical to the old per-voxel `get_*`
+walk).
+
+| Dimension | `WorldHeight` |
+| --- | --- |
+| Overworld | `-64 .. 320` |
+| Nether | `0 .. 128` |
+| End | `0 .. 256` |
+
+Unloaded columns are not air: entity physics freezes for a tick if the
+current or predicted AABB touches missing terrain.
+
+Load lighting (`propagate_chunk_lighting`) seeds the center column from faces,
+emitters, and lit cells that border darker neighbors, then seeds only the shared
+faces of the four cardinal neighbors — no per-neighbor volume scan. BFS runs on a
+temporarily taken 3×3 `&mut Chunk` neighborhood so each cell does zero `HashMap`
+lookups. Section mesh halos still copy from the immutable `column_neighborhood`
+refs. Runtime meshing generates only the currently selected LOD; coarser
+LODs are filled the first time the camera selects them.
+
+- `dimension.rs` picks generation per dimension.
+- `worldgen/` owns climate, density, surfaces, caves, ores, features.
+- `structure/` owns villages, strongholds, fortresses, End cities, dungeons,
+  mineshafts. Structure-start caches are `(seed, dimension, region_x,
+  region_z)`. Generators share `fill_box` / `hollow_box` / `place_loot_chest`
+  / `finish_start`. The End pins one familiar city at
+  `(END_CITY_X, END_CITY_BASE_Y, END_CITY_Z)` inside `StructureManager`
+  (same Y as `origin_y_for(EndCity)`); there is no parallel
+  `dimension::apply_fixed_end_city` path.
+- Column fill samples surface/biome once per (x, z), then `block_at_sampled`
+  per Y. Ambient spawn uses `WorldColumns::highest_solid_y`.
+
+Join `ChunkData` that omits light streams zeros them then
+`Chunk::recompute_direct_column_lighting`. Disk restore of a full
+`ChunkSaveData` is fail-closed.
+
+## Network
+
+Protocol v21: bincode over TCP, 4-byte big-endian length, 2 MiB cap.
+`Packet::encode_payload` / `encode_frame` build the wire body. Outbound
+queues hold `EncodedPacket` (`Arc<[u8]>` payload plus the logical `Packet`):
+metering, mailbox replace, and `ConnectionWriter::send_payload` share one
+encode. Broadcast fanout clones the `Arc` so N connections do not
+re-serialize. Authenticated sessions speak a single `PROTOCOL_VERSION`
+(handshake rejects others), so shared payload Arcs are never mixed across
+protocol versions. Older versions fail handshake. Malformed pre-auth frames
+close that connection only. Unknown or wrong-direction post-auth packets
+close that connection; there is no decode-then-drop leftover path.
+`protocol_version` is carried only on `Handshake`, `LoginSuccess`, and
+`ServerListPing*`; after handshake the connection holds the negotiated
+version and other packets omit the field.
+
+Server→client projection is one schema end-to-end for wire gameplay:
+`ServerRuntime` builds a wire `Packet` once inside
+`ProjectionEvent { dest, packet }` (`ProjectionDest::Session` /
+`Broadcast`). Embedded presentation drains `PresentationEvent`: either
+`Packet(ProjectionEvent)` (same shape as TCP) or
+`ChunkColumn { Arc<Chunk>, revision, … }` for the local session — never
+dense `ChunkData` streams or a second palette rebuild / full-column
+lighting pass. TCP listen/dedicated wraps wire events as
+`HostToServer::Project` only; `ChunkColumn` never leaves the process.
+`HostToServer` keeps only control variants
+(`DisconnectClient` / `DisconnectCatchupClient` / `Stop`). Egress classifies
+mailbox delivery (catch-up / pose / state / reliable) from the `Packet`
+variant — it is not a second payload enum. Embedded block deltas apply once
+from snapshot `WorldMutation` (including `raw_fluid` + revision gate);
+`BlockChange` packets are TCP/join only. Join-client inbound is the same
+`Packet` after one protocol-version check: `ClientToGame` is only
+`StatusUpdate` (local connection-progress text) or `Packet`; presentation
+`NetworkInbound` is that thin type, and `NetworkStaging` / handlers classify
+`Packet` variants directly (Plan 08).
+
+Player identity is `normalize_player_identity`: lowercase ASCII
+`[a-z0-9_-]`, 1–16 bytes, no Windows reserved stems. `online-mode=true`
+fails startup (credentials not implemented). Handshake never self-grants
+operator.
+
+`GameplayRequest` carries request id, client sequence, session, dimension,
+revision, and a typed operation. The bounded response cache makes retries
+idempotent. Live egress for sleep / container click / close is a
+`GameplayRequest`. `Container` uses typed `ContainerAction` (Open=`0`,
+Close=`1`); unknown discriminants fail decode. Live desktop send uses pose /
+chat / disconnect / `GameplayRequest` / respawn. Server→client `BlockChange`
+projection remains for TCP/join; embedded applies the same cells from
+snapshot `WorldMutation` only. Clients do not ACK
+chunks; the join-client inbound queue is 1024 events so one presentation
+tick can enqueue without ACK pacing. Deleting leftover inbound `Packet`
+variants shifts later discriminants; handshake is protocol v21.
+
+`NetworkServer` / `NetworkClient` run Tokio on a background thread with
+bounded/metered channels. Reliable gameplay/lifecycle output is never
+silently replaced; a client that cannot accept it is evicted. Rayon
+generate/mesh results carry dimension/generation/lifetime/revision and are
+discarded if stale.
+
+## Persistence
+
+Default paths are relative to cwd. Desktop worlds: `saves/`. Dedicated:
+configured `world_dir` (default `world/`).
+
+| Path | Contents |
+| --- | --- |
+| `settings.txt`, `controls.config` | Preferences and key bindings. |
+| `<world>/world.meta` | Discovery/creation metadata. |
+| `<world>/level.dat`, `player.dat`, `dimension.dat` | Level, local player, current dimension. |
+| `<world>/players/<name>.dat` | Named remote/dedicated players. |
+| `<world>/regions/r.*.*.bin` | Overworld compressed chunk payloads. |
+| `<world>/dimensions/{nether,end}/` | Per-dimension regions and `entities.dat`. |
+| `<world>/mutation_revisions.bin` | Latest dimension/chunk revisions. |
+| `server.properties` | Dedicated config; effective policy also lives in the world dir. |
+| `assets/`, `resourcepacks/` | Built-in pack plus optional directory/ZIP packs (`zip` crate; entries stored as `Arc<[u8]>`). |
+
+Writes are atomic. Chunk restore is fail-closed: corrupt/empty/oversized/
+dimension-inconsistent streams error; the column is never generated or
+saved over (`ServerWorld::failed_restore_chunks`). `ServerRuntime` is the
+sole `SaveManager` owner for loads and the sole writer of
+`mutation_revisions.bin` (via the save worker). Desktop `State` does not keep
+a second mutation index. Autosave and shutdown flush only `dirty_chunks`
+(plus eviction of unkept dirty columns), batched per region file so one
+region is rewritten once. Region write hits take the cache entry by move
+(`remove` → mutate → reinsert) and trust a write-generation stamp instead of
+re-statting with `fs::metadata`; a cold load of a truncated or corrupt region
+still fail-closes and leaves `.bin.bak` semantics unchanged. Tick enqueues
+`SavePayload`s (flattened chunk payloads, dirty entity dumps, sidecar groups);
+zlib/region bincode/atomic write run on the save thread; dirty bits clear only
+after ack. Sidecar batches share one `sync_all`. Players persist only when
+their per-session dirty bit is set; entities skip rewrite while their checksum
+epoch matches the last persisted watermark. Disk chunk streams use zlib level 1
+(`Compression::fast`); the wrapper is unchanged so older level-6 payloads
+still inflate. Historical save payloads still treat Y as `0..256` world Y
+and must not be reinterpreted as signed-Y. Live `ChunkData` projection
+sends uncompressed terrain streams to TCP/join clients instead of the disk
+`ChunkSaveData` envelope. Embedded local sessions receive
+`PresentationEvent::ChunkColumn(Arc<Chunk>)` and keep authority lighting.
+Desktop world paths go through `validated_world_path` (no symlink escape
+from `saves/`).
+
+## Code map
+
+| Area | Files |
+| --- | --- |
+| Desktop loop | `src/main.rs` (`mod accessibility` / `localization` / `advancements` / `weather`; `culling` facade), `src/app.rs`, `src/menu/` (widget screens + shared `GpuContext`), `src/state.rs`, `src/audio.rs` |
+| Presentation (desktop-only) | `src/presentation/` — `embedded_runtime.rs`, `network_event.rs`, `frame.rs`, `inventory_ui.rs`, `authority_projection.rs` are `#[path]` children of `state`; large `state` unit tests live under `presentation/tests/`. `visibility.rs` (section visibility BFS only; entity LOS worker removed) is loaded via `main.rs`. `gpu_frame_resources` / `presentation_click` are `mod` in `main.rs`; `microbench` is the same behind feature `microbench`. |
+| Authority | `src/authority/` (`tick.rs`, `portals.rs`, `dispatch/` (`block_action`, `container`, `workstation`, `combat`, `command`), `combat.rs`, `contract.rs`, `fishing.rs`, `interest.rs`, `mining.rs`, `transactions.rs`, `tests.rs`) |
+| Runtime | `src/server_runtime.rs` plus `events.rs`, `properties.rs`, `session_state.rs`, `ingress.rs`, `projection.rs`, `session_sync.rs`, `tests.rs`; `src/server_world/` (`columns`, `containers`, `mutation`, `tick`, `entities`, `tests`); `src/bin/icraft-server.rs` |
+| World | `src/world/` (`block/` types·state·table, `section.rs`, `chunk.rs`, `mesh/` halo·faces·greedy·section), `src/chunk_manager/` (`WorldColumns` / `PresentationChunks`), `src/dimension.rs`, `src/worldgen/`, `src/structure/` |
+| Gameplay | `src/player.rs`, `src/physics.rs`, `src/inventory/`, `src/block_entity.rs`, `src/redstone/` (`system`, `power`, `piston`), `src/fluid.rs`, `src/world_tick.rs`, `src/entity.rs`, `src/mob.rs`, `src/passive_mob.rs`, `src/boss/` (`dragon`, `wither`, `nether`), `src/village/` (`VillagerProfession` / `TradeOffer`; POI/raid/merchant-session managers are `cfg(test)` only), `src/fishing.rs` (wire stages + authority helpers; presentation `FishingManager` is `cfg(test)` only) |
+| Render | `src/chunk_schedule.rs`, `src/chunk_render.rs` (CPU mesh data; wgpu vertex layout lives next to desktop pipelines), `src/culling/` (`los` + `connectivity` in lib), `src/block_model.rs` (`emit_box` shared terrain box emitter; model paths derived from `BlockType` snake_case), desktop `src/mob_renderer.rs` + `src/mob_parts.rs` (table-driven `MobPart` + animator; dragon/wither/item specials), `src/hand_renderer.rs` (shares `UNIT_CUBOID_CORNERS`), `src/texture.rs` (`PACK_TILES` atlas definition with paint-on-miss), `src/shader.wgsl` |
+| Network | `src/network/` (`protocol/` decode·wire_types·gameplay·packet, `transport.rs`, `server.rs` + `server_tests.rs`, `client.rs` + `client_tests.rs`, `ingress.rs`, `egress.rs`; `loopback_test.rs` is `cfg(test)` only) |
+| Save / assets | `src/save/` (`format.rs` includes `AdvancementProgressData`, `region.rs`, `player.rs`, `index.rs`), `src/resources.rs` |
+| Tests | inline `#[cfg(test)]`, `tests/` (`tests/common/tcp_harness.rs`, `authority_harness.rs`) |

@@ -38,7 +38,7 @@ impl TerrainVertex {
         let reg_origin_x = (region_coord.0 * REGION_SIZE_CHUNKS * 16) as f32;
         let reg_origin_z = (region_coord.1 * REGION_SIZE_CHUNKS * 16) as f32;
         let rel_x = (position[0] - reg_origin_x).max(0.0);
-        let rel_y = position[1].max(0.0);
+        let rel_y = (position[1] - REGION_ORIGIN_Y).max(0.0);
         let rel_z = (position[2] - reg_origin_z).max(0.0);
 
         let px = (rel_x * 32.0).round() as u16;
@@ -80,7 +80,7 @@ impl TerrainVertex {
         let reg_origin_x = (region_coord.0 * REGION_SIZE_CHUNKS * 16) as f32;
         let reg_origin_z = (region_coord.1 * REGION_SIZE_CHUNKS * 16) as f32;
         let x = self.pos[0] as f32 / 32.0 + reg_origin_x;
-        let y = self.pos[1] as f32 / 32.0;
+        let y = self.pos[1] as f32 / 32.0 + REGION_ORIGIN_Y;
         let z = self.pos[2] as f32 / 32.0 + reg_origin_z;
         Vec3::new(x, y, z)
     }
@@ -88,7 +88,7 @@ impl TerrainVertex {
     pub fn local_position(&self) -> [f32; 3] {
         [
             self.pos[0] as f32 / 32.0,
-            self.pos[1] as f32 / 32.0,
+            self.pos[1] as f32 / 32.0 + REGION_ORIGIN_Y,
             self.pos[2] as f32 / 32.0,
         ]
     }
@@ -181,10 +181,6 @@ impl MeshBounds {
         }
     }
 
-    pub fn translated(self, offset: Vec3) -> Self {
-        Self::new(self.min + offset, self.max + offset)
-    }
-
     /// Squared distance to the closest point on this AABB.
     pub fn distance_squared_to_point(self, point: Vec3) -> f32 {
         let closest = point.clamp(self.min, self.max);
@@ -256,11 +252,6 @@ impl ChunkLodMeshData {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ChunkMeshBundle {
-    pub levels: [ChunkLodMeshData; 3],
-    pub section_connectivity: Vec<crate::culling::SectionConnectivity>,
-}
 
 /// CPU result for exactly one 16^3 section. `identity` is checked when a
 /// worker result is integrated; the three levels intentionally mirror the
@@ -271,6 +262,8 @@ pub struct SectionMeshBundle {
     pub levels: [ChunkLodMeshData; 3],
     pub bounds: Option<MeshBounds>,
     pub connectivity: crate::culling::SectionConnectivity,
+    /// Bitmask of LODs actually generated (`LodLevel::MASK_*`).
+    pub built_lods: u8,
 }
 
 impl SectionMeshBundle {
@@ -284,11 +277,6 @@ impl SectionMeshBundle {
     }
 }
 
-impl ChunkMeshBundle {
-    pub fn level(&self, lod: LodLevel) -> &ChunkLodMeshData {
-        &self.levels[lod as usize]
-    }
-}
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 struct Plane {
@@ -490,17 +478,6 @@ impl DrawPlan {
         });
     }
 
-    #[allow(dead_code)] // Convenience constructor used by tests; production uses build_into.
-    pub fn build(
-        candidates: impl IntoIterator<Item = DrawCandidate>,
-        frustum: &Frustum,
-        _camera_position: Vec3,
-    ) -> Self {
-        let mut plan = Self::default();
-        plan.build_into(candidates, frustum);
-        plan
-    }
-
     pub fn draw_call_count(&self) -> usize {
         self.opaque.len() + self.transparent.len()
     }
@@ -526,6 +503,21 @@ pub enum LodLevel {
     L1,
     /// Coarse terrain outline.
     L2,
+}
+
+impl LodLevel {
+    pub const MASK_L0: u8 = 1 << 0;
+    pub const MASK_L1: u8 = 1 << 1;
+    pub const MASK_L2: u8 = 1 << 2;
+    pub const MASK_ALL: u8 = Self::MASK_L0 | Self::MASK_L1 | Self::MASK_L2;
+
+    pub const fn mask(self) -> u8 {
+        1 << (self as u8)
+    }
+
+    pub const fn is_in(self, mask: u8) -> bool {
+        mask & self.mask() != 0
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -586,6 +578,8 @@ pub fn select_lod_for_bounds(
 
 /// Number of chunks along one axis in a single render region (8x8 chunks).
 pub const REGION_SIZE_CHUNKS: i32 = 8;
+/// Packed vertex Y is stored relative to Overworld min_y so Y < 0 survives u16 packing.
+pub const REGION_ORIGIN_Y: f32 = crate::dimension::WorldHeight::OVERWORLD.min_y() as f32;
 
 /// Maps a chunk coordinate (cx, cz) to its 8x8 render region coordinate.
 pub fn chunk_to_region_coord(cx: i32, cz: i32) -> (i32, i32) {
@@ -1175,7 +1169,8 @@ mod tests {
             candidate((2, 0), 200.0, 6, DrawLayer::Transparent),
         ];
 
-        let plan = DrawPlan::build(candidates, &frustum, Vec3::ZERO);
+        let mut plan = DrawPlan::default();
+        plan.build_into(candidates, &frustum);
         assert_eq!(plan.opaque.len(), 1);
         assert!(plan.transparent.is_empty());
         assert_eq!(plan.draw_call_count(), 1);
@@ -1191,7 +1186,8 @@ mod tests {
             candidate((-4, 4), 10.0, 6, DrawLayer::Opaque),
         ];
 
-        let plan = DrawPlan::build(candidates, &frustum, Vec3::ZERO);
+        let mut plan = DrawPlan::default();
+        plan.build_into(candidates, &frustum);
         let coords: Vec<_> = plan
             .opaque
             .iter()
@@ -1210,7 +1206,8 @@ mod tests {
             candidate((-4, 4), 10.0, 6, DrawLayer::Transparent),
         ];
 
-        let plan = DrawPlan::build(candidates, &frustum, Vec3::ZERO);
+        let mut plan = DrawPlan::default();
+        plan.build_into(candidates, &frustum);
         let coords: Vec<_> = plan
             .transparent
             .iter()
@@ -1227,7 +1224,8 @@ mod tests {
             candidate((0, 0), 10.0, 6, DrawLayer::Transparent),
             candidate((1, 0), 20.0, 18, DrawLayer::Opaque),
         ];
-        let plan = DrawPlan::build(candidates, &frustum, Vec3::ZERO);
+        let mut plan = DrawPlan::default();
+        plan.build_into(candidates, &frustum);
         assert_eq!(plan.visible_chunk_count(), 2);
         assert_eq!(plan.draw_call_count(), 3);
         assert_eq!(plan.submitted_triangle_count(), 12);
@@ -1566,5 +1564,16 @@ mod tests {
                 .expect("terrain AO mapping must preserve each discrete level");
             search_from += branch_offset + branch.len();
         }
+    }
+
+    #[test]
+    fn debug_negative_world_y_encoding() {
+        let vertex = TerrainVertex::new([4.0, -32.0, 6.0], [0.0; 2], [0.0; 2], 15.0, 1.0, (0, 0));
+        let decoded = vertex.world_position((0, 0));
+        assert!(
+            (decoded.y + 32.0).abs() < 0.05,
+            "negative world Y must round-trip, got {}",
+            decoded.y
+        );
     }
 }

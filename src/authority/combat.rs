@@ -8,7 +8,7 @@ use super::contract::{SessionGameplayState, SessionInventorySlot};
 use crate::enchantment::Enchantment;
 use crate::entity::EntityType;
 use crate::inventory::{Item, ItemStack};
-use crate::network::protocol::{ItemWire, PlayerId};
+use crate::network::protocol::{ItemWire, PlayerId, RejectReason};
 use crate::player::{calculate_damage_reduction, DamageSource};
 
 pub const MELEE_REACH_MILLI: u32 = 4_000;
@@ -67,7 +67,7 @@ pub struct DamageEvent {
 
 impl DamageEvent {
     /// Only crate-internal authority composition code can create an event.
-    pub(super) fn from_authority(input: AuthorityDamageInput) -> Result<Self, CombatReject> {
+    pub(super) fn from_authority(input: AuthorityDamageInput) -> Result<Self, RejectReason> {
         if input.event_id == 0
             || input.attacker == input.target
             || input.base_damage_milli == 0
@@ -76,7 +76,7 @@ impl DamageEvent {
             || input.fire_ticks > 1_200
             || input.looting_level > 3
         {
-            return Err(CombatReject::InvalidEvent);
+            return Err(RejectReason::InvalidState);
         }
         validate_look(input.attacker_look_milli)?;
         validate_look(input.target_look_milli)?;
@@ -164,41 +164,29 @@ pub struct CombatOutcome {
     pub death: Option<DeathOutcome>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CombatReject {
-    InvalidEvent,
-    IdentityMismatch,
-    ReplayedEvent,
-    Cooldown,
-    OutOfRange,
-    NoLineOfSight,
-    NotFacingTarget,
-    TargetDead,
-    TargetInvulnerable,
-    InvalidTargetState,
-}
+// Combat domain rejects collapse to RejectReason (Wave 10 Plan 10).
 
 /// Resolve damage against a player snapshot. All validation and computation
 /// happens on a clone; the original is replaced only after a complete success.
 pub fn resolve_player_hit(
     event: &DamageEvent,
     target: &mut PlayerCombatSnapshot,
-) -> Result<CombatOutcome, CombatReject> {
+) -> Result<CombatOutcome, RejectReason> {
     validate_common(
         event,
         CombatantId::Player(target.player_id),
         target.last_applied_event,
     )?;
     if target.gameplay.is_dead || target.gameplay.health_milli == 0 {
-        return Err(CombatReject::TargetDead);
+        return Err(RejectReason::InvalidState);
     }
     if target.gameplay.max_health_milli == 0
         || target.gameplay.health_milli > target.gameplay.max_health_milli
     {
-        return Err(CombatReject::InvalidTargetState);
+        return Err(RejectReason::InvalidState);
     }
     if target.gameplay.invulnerability_ticks > 0 {
-        return Err(CombatReject::TargetInvulnerable);
+        return Err(RejectReason::InvalidState);
     }
 
     let mut candidate = target.clone();
@@ -289,7 +277,7 @@ pub fn resolve_player_hit(
 pub fn resolve_entity_hit(
     event: &DamageEvent,
     target: &mut EntityCombatSnapshot,
-) -> Result<CombatOutcome, CombatReject> {
+) -> Result<CombatOutcome, RejectReason> {
     validate_common(
         event,
         CombatantId::Entity(target.entity_id),
@@ -298,10 +286,10 @@ pub fn resolve_entity_hit(
     if target.health_milli == 0
         || !(target.entity_type.is_living() || target.entity_type == EntityType::EndCrystal)
     {
-        return Err(CombatReject::TargetDead);
+        return Err(RejectReason::InvalidState);
     }
     if target.invulnerability_ticks > 0 {
-        return Err(CombatReject::TargetInvulnerable);
+        return Err(RejectReason::InvalidState);
     }
     validate_entity_defense(*target)?;
 
@@ -363,49 +351,49 @@ fn validate_common(
     event: &DamageEvent,
     expected_target: CombatantId,
     last_applied_event: Option<u128>,
-) -> Result<(), CombatReject> {
+) -> Result<(), RejectReason> {
     if event.target != expected_target {
-        return Err(CombatReject::IdentityMismatch);
+        return Err(RejectReason::InvalidState);
     }
     if last_applied_event == Some(event.event_id) {
-        return Err(CombatReject::ReplayedEvent);
+        return Err(RejectReason::Duplicate);
     }
     if !event.cooldown_ready {
-        return Err(CombatReject::Cooldown);
+        return Err(RejectReason::InvalidState);
     }
     let delta = position_delta(event.attacker_position_milli, event.target_position_milli);
     if squared_length(delta) > u128::from(MELEE_REACH_MILLI).pow(2) {
-        return Err(CombatReject::OutOfRange);
+        return Err(RejectReason::TooFar);
     }
     if !event.has_line_of_sight {
-        return Err(CombatReject::NoLineOfSight);
+        return Err(RejectReason::InvalidState);
     }
     let horizontal_distance_sq = i128::from(delta[0]).pow(2) + i128::from(delta[2]).pow(2);
     if horizontal_distance_sq > 1_000i128.pow(2)
         && horizontal_dot(event.attacker_look_milli, delta) <= 0
     {
-        return Err(CombatReject::NotFacingTarget);
+        return Err(RejectReason::InvalidState);
     }
     Ok(())
 }
 
-fn validate_entity_defense(target: EntityCombatSnapshot) -> Result<(), CombatReject> {
+fn validate_entity_defense(target: EntityCombatSnapshot) -> Result<(), RejectReason> {
     if target.armor_points_milli > 30_000
         || target.toughness_milli > 20_000
         || target.enchantment_protection_factor > 20
         || target.knockback_resistance_milli > 1_000
         || target.health_milli > target.max_health_milli
     {
-        return Err(CombatReject::InvalidTargetState);
+        return Err(RejectReason::InvalidState);
     }
     Ok(())
 }
 
-fn player_defense(gameplay: &SessionGameplayState) -> Result<DefenseProfile, CombatReject> {
+fn player_defense(gameplay: &SessionGameplayState) -> Result<DefenseProfile, RejectReason> {
     let mut defense = DefenseProfile::default();
     for slot in gameplay.inventory[ARMOR_SLOT_RANGE].iter().flatten() {
         let Some(stack) = slot.item.to_stack() else {
-            return Err(CombatReject::InvalidTargetState);
+            return Err(RejectReason::InvalidState);
         };
         let Some(armor) = stack.item.armor_properties() else {
             continue;
@@ -564,12 +552,12 @@ fn knockback_delta(event: &DamageEvent, resistance_milli: u16) -> [i32; 3] {
     ]
 }
 
-fn validate_look(look: [i16; 3]) -> Result<(), CombatReject> {
+fn validate_look(look: [i16; 3]) -> Result<(), RejectReason> {
     let x = i64::from(look[0]);
     let y = i64::from(look[1]);
     let z = i64::from(look[2]);
     if !(250_000..=1_210_000).contains(&(x * x + y * y + z * z)) {
-        return Err(CombatReject::InvalidEvent);
+        return Err(RejectReason::InvalidState);
     }
     Ok(())
 }
@@ -691,7 +679,7 @@ mod tests {
         input.cooldown_ready = false;
         assert_eq!(
             resolve_player_hit(&input, &mut target),
-            Err(CombatReject::Cooldown)
+            Err(RejectReason::InvalidState)
         );
         assert_eq!(target, before);
     }
@@ -704,14 +692,14 @@ mod tests {
         too_far.target_position_milli[0] = 4_001;
         assert_eq!(
             resolve_entity_hit(&too_far, &mut target),
-            Err(CombatReject::OutOfRange)
+            Err(RejectReason::TooFar)
         );
         assert_eq!(target, before);
         let mut blocked = event(3, CombatantId::Entity(9));
         blocked.has_line_of_sight = false;
         assert_eq!(
             resolve_entity_hit(&blocked, &mut target),
-            Err(CombatReject::NoLineOfSight)
+            Err(RejectReason::InvalidState)
         );
         assert_eq!(target, before);
     }
@@ -781,7 +769,7 @@ mod tests {
         let player_before = player.clone();
         assert_eq!(
             resolve_player_hit(&event(7, CombatantId::Player(2)), &mut player),
-            Err(CombatReject::TargetInvulnerable)
+            Err(RejectReason::InvalidState)
         );
         assert_eq!(player, player_before);
 
@@ -790,7 +778,7 @@ mod tests {
         let entity_before = entity;
         assert_eq!(
             resolve_entity_hit(&event(8, CombatantId::Entity(9)), &mut entity),
-            Err(CombatReject::TargetInvulnerable)
+            Err(RejectReason::InvalidState)
         );
         assert_eq!(entity, entity_before);
     }
@@ -807,7 +795,7 @@ mod tests {
         let settled = target;
         assert_eq!(
             resolve_entity_hit(&hit, &mut target),
-            Err(CombatReject::ReplayedEvent)
+            Err(RejectReason::Duplicate)
         );
         assert_eq!(target, settled);
     }

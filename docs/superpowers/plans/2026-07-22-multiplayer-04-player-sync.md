@@ -1,6 +1,6 @@
 # Multiplayer Sub-task 4: Player State Synchronization
 
-> **Parent task:** [plans/p3/25_multiplayer.md](../../../plans/p3/25_multiplayer.md) (任務 25 - 多人遊戲)
+> **Parent task:** [plans/01_basic_gameplay/p3/25_multiplayer.md](../../../plans/01_basic_gameplay/p3/25_multiplayer.md) (任務 25 - 多人遊戲)
 > **Sub-task:** 4 of 6 - keeps every connected player's avatar position/action in sync.
 > **Depends on:** Sub-task 1 (Protocol), Sub-task 2 (Server), Sub-task 3 (Client Bridge). **Blocks:** Sub-task 6 (rendering consumes this).
 >

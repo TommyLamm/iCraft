@@ -1,28 +1,44 @@
-use crate::authority::contract::AuthorityTopology;
 use crate::camera::{Camera, CameraUniform};
 use crate::chunk_manager::{
     mark_block_mesh_dependencies, mark_section_mesh_dependencies, surrounding_chunk_coords,
-    ChunkManager,
+    PresentationChunks,
 };
 use crate::chunk_render::{
     select_lod_for_bounds, DrawCandidate, DrawLayer, Frustum, LodLevel, LodThresholds, MeshBounds,
     TerrainVertex,
-};
+}; // LodLevel / MeshBounds used by #[cfg(test)] helpers and frame.rs via super
 use crate::chunk_schedule::DependencyReason;
-use crate::crafting::RecipeManager;
+use crate::game_rules::Difficulty;
 use crate::interaction::{raycast, RaycastTargetPolicy};
 use crate::inventory::{
     CreativeTab, GameMode, Inventory, Item, ItemStack, ToolType, CREATIVE_COLUMNS, CREATIVE_ROWS,
     CREATIVE_VISIBLE_SLOTS,
 };
-use crate::menu::{Difficulty, GameSettings, MultiplayerRole, WorldLaunch};
-use crate::physics::{
-    block_placement_decision, player_aabb_at, BlockPlacementDecision, PlayerPhysics, AABB,
-    PLAYER_STANDING_HEIGHT,
-};
+use crate::menu::{GameSettings, MenuRect, WorldLaunch};
+use crate::physics::{player_aabb_at, BlockPlacementDecision, PlayerPhysics};
 use crate::player::{DamageSource, PlayerState};
+use crate::presentation::gpu_terrain::{
+    chunk_mesh_is_registered_with_region, empty_region_rebuild_worthwhile,
+    region_allocation_handle_is_live, should_decrement_region_active_chunks, UploadMetrics,
+};
+use crate::presentation::interpolation::{
+    interpolate_snapshot, placement_decision_for_players, sequence_is_newer,
+    validated_remote_position, PlayerSnapshot, RemotePlayerState, ReplicatedEntityState,
+    SnapshotPushResult, ENTITY_INTERPOLATION_DELAY, PLAYER_CORRECTION_SNAP_DISTANCE,
+    REMOTE_INTERPOLATION_DELAY,
+};
+use crate::presentation::network_inbound::{NetworkInbound, NetworkStaging, TrackedNetworkSender};
+use crate::presentation_click::{
+    collect_inventory_ui_hits, resolve_world_click, InventoryHit, InventoryHitProbe, WorldClickHit,
+    WorldClickIntent,
+};
+use crate::presentation_inventory_policy::MultiplayerRole;
+use crate::presentation_inventory_policy::{
+    PresentationInventoryAction, PresentationInventoryTarget, PresentationTopology,
+};
+use crate::recipes::RecipeManager;
 use crate::world::{
-    Biome, BlockType, Chunk, SectionIdentity, SectionKey, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH,
+    Biome, BlockType, Chunk, SectionIdentity, SectionKey, CHUNK_DEPTH, CHUNK_WIDTH,
 };
 use glam::{Mat4, Vec2, Vec3};
 use std::sync::Arc;
@@ -30,33 +46,76 @@ use std::time::{Duration, Instant};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
+pub use crate::authority::mining::calculate_block_break_rewards;
+pub use crate::presentation::gpu_terrain::{
+    ChunkMesh, GpuMeshLayer, GpuMeshLevel, GpuSectionMesh, RenderRegion,
+};
+pub use crate::presentation::network_inbound::NetworkHandle;
+
+#[path = "presentation/embedded_runtime.rs"]
+mod embedded_runtime;
+#[path = "presentation/frame.rs"]
+mod frame;
+#[path = "presentation/network_event.rs"]
+mod network_event;
+
+#[path = "presentation/inventory_ui.rs"]
+mod inventory_ui;
+
+#[path = "presentation/authority_projection.rs"]
+mod authority_projection;
+
+
+
+#[cfg(test)]
+#[path = "presentation/tests/remote_sync_tests.rs"]
+mod remote_sync_tests;
+#[cfg(test)]
+#[path = "presentation/tests/camera_input_tests.rs"]
+mod camera_input_tests;
+#[cfg(test)]
+#[path = "presentation/tests/creative_flight_input_tests.rs"]
+mod creative_flight_input_tests;
+#[cfg(test)]
+#[path = "presentation/tests/sprint_policy_tests.rs"]
+mod sprint_policy_tests;
+#[cfg(test)]
+#[path = "presentation/tests/authority_policy_tests.rs"]
+mod authority_policy_tests;
+#[cfg(test)]
+#[path = "presentation/tests/gpu_timestamp_state_tests.rs"]
+mod gpu_timestamp_state_tests;
+#[cfg(test)]
+#[path = "presentation/tests/camera_perspective_tests.rs"]
+mod camera_perspective_tests;
+#[cfg(test)]
+#[path = "presentation/tests/render_region_lifecycle_tests.rs"]
+mod render_region_lifecycle_tests;
+#[cfg(test)]
+#[path = "presentation/tests/debug_tests.rs"]
+mod debug_tests;
+#[cfg(test)]
+#[path = "presentation/tests/reach_tests.rs"]
+mod reach_tests;
+#[cfg(test)]
+#[path = "presentation/tests/authority_projection_tests.rs"]
+mod authority_projection_tests;
+
+
+use embedded_runtime::EmbeddedRuntimeBridge;
+
 const UI_VERTEX_CAPACITY: usize = 4096;
 const UI_LINE_VERTEX_CAPACITY: usize = 16384;
+/// One packed CPU→GPU transfer per frame for mob/particle/UI ring uploads.
+const FRAME_UPLOAD_STAGING_BYTES: wgpu::BufferAddress = 8 * 1024 * 1024;
 const DEBUG_STATS_INTERVAL: f32 = 0.5;
 const RAIN_LOOP_ID: u64 = u64::MAX - 1;
 const CHAT_HISTORY_CAPACITY: usize = 50;
 const CHAT_VISIBLE_LINES: usize = 8;
 const CHAT_INPUT_CAPACITY: usize = 256;
-const REMOTE_SNAPSHOT_CAPACITY: usize = 32;
-const REMOTE_INTERPOLATION_DELAY: f64 = 0.1;
-const ENTITY_SNAPSHOT_CAPACITY: usize = 8;
-const ENTITY_INTERPOLATION_DELAY: f64 = 0.1;
-const ENTITY_SNAP_DISTANCE: f32 = 6.0;
-const PLAYER_CORRECTION_SNAP_DISTANCE: f32 = 4.0;
-const REMOTE_MAX_EXTRAPOLATION: f64 = 0.1;
-const REMOTE_MAX_EXTRAPOLATION_SPEED: f32 = 40.0;
-const REMOTE_AUTHORITY_MAX_SPEED: f32 = 12.0;
-const REMOTE_AUTHORITY_POSITION_TOLERANCE: f32 = 1.0;
-const REMOTE_MAX_ANGULAR_SPEED: f32 = std::f32::consts::TAU * 2.0;
-const REMOTE_TELEPORT_DISTANCE: f32 = 8.0;
-const REMOTE_TELEPORT_GAP: f64 = 0.5;
+
 const CREATIVE_FLIGHT_DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(300);
 const MELEE_REACH: f32 = 4.0;
-const BLOCK_REACH: f32 = 5.0;
-const BLOCK_REACH_TOLERANCE: f32 = 1.5;
-const MAX_CATCHUP_SUBMITS_PER_FRAME: usize = 2;
-const CATCHUP_ACK_TIMEOUT: Duration = Duration::from_secs(2);
-const MAX_CATCHUP_RETRIES: u8 = 3;
 const NETWORK_MAX_EVENTS_PER_PASS: usize = 256;
 const NETWORK_MAX_BYTES_PER_PASS: usize = 1_048_576;
 const NETWORK_MAX_TIME_PER_PASS: Duration = Duration::from_millis(2);
@@ -68,21 +127,6 @@ const PAUSE_WEATHER_VOLUME_BOUNDS: [f32; 4] = [-0.3, 0.3, -0.46, -0.36];
 const PAUSE_QUIT_BOUNDS: [f32; 4] = [-0.3, 0.3, -0.60, -0.50];
 pub const SIM_TICK_TIME: f32 = 0.05;
 pub const MAX_CATCHUP_TICKS: usize = 4;
-
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct UploadMetrics {
-    elapsed_ns: u64,
-    bytes: u64,
-}
-
-impl UploadMetrics {
-    fn add(self, other: Self) -> Self {
-        Self {
-            elapsed_ns: self.elapsed_ns.saturating_add(other.elapsed_ns),
-            bytes: self.bytes.saturating_add(other.bytes),
-        }
-    }
-}
 
 fn should_advance_simulation(
     role: &MultiplayerRole,
@@ -99,62 +143,8 @@ fn should_advance_simulation(
         }
 }
 
-fn validated_remote_position(
-    latest: Option<&PlayerSnapshot>,
-    candidate: Vec3,
-    sender_time_millis: u64,
-) -> Vec3 {
-    let Some(latest) = latest else {
-        return candidate;
-    };
-    if sender_time_millis <= latest.sender_time_millis {
-        return latest.position;
-    }
-    let elapsed =
-        ((sender_time_millis - latest.sender_time_millis) as f32 / 1_000.0).clamp(0.0, 0.5);
-    let max_distance = REMOTE_AUTHORITY_MAX_SPEED * elapsed + REMOTE_AUTHORITY_POSITION_TOLERANCE;
-    let delta = candidate - latest.position;
-    if delta.length_squared() <= max_distance * max_distance {
-        candidate
-    } else {
-        latest.position + delta.normalize_or_zero() * max_distance
-    }
-}
-
 fn point_in_bounds(x: f32, y: f32, bounds: [f32; 4]) -> bool {
     x >= bounds[0] && x <= bounds[1] && y >= bounds[2] && y <= bounds[3]
-}
-
-fn block_within_reach(player_pos: Vec3, block_pos: (i32, i32, i32)) -> bool {
-    let block_center = Vec3::new(
-        block_pos.0 as f32 + 0.5,
-        block_pos.1 as f32 + 0.5,
-        block_pos.2 as f32 + 0.5,
-    );
-    let limit = BLOCK_REACH + BLOCK_REACH_TOLERANCE;
-    (player_pos - block_center).length() <= limit
-}
-
-fn validate_remote_block_request(
-    remote_players: &std::collections::HashMap<
-        crate::network::protocol::PlayerId,
-        RemotePlayerState,
-    >,
-    requester: crate::network::protocol::PlayerId,
-    block_pos: (i32, i32, i32),
-) -> bool {
-    let Some(remote) = remote_players.get(&requester) else {
-        return false;
-    };
-    let Some(snapshot) = remote.snapshots.back() else {
-        return false;
-    };
-    let player_center = snapshot.position + Vec3::new(0.0, PLAYER_STANDING_HEIGHT * 0.5, 0.0);
-    block_within_reach(player_center, block_pos)
-}
-
-fn terrain_translucent_cull_mode() -> Option<wgpu::Face> {
-    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,233 +227,19 @@ fn closest_melee_target(
         .map(|(id, _)| id)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MeleeImpact {
-    Invulnerable,
-    Damaged { killed: bool },
-}
-
-fn apply_melee_impact(
-    entity: &mut crate::entity::Entity,
-    direction: Vec3,
-    damage: f32,
-    knockback: f32,
-    fire_level: u8,
-) -> MeleeImpact {
-    if entity.invulnerable_time > 0.0 {
-        return MeleeImpact::Invulnerable;
-    }
-
-    if entity.entity_type == crate::entity::EntityType::EndCrystal {
-        entity.health = 0.0;
-    } else {
-        entity.health -= damage;
-    }
-    entity.invulnerable_time = 0.4;
-    entity.velocity += direction.normalize_or_zero() * knockback + Vec3::new(0.0, 3.0, 0.0);
-    if fire_level > 0 {
-        entity.fire_aspect_timer = entity.fire_aspect_timer.max(fire_level as f32 * 4.0);
-    }
-
-    MeleeImpact::Damaged {
-        killed: entity.health <= 0.0,
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct PlayerKill {
-    entity_type: crate::entity::EntityType,
-    position: Vec3,
-    burning: bool,
-    has_wool: bool,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct PlayerKillRewards {
-    items: Vec<Item>,
-    experience: u32,
-}
-
-fn claim_standard_player_kill(entity: &mut crate::entity::Entity) -> Option<PlayerKill> {
-    if entity.health > 0.0
-        || entity.player_kill_rewarded
-        || !entity.entity_type.uses_standard_player_kill_rewards()
-    {
-        return None;
-    }
-
-    entity.player_kill_rewarded = true;
-    Some(PlayerKill {
-        entity_type: entity.entity_type,
-        position: entity.position,
-        burning: entity.burn_timer > 0.0 || entity.fire_aspect_timer > 0.0,
-        has_wool: entity.has_wool,
-    })
-}
-
-fn apply_player_projectile_damage(
-    entity: &mut crate::entity::Entity,
-    damage: f32,
-) -> Option<PlayerKill> {
-    if !entity.is_player_projectile_target() || damage <= 0.0 {
-        return None;
-    }
-
-    if entity.entity_type == crate::entity::EntityType::EndCrystal {
-        entity.health = 0.0;
-    } else {
-        entity.health -= damage;
-    }
-    claim_standard_player_kill(entity)
-}
-
-fn apply_player_splash_effect(
-    entity: &mut crate::entity::Entity,
-    potion: crate::brewing::PotionData,
-) -> Option<PlayerKill> {
-    if !entity.is_local_living_target() {
-        return None;
-    }
-
-    match potion.kind {
-        crate::brewing::PotionKind::Healing | crate::brewing::PotionKind::Regeneration => {
-            entity.health = (entity.health + 4.0 * potion.level as f32).min(entity.max_health);
-        }
-        crate::brewing::PotionKind::Poison => {
-            entity.health -= 2.0 * potion.level as f32;
-        }
-        crate::brewing::PotionKind::Slowness => entity.velocity *= 0.4,
-        _ => {}
-    }
-
-    claim_standard_player_kill(entity)
-}
-
-fn standard_player_kill_rewards(kill: PlayerKill, looting: u8) -> PlayerKillRewards {
-    let mut items = Vec::new();
-    for _ in 0..=(looting / 2) {
-        match kill.entity_type {
-            crate::entity::EntityType::Zombie => items.push(Item::RottenFlesh),
-            crate::entity::EntityType::Skeleton => {
-                items.push(Item::Bone);
-                items.push(Item::Arrow);
-                let mut rng_seed = (kill.position.x as u32)
-                    .wrapping_mul(31)
-                    .wrapping_add(kill.position.z as u32);
-                rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
-                if ((rng_seed / 65536) % 32768) % 10 == 0 {
-                    items.push(Item::Bow);
-                }
-            }
-            crate::entity::EntityType::Creeper => items.push(Item::Gunpowder),
-            crate::entity::EntityType::Pig => items.push(if kill.burning {
-                Item::CookedPorkchop
-            } else {
-                Item::RawPorkchop
-            }),
-            crate::entity::EntityType::Cow => {
-                items.push(Item::RawBeef);
-                if (kill.position.x as u32).wrapping_mul(31) % 2 == 0 {
-                    items.push(Item::Leather);
-                }
-            }
-            crate::entity::EntityType::Sheep => {
-                items.push(Item::RawMutton);
-                if kill.has_wool {
-                    items.push(Item::Wool);
-                }
-            }
-            crate::entity::EntityType::Chicken => {
-                items.push(Item::RawChicken);
-                items.push(Item::Feather);
-            }
-            _ => {}
-        }
-    }
-
-    let experience = match kill.entity_type {
-        crate::entity::EntityType::Zombie
-        | crate::entity::EntityType::Skeleton
-        | crate::entity::EntityType::Creeper => 5,
-        _ => 2,
-    };
-    PlayerKillRewards { items, experience }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GeneratedItemDestination {
-    Inventory,
-    Dropped,
-    IgnoredAir,
-}
-
-fn spawn_dropped_item_entity(
-    entity_manager: &mut crate::entity::EntityManager,
-    item: Item,
-    position: Vec3,
-    random_seed: u32,
-) -> bool {
-    if item == Item::Air {
-        return false;
-    }
-
-    let id = entity_manager.spawn(crate::entity::EntityType::DroppedItem, position);
-    let Some(entity) = entity_manager.entities.last_mut() else {
-        return false;
-    };
-    entity.dropped_item = Some(item);
-
-    let mut rng = random_seed.wrapping_add((id.wrapping_mul(2_654_435_761)) as u32);
-    rng = rng.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-    let vx = ((rng / 65_536) as f32 / 32_768.0 - 0.5) * 1.5;
-    rng = rng.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-    let vz = ((rng / 65_536) as f32 / 32_768.0 - 0.5) * 1.5;
-    rng = rng.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-    let vy = 2.0 + ((rng / 65_536) as f32 / 32_768.0);
-    entity.velocity = Vec3::new(vx, vy, vz);
-    entity.pickup_cooldown = 0.5;
-    true
-}
-
-fn store_or_drop_generated_item(
-    inventory: &mut Inventory,
-    entity_manager: &mut crate::entity::EntityManager,
-    item: Item,
-    position: Vec3,
-    random_seed: u32,
-) -> GeneratedItemDestination {
-    if item == Item::Air {
-        return GeneratedItemDestination::IgnoredAir;
-    }
-    if inventory.add_item(item) {
-        return GeneratedItemDestination::Inventory;
-    }
-
-    let spawned = spawn_dropped_item_entity(entity_manager, item, position, random_seed);
-    debug_assert!(spawned);
-    GeneratedItemDestination::Dropped
-}
-
-// Creating an entire render distance while handling a menu click blocks the
-// window event loop and can allocate hundreds of chunk meshes at once.  Start
-// with a safe area around the player; `update_chunks` streams the rest in over
-// subsequent frames.
-const INITIAL_WORLD_CHUNK_RADIUS: i32 = 1;
-
-fn initial_chunk_radius(render_distance: i32) -> i32 {
-    render_distance.clamp(0, INITIAL_WORLD_CHUNK_RADIUS)
-}
-
-/// Apply a network-visible block value to CPU world state and return every
-/// chunk whose mesh/light data depends on it. Redstone and gameplay side
-/// effects remain the caller's responsibility.
+/// Apply a network-visible block value to CPU presentation state and return
+/// every chunk whose mesh/light data depends on it. Writes the cell payload
+/// directly — never `PresentationChunks::set_block`, which would enqueue fluids and
+/// re-run authority side effects on the GPU thread. Local lighting runs only
+/// when opacity or light emission changes.
 fn apply_synced_block_change(
-    chunk_manager: &mut ChunkManager,
+    chunk_manager: &mut PresentationChunks,
     x: i32,
     y: i32,
     z: i32,
     block: BlockType,
     state: u8,
+    raw_fluid: u8,
 ) -> Option<std::collections::HashSet<(i32, i32)>> {
     let ((cx, cz), _) = chunk_manager.world_to_local(x, y, z)?;
     if !chunk_manager.chunks.contains_key(&(cx, cz)) {
@@ -471,17 +247,19 @@ fn apply_synced_block_change(
     }
     let previous = chunk_manager.get_block(x, y, z);
     let previous_state = chunk_manager.get_block_state(x, y, z);
-    if previous == block && previous_state == state {
+    let previous_raw_fluid = chunk_manager.get_fluid_raw(x, y, z);
+    if previous == block && previous_state == state && previous_raw_fluid == raw_fluid {
         return None;
     }
 
-    chunk_manager.set_block(x, y, z, block);
-    chunk_manager.set_block_state(x, y, z, state);
     let old_properties = previous.properties();
     let new_properties = block.properties();
+    if !chunk_manager.apply_presentation_cell(x, y, z, block, state, raw_fluid) {
+        return None;
+    }
     let mut dirty_chunks = std::collections::HashSet::new();
-    if old_properties.is_solid != new_properties.is_solid {
-        if new_properties.is_solid {
+    if old_properties.is_opaque() != new_properties.is_opaque() {
+        if new_properties.is_opaque() {
             crate::lighting::update_sky_light_after_placed(
                 chunk_manager,
                 x,
@@ -523,1276 +301,11 @@ fn apply_synced_block_change(
     Some(dirty_chunks)
 }
 
-#[cfg(test)]
-mod remote_sync_tests {
-    use super::*;
-
-    #[test]
-    fn interpolation_midpoint_and_clamps() {
-        let prev = PlayerSnapshot {
-            position: Vec3::ZERO,
-            yaw: 3.0,
-            pitch: 0.0,
-            time: 1.0,
-            sequence: 1,
-            sender_time_millis: 1000,
-        };
-        let latest = PlayerSnapshot {
-            position: Vec3::new(10.0, 2.0, -4.0),
-            yaw: -3.0,
-            pitch: 1.0,
-            time: 1.05,
-            sequence: 2,
-            sender_time_millis: 1050,
-        };
-        let mid = interpolate_snapshot(prev, latest, 1.025);
-        assert!((mid.position.x - 5.0).abs() < 1e-5);
-        assert!((mid.position.y - 1.0).abs() < 1e-5);
-        assert!((mid.position.z + 2.0).abs() < 1e-5);
-        let before = interpolate_snapshot(prev, latest, 0.0);
-        let after = interpolate_snapshot(prev, latest, 2.0);
-        assert_eq!(before.position, prev.position);
-        assert_eq!(after.position, latest.position);
-        assert!(
-            mid.yaw.abs() > 3.0,
-            "yaw should interpolate across the short wrap-around arc"
-        );
-    }
-
-    #[test]
-    fn sequence_order_handles_duplicates_old_packets_and_wraparound() {
-        assert!(sequence_is_newer(2, 1));
-        assert!(!sequence_is_newer(1, 1));
-        assert!(!sequence_is_newer(1, 2));
-        assert!(sequence_is_newer(0, u32::MAX));
-        assert!(!sequence_is_newer(u32::MAX, 0));
-    }
-
-    #[test]
-    fn container_revision_order_rejects_duplicates_and_accepts_wraparound() {
-        assert!(container_revision_is_newer(4, 5));
-        assert!(!container_revision_is_newer(5, 5));
-        assert!(!container_revision_is_newer(5, 4));
-        assert!(container_revision_is_newer(u64::MAX, 0));
-        assert!(!container_revision_is_newer(0, u64::MAX));
-    }
-
-    #[test]
-    fn network_burst_budget_leaves_persistent_backlog() {
-        let mut staging = NetworkStaging::default();
-        for _ in 0..(NETWORK_MAX_EVENTS_PER_PASS + 17) {
-            staging.stage(NetworkInbound::StatusUpdate("burst".into()));
-        }
-        for _ in 0..NETWORK_MAX_EVENTS_PER_PASS {
-            assert!(staging.pop_next_if_fits(usize::MAX).is_some());
-        }
-        assert_eq!(staging.reliable_len(), 17);
-    }
-
-    #[test]
-    fn reliable_events_remain_strict_fifo_until_eventual_delivery() {
-        let mut staging = NetworkStaging::default();
-        for event in [
-            NetworkInbound::StatusUpdate("one".into()),
-            NetworkInbound::StatusUpdate("two".into()),
-            NetworkInbound::StatusUpdate("three".into()),
-        ] {
-            staging.stage(event);
-        }
-        let first_bytes = staging.reliable.front().unwrap().estimated_bytes();
-        assert!(staging
-            .pop_next_if_fits(first_bytes.saturating_sub(1))
-            .is_none());
-        assert_eq!(staging.reliable_len(), 3);
-
-        let mut delivered = Vec::new();
-        while let Some((event, _)) = staging.pop_next_if_fits(usize::MAX) {
-            if let NetworkInbound::StatusUpdate(message) = event {
-                delivered.push(message);
-            }
-        }
-        assert_eq!(delivered, ["one", "two", "three"]);
-    }
-
-    #[test]
-    fn latest_wins_state_is_sequence_aware_per_key() {
-        let mut staging = NetworkStaging::default();
-        for (id, sequence, x) in [(7_u64, 2_u32, 2.0_f32), (7, 1, 1.0), (8, 4, 4.0)] {
-            staging.stage(NetworkInbound::PlayerPosition {
-                id,
-                sequence,
-                sender_time_millis: sequence as u64,
-                x,
-                y: 0.0,
-                z: 0.0,
-                yaw: 0.0,
-                pitch: 0.0,
-            });
-        }
-        for sequence in [9, 8, 10] {
-            staging.stage(NetworkInbound::PlayerHealth {
-                sequence,
-                player_id: 3,
-                health: sequence as f32,
-                max_health: 20.0,
-                hunger: 19.0,
-                saturation: 4.0,
-                oxygen: 20.0,
-                is_dead: false,
-                death_reason: 0,
-            });
-            staging.stage(NetworkInbound::PlayerEffect {
-                sequence,
-                player_id: 3,
-                effects: Vec::new(),
-            });
-        }
-        for ticks in [40, 30, 50] {
-            staging.stage(NetworkInbound::TimeSync {
-                ticks,
-                weather: 0,
-                weather_remaining_ticks: 0.0,
-            });
-        }
-        for sequence in [4, 3, 5] {
-            staging.stage(NetworkInbound::EntityState {
-                dimension: 0,
-                sequence,
-                state: crate::network::protocol::EntityStateWire {
-                    entity_id: 99,
-                    entity_type: crate::entity::EntityType::Zombie.to_wire(),
-                    position: [sequence as f32, 0.0, 0.0],
-                    velocity: [0.0; 3],
-                    yaw: 0.0,
-                    pitch: 0.0,
-                    health: 20.0,
-                    animation_state: 0,
-                    item: None,
-                },
-            });
-        }
-
-        assert_eq!(staging.latest_positions.len(), 2);
-        assert!(matches!(
-            staging.latest_positions.get(&7),
-            Some(NetworkInbound::PlayerPosition { sequence: 2, .. })
-        ));
-        assert!(matches!(
-            staging.latest_health.get(&3),
-            Some(NetworkInbound::PlayerHealth { sequence: 10, .. })
-        ));
-        assert!(matches!(
-            staging.latest_effects.get(&3),
-            Some(NetworkInbound::PlayerEffect { sequence: 10, .. })
-        ));
-        assert!(matches!(
-            staging.latest_entities.get(&(0, 99)),
-            Some(NetworkInbound::EntityState { sequence: 5, .. })
-        ));
-        assert!(matches!(
-            staging.latest_time_sync,
-            Some(NetworkInbound::TimeSync { ticks: 50, .. })
-        ));
-    }
-
-    #[test]
-    fn network_event_and_byte_caps_are_explicit_and_measurable() {
-        let event = NetworkInbound::StatusUpdate("bounded".into());
-        assert!(event.estimated_bytes() > 0);
-        assert!(NETWORK_MAX_EVENTS_PER_PASS <= 256);
-        assert!(NETWORK_MAX_BYTES_PER_PASS >= event.estimated_bytes());
-        assert!(NETWORK_MAX_TIME_PER_PASS > Duration::ZERO);
-        let small = NetworkInbound::StatusUpdate("x".into()).estimated_bytes();
-        let large = NetworkInbound::StatusUpdate("x".repeat(4096)).estimated_bytes();
-        assert!(large >= small + 4095);
-    }
-
-    #[test]
-    fn remote_block_entity_delta_applies_and_respects_monotonic_revisions() {
-        use crate::block_entity::{BlockEntity, ChestBlockEntity};
-        use crate::world::{BlockType, Chunk};
-
-        let mut chunk = Chunk::new(0, 0);
-        chunk.set_block_local(4, 10, 4, BlockType::Chest);
-
-        let chest_stub = BlockEntity::Chest(ChestBlockEntity {
-            inventory: crate::inventory::ContainerInventory::new(),
-            custom_name: Some("Host Chest".to_string()),
-            loot_table: None,
-            loot_seed: None,
-            revision: 0,
-        });
-
-        // Insert at revision 5
-        let req1 = crate::network::protocol::Packet::BlockEntityDelta {
-            protocol_version: crate::network::protocol::PROTOCOL_VERSION,
-            dimension: 0,
-            revision: 5,
-            x: 4,
-            y: 10,
-            z: 4,
-            entity: Some(chest_stub.clone()),
-        };
-
-        // Out of order/stale packet at revision 3
-        let req_stale = crate::network::protocol::Packet::BlockEntityDelta {
-            protocol_version: crate::network::protocol::PROTOCOL_VERSION,
-            dimension: 0,
-            revision: 3,
-            x: 4,
-            y: 10,
-            z: 4,
-            entity: None,
-        };
-
-        let mut client_chunk_revisions = std::collections::HashMap::new();
-
-        // Apply revision 5
-        if let crate::network::protocol::Packet::BlockEntityDelta {
-            revision,
-            x,
-            y,
-            z,
-            entity,
-            ..
-        } = req1
-        {
-            let key = (crate::dimension::Dimension::Overworld, 0, 0);
-            if revision > *client_chunk_revisions.get(&key).unwrap_or(&0) {
-                client_chunk_revisions.insert(key, revision);
-                if let Some(ent) = entity {
-                    chunk
-                        .insert_block_entity(x as u8, y as i16, z as u8, ent)
-                        .unwrap();
-                }
-            }
-        }
-        assert_eq!(chunk.get_block_entity(4, 10, 4), Some(&chest_stub));
-
-        // Attempt revision 3 (should be ignored due to monotonic revision)
-        if let crate::network::protocol::Packet::BlockEntityDelta {
-            revision,
-            x,
-            y,
-            z,
-            entity,
-            ..
-        } = req_stale
-        {
-            let key = (crate::dimension::Dimension::Overworld, 0, 0);
-            if revision > *client_chunk_revisions.get(&key).unwrap_or(&0) {
-                client_chunk_revisions.insert(key, revision);
-                if let Some(ent) = entity {
-                    chunk
-                        .insert_block_entity(x as u8, y as i16, z as u8, ent)
-                        .unwrap();
-                } else {
-                    chunk.remove_block_entity(x as u8, y as i16, z as u8);
-                }
-            }
-        }
-        // Chest entity should still remain because revision 3 was rejected!
-        assert_eq!(chunk.get_block_entity(4, 10, 4), Some(&chest_stub));
-    }
-
-    #[test]
-    fn batched_pose_arrivals_keep_sender_cadence() {
-        let mut remote = RemotePlayerState::new(1, "Alex".into());
-        for (sequence, sender_time_millis, x) in [(1, 1_000, 0.0), (2, 1_050, 1.0), (3, 1_100, 2.0)]
-        {
-            assert_ne!(
-                remote.push_snapshot(
-                    Vec3::new(x, 0.0, 0.0),
-                    0.0,
-                    0.0,
-                    sequence,
-                    sender_time_millis,
-                    2.0,
-                ),
-                SnapshotPushResult::Rejected
-            );
-        }
-
-        let times: Vec<_> = remote
-            .snapshots
-            .iter()
-            .map(|snapshot| snapshot.time)
-            .collect();
-        for (actual, expected) in times.iter().zip([2.0, 2.05, 2.1]) {
-            assert!((actual - expected).abs() < 1e-9);
-        }
-        let midpoint = remote.sample(2.075).unwrap();
-        assert!((midpoint.position.x - 1.5).abs() < 1e-5);
-    }
-
-    #[test]
-    fn buffered_twenty_hz_motion_samples_smoothly_at_high_frame_rate() {
-        let mut remote = RemotePlayerState::new(1, "Alex".into());
-        for index in 0..=10 {
-            let sender_time_millis = 1_000 + index * 50;
-            let arrival_jitter = match index % 4 {
-                0 => 0.008,
-                1 => 0.001,
-                2 => 0.012,
-                _ => 0.004,
-            };
-            remote.push_snapshot(
-                Vec3::new(index as f32 * 0.25, 0.0, 0.0),
-                0.0,
-                0.0,
-                index as u32 + 1,
-                sender_time_millis,
-                2.0 + index as f64 * 0.05 + arrival_jitter,
-            );
-        }
-
-        let mut previous_x = f32::NEG_INFINITY;
-        for frame in 0..=72 {
-            let target = 2.008 + frame as f64 / 144.0;
-            let sample = remote.sample(target).unwrap();
-            assert!(
-                sample.position.x + 1e-5 >= previous_x,
-                "sampled motion moved backwards at frame {frame}"
-            );
-            assert!(
-                sample.position.x - previous_x <= 0.06 || !previous_x.is_finite(),
-                "sampled motion jumped at frame {frame}"
-            );
-            previous_x = sample.position.x;
-        }
-    }
-
-    #[test]
-    fn snapshots_reject_invalid_duplicate_and_out_of_order_data() {
-        let mut remote = RemotePlayerState::new(1, "Alex".into());
-        assert_eq!(
-            remote.push_snapshot(Vec3::ZERO, 0.0, 0.0, 10, 1_000, 1.0),
-            SnapshotPushResult::Snapped
-        );
-        assert_eq!(
-            remote.push_snapshot(Vec3::X, 0.0, 0.0, 10, 1_050, 1.05),
-            SnapshotPushResult::Rejected
-        );
-        assert_eq!(
-            remote.push_snapshot(Vec3::X, 0.0, 0.0, 9, 1_050, 1.05),
-            SnapshotPushResult::Rejected
-        );
-        assert_eq!(
-            remote.push_snapshot(Vec3::new(f32::NAN, 0.0, 0.0), 0.0, 0.0, 11, 1_050, 1.05,),
-            SnapshotPushResult::Rejected
-        );
-        assert_eq!(remote.snapshots.len(), 1);
-    }
-
-    #[test]
-    fn extrapolation_is_speed_limited_and_stops_after_one_hundred_ms() {
-        let mut remote = RemotePlayerState::new(1, "Alex".into());
-        remote.push_snapshot(Vec3::ZERO, 0.0, 0.0, 1, 1_000, 1.0);
-        remote.push_snapshot(Vec3::new(2.5, 0.0, 0.0), 0.0, 0.0, 2, 1_050, 1.05);
-
-        let at_limit = remote.sample(1.15).unwrap();
-        let long_after = remote.sample(5.0).unwrap();
-        assert!((at_limit.position.x - 6.5).abs() < 1e-4);
-        assert_eq!(long_after.position, at_limit.position);
-    }
-
-    #[test]
-    fn teleport_or_long_gap_clears_history_and_snaps() {
-        let mut remote = RemotePlayerState::new(1, "Alex".into());
-        remote.push_snapshot(Vec3::ZERO, 0.0, 0.0, 1, 1_000, 1.0);
-        assert_eq!(
-            remote.push_snapshot(Vec3::new(20.0, 0.0, 0.0), 0.0, 0.0, 2, 1_050, 1.05),
-            SnapshotPushResult::Snapped
-        );
-        assert_eq!(remote.snapshots.len(), 1);
-        assert_eq!(remote.sample(0.0).unwrap().position.x, 20.0);
-
-        assert_eq!(
-            remote.push_snapshot(Vec3::new(21.0, 0.0, 0.0), 0.0, 0.0, 3, 2_000, 2.0),
-            SnapshotPushResult::Snapped
-        );
-        assert_eq!(remote.snapshots.len(), 1);
-    }
-
-    #[test]
-    fn placement_uses_latest_authoritative_snapshot_before_side_effects() {
-        let mut remote = RemotePlayerState::new(1, "Alex".into());
-        remote.push_snapshot(Vec3::new(2.0, 0.0, 0.5), 0.0, 0.0, 1, 1_000, 1.0);
-        remote.push_snapshot(Vec3::new(0.5, 0.0, 0.5), 0.0, 0.0, 2, 1_050, 1.05);
-
-        // A delayed render sample is still outside the candidate block, while
-        // the authoritative back of the snapshot queue is inside it.
-        assert_eq!(
-            remote.sample(1.0).unwrap().position,
-            Vec3::new(2.0, 0.0, 0.5)
-        );
-        assert_eq!(
-            remote.snapshots.back().unwrap().position,
-            Vec3::new(0.5, 0.0, 0.5)
-        );
-
-        let decision = placement_decision_for_players(
-            BlockType::Stone,
-            (0, 0, 0),
-            player_aabb_at(Vec3::new(10.0, 0.0, 10.0)),
-            [&remote],
-        );
-        assert_eq!(decision, BlockPlacementDecision::BlockedByPlayer);
-
-        // This mirrors the early-return guard used by both local placement and
-        // the host request handler. A rejected decision must gate every effect.
-        let mut effects = Vec::new();
-        if decision == BlockPlacementDecision::Allowed {
-            effects.extend([
-                "world mutation",
-                "action",
-                "sound",
-                "inventory",
-                "broadcast",
-            ]);
-        }
-        assert!(effects.is_empty());
-    }
-
-    #[test]
-    fn unknown_remote_pose_blocks_only_solid_placement() {
-        let remote = RemotePlayerState::new(1, "Alex".into());
-        let local = player_aabb_at(Vec3::new(10.0, 0.0, 10.0));
-
-        assert_eq!(
-            placement_decision_for_players(BlockType::Stone, (0, 0, 0), local, [&remote]),
-            BlockPlacementDecision::BlockedByPlayer
-        );
-        assert_eq!(
-            placement_decision_for_players(BlockType::Torch, (0, 0, 0), local, [&remote]),
-            BlockPlacementDecision::Allowed
-        );
-    }
-
-    #[test]
-    fn remote_block_change_updates_light_and_boundary_mesh_dependencies() {
-        let mut manager = ChunkManager::new(2);
-        manager.chunks.insert((0, 0), Chunk::new(0, 0));
-        manager.chunks.insert((1, 0), Chunk::new(1, 0));
-        manager.set_sky_light(15, 80, 8, 15);
-
-        let dirty = apply_synced_block_change(&mut manager, 15, 80, 8, BlockType::Stone, 0)
-            .expect("loaded block should change");
-
-        assert_eq!(manager.get_block(15, 80, 8), BlockType::Stone);
-        assert_eq!(manager.get_sky_light(15, 80, 8), 0);
-        assert!(dirty.contains(&(0, 0)));
-        assert!(dirty.contains(&(1, 0)));
-    }
-
-    #[test]
-    fn terrain_worker_tokens_reject_stale_generation_lifetime_and_revision() {
-        use crate::dimension::Dimension;
-
-        assert!(chunk_load_result_is_current(
-            Some(7),
-            7,
-            3,
-            3,
-            Dimension::Overworld,
-            Dimension::Overworld,
-        ));
-        assert!(!chunk_load_result_is_current(
-            Some(8),
-            7,
-            3,
-            3,
-            Dimension::Overworld,
-            Dimension::Overworld,
-        ));
-        assert!(!chunk_load_result_is_current(
-            Some(7),
-            7,
-            2,
-            3,
-            Dimension::Overworld,
-            Dimension::Overworld,
-        ));
-        assert!(!chunk_load_result_is_current(
-            Some(7),
-            7,
-            3,
-            3,
-            Dimension::Nether,
-            Dimension::Overworld,
-        ));
-
-        let key = SectionKey::new(1, 2, 3);
-        let current = SectionIdentity::new(key, 11, 7);
-        assert!(section_mesh_result_is_current(
-            Some(current),
-            current,
-            3,
-            3,
-            Some(current),
-        ));
-        assert!(!section_mesh_result_is_current(
-            Some(SectionIdentity::new(key, 10, 7)),
-            current,
-            3,
-            3,
-            Some(current),
-        ));
-        assert!(!section_mesh_result_is_current(
-            Some(current),
-            current,
-            3,
-            3,
-            Some(SectionIdentity::new(key, 12, 7)),
-        ));
-        assert!(!section_mesh_result_is_current(
-            Some(current),
-            current,
-            2,
-            3,
-            Some(current),
-        ));
-    }
-
-    #[test]
-    fn mesh_invalidation_queues_latest_revision_and_invalidates_connectivity() {
-        let coord = (2, -3);
-        let mut meshes = std::collections::HashMap::from([(coord, ChunkMesh::pending())]);
-        let key = SectionKey::new(coord.0, 5, coord.1);
-        let section = meshes
-            .get_mut(&coord)
-            .unwrap()
-            .section_mut(key.section_y)
-            .unwrap();
-        section.invalidate();
-        let first_revision = section.revision;
-        let mut scheduler = crate::chunk_schedule::SectionMeshScheduler::new();
-        scheduler.enqueue(
-            SectionIdentity::new(key, first_revision, 7),
-            DependencyReason::Block,
-            (0, 0),
-        );
-        assert_eq!(
-            section.connectivity,
-            crate::culling::SectionConnectivityState::Invalid
-        );
-        section.invalidate();
-        scheduler.enqueue(
-            SectionIdentity::new(key, section.revision, 7),
-            DependencyReason::Light,
-            (0, 0),
-        );
-        assert_eq!(scheduler.len(), 1);
-        let work = scheduler.pop_nearest((0, 0), 8).unwrap();
-        assert_eq!(work.identity.revision, first_revision + 1);
-        assert_eq!(work.reason, DependencyReason::Light);
-        assert!(!section_mesh_result_is_current(
-            Some(SectionIdentity::new(key, first_revision, 7)),
-            SectionIdentity::new(key, first_revision, 7),
-            1,
-            1,
-            Some(work.identity),
-        ));
-    }
-
-    #[test]
-    fn mutation_scheduler_worker_chain_commits_only_the_latest_visible_revision() {
-        let coord = (0, 0);
-        let lifetime = 9;
-        let generation = 4;
-        let mut meshes = std::collections::HashMap::from([(coord, ChunkMesh::pending())]);
-        let key = SectionKey::new(0, 4, 0);
-        let mut scheduler = crate::chunk_schedule::SectionMeshScheduler::new();
-        let section = meshes.get_mut(&coord).unwrap().section_mut(4).unwrap();
-        section.invalidate();
-        scheduler.enqueue(
-            SectionIdentity::new(key, section.revision, lifetime),
-            DependencyReason::BreakPlace,
-            coord,
-        );
-        let stale_work = scheduler.pop_nearest(coord, 1).unwrap();
-        scheduler.mark_in_flight(stale_work);
-
-        section.invalidate();
-        let current = SectionIdentity::new(key, section.revision, lifetime);
-        scheduler.enqueue(current, DependencyReason::Fluid, coord);
-        assert!(!section_mesh_result_is_current(
-            Some(stale_work.identity),
-            stale_work.identity,
-            generation,
-            generation,
-            Some(current),
-        ));
-
-        scheduler.complete(stale_work.identity);
-        let latest_work = scheduler.pop_nearest(coord, 1).unwrap();
-        assert!(section_mesh_result_is_current(
-            Some(latest_work.identity),
-            latest_work.identity,
-            generation,
-            generation,
-            Some(current),
-        ));
-        let section = meshes.get_mut(&coord).unwrap().section_mut(4).unwrap();
-        section.connectivity = crate::culling::SectionConnectivityState::Valid(
-            crate::culling::SectionConnectivity::FULL,
-        );
-        section.meshed_revision = latest_work.identity.revision;
-        assert_eq!(section.meshed_revision, section.revision);
-    }
-
-    #[test]
-    fn boundary_and_diagonal_ao_dependencies_queue_once() {
-        let coords = [(0, 0), (1, 0), (0, 1), (1, 1)];
-        let mut meshes = coords
-            .into_iter()
-            .map(|coord| (coord, ChunkMesh::pending()))
-            .collect::<std::collections::HashMap<_, _>>();
-        let mut scheduler = crate::chunk_schedule::SectionMeshScheduler::new();
-        let mut dependencies = std::collections::HashSet::new();
-        mark_section_mesh_dependencies(&mut dependencies, 15, 15, 15);
-
-        for key in dependencies {
-            let reason = if key == SectionKey::new(0, 0, 0) {
-                DependencyReason::BreakPlace
-            } else {
-                DependencyReason::Ao
-            };
-            let section = meshes
-                .get_mut(&(key.cx, key.cz))
-                .unwrap()
-                .section_mut(key.section_y)
-                .unwrap();
-            section.invalidate();
-            scheduler.enqueue(
-                SectionIdentity::new(key, section.revision, 1),
-                reason,
-                (0, 0),
-            );
-        }
-
-        assert_eq!(scheduler.len(), 8);
-        let mut reasons = std::collections::HashMap::new();
-        while let Some(work) = scheduler.pop_nearest((0, 0), 2) {
-            reasons.insert(work.identity.key, work.reason);
-        }
-        assert_eq!(
-            reasons[&SectionKey::new(0, 0, 0)],
-            DependencyReason::BreakPlace
-        );
-        assert!(reasons
-            .iter()
-            .filter(|(key, _)| **key != SectionKey::new(0, 0, 0))
-            .all(|(_, reason)| *reason == DependencyReason::Ao));
-    }
-
-    #[test]
-    fn runtime_mesh_mutations_cannot_bypass_the_invalidation_api() {
-        let forbidden = concat!("mesh.", "mark_", "dirty()");
-        for (path, source) in [
-            ("state.rs", include_str!("state.rs")),
-            ("mob.rs", include_str!("mob.rs")),
-            ("passive_mob.rs", include_str!("passive_mob.rs")),
-        ] {
-            assert!(
-                !source.contains(forbidden),
-                "{path} bypasses invalidate_chunk_mesh"
-            );
-        }
-    }
-
-    #[test]
-    fn mesh_snapshot_owns_the_neighbor_halo() {
-        let mut chunks = std::collections::HashMap::new();
-        let mut center = Chunk::new(0, 0);
-        let mut east = Chunk::new(1, 0);
-        center.set_block_local(15, 10, 8, BlockType::Stone);
-        east.set_block_local(0, 10, 8, BlockType::Dirt);
-        east.set_sky_light(0, 10, 8, 9);
-        chunks.insert((0, 0), center);
-        chunks.insert((1, 0), east);
-
-        let snapshot = MeshSnapshot::capture((0, 0), &chunks, 15).expect("center chunk exists");
-        assert_eq!(snapshot.get(15, 10, 8).0, BlockType::Stone);
-        assert_eq!(snapshot.get(16, 10, 8), (BlockType::Dirt, 9, 0, 0, false));
-        assert_eq!(snapshot.get(-1, 10, 8), (BlockType::Air, 15, 0, 0, false));
-    }
-
-    #[test]
-    fn terrain_shader_module_passes_wgpu_validation() {
-        let instance = wgpu::Instance::default();
-        let Some(adapter) =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::LowPower,
-                compatible_surface: None,
-                force_fallback_adapter: false,
-            }))
-        else {
-            // Headless CI images are allowed to have no graphics adapter.
-            return;
-        };
-        let Ok((device, _queue)) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("Terrain shader validation device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-            },
-            None,
-        )) else {
-            return;
-        };
-
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let _shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Terrain shader validation"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-        });
-        let validation_error = pollster::block_on(device.pop_error_scope());
-        assert!(
-            validation_error.is_none(),
-            "terrain WGSL failed validation: {validation_error:?}"
-        );
-    }
-}
 
 const MAX_CHUNK_LOAD_JOBS: usize = 2;
 const MAX_CHUNK_MESH_JOBS: usize = 4;
 
-pub struct GpuMeshLayer {
-    pub handle: Option<crate::chunk_render::RegionAllocationHandle>,
-    pub bounds: Option<MeshBounds>,
-    pub vertex_bytes: usize,
-    pub index_bytes: usize,
-}
-
-impl GpuMeshLayer {
-    pub fn empty() -> Self {
-        Self {
-            handle: None,
-            bounds: None,
-            vertex_bytes: 0,
-            index_bytes: 0,
-        }
-    }
-
-    pub fn num_indices(&self) -> u32 {
-        self.handle.map_or(0, |h| h.num_indices)
-    }
-}
-
-pub struct RenderRegion {
-    pub region_coord: (i32, i32),
-    pub region_instance_id: u64,
-    pub vertex_buffer: wgpu::Buffer,
-    pub index_buffer: wgpu::Buffer,
-    pub vertex_capacity: u32,
-    pub index_capacity: u32,
-    pub vertex_freelist: crate::chunk_render::FreeList,
-    pub index_freelist: crate::chunk_render::FreeList,
-    pub active_chunks: usize,
-    pub region_uniform_buffer: wgpu::Buffer,
-    pub bind_group: wgpu::BindGroup,
-}
-
-impl RenderRegion {
-    pub const INITIAL_VERTEX_CAPACITY: u32 = 65_536;
-    pub const INITIAL_INDEX_CAPACITY: u32 = 98_304;
-
-    pub fn new(
-        device: &wgpu::Device,
-        region_bind_group_layout: &wgpu::BindGroupLayout,
-        region_coord: (i32, i32),
-    ) -> Self {
-        static NEXT_REGION_INSTANCE_ID: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(1);
-        let region_instance_id = NEXT_REGION_INSTANCE_ID
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            .max(1);
-        let vertex_bytes = (Self::INITIAL_VERTEX_CAPACITY as usize)
-            * std::mem::size_of::<crate::chunk_render::TerrainVertex>();
-        let index_bytes = (Self::INITIAL_INDEX_CAPACITY as usize) * std::mem::size_of::<u32>();
-
-        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Render Region Vertex Buffer"),
-            size: vertex_bytes as u64,
-            usage: wgpu::BufferUsages::VERTEX
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
-        let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Render Region Index Buffer"),
-            size: index_bytes as u64,
-            usage: wgpu::BufferUsages::INDEX
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
-        let reg_origin = [
-            (region_coord.0
-                * crate::chunk_render::REGION_SIZE_CHUNKS
-                * crate::world::CHUNK_WIDTH as i32) as f32,
-            0.0,
-            (region_coord.1
-                * crate::chunk_render::REGION_SIZE_CHUNKS
-                * crate::world::CHUNK_DEPTH as i32) as f32,
-            0.0,
-        ];
-        use wgpu::util::DeviceExt;
-        let region_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Region Uniform Buffer"),
-            contents: bytemuck::cast_slice(&reg_origin),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: region_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: region_uniform_buffer.as_entire_binding(),
-            }],
-            label: Some("Region Bind Group"),
-        });
-
-        Self {
-            region_coord,
-            region_instance_id,
-            vertex_buffer,
-            index_buffer,
-            vertex_capacity: Self::INITIAL_VERTEX_CAPACITY,
-            index_capacity: Self::INITIAL_INDEX_CAPACITY,
-            vertex_freelist: crate::chunk_render::FreeList::new(Self::INITIAL_VERTEX_CAPACITY),
-            index_freelist: crate::chunk_render::FreeList::new(Self::INITIAL_INDEX_CAPACITY),
-            active_chunks: 0,
-            region_uniform_buffer,
-            bind_group,
-        }
-    }
-
-    pub fn deallocate_handle(
-        &mut self,
-        handle: &crate::chunk_render::RegionAllocationHandle,
-    ) -> Result<(), crate::chunk_render::FreeListError> {
-        if !region_allocation_handle_is_live(
-            self.region_instance_id,
-            &self.vertex_freelist,
-            &self.index_freelist,
-            handle,
-        ) {
-            return Err(crate::chunk_render::FreeListError::UnknownAllocation);
-        }
-        self.vertex_freelist.deallocate_owned(handle.vertex_token)?;
-        self.index_freelist.deallocate_owned(handle.index_token)?;
-        Ok(())
-    }
-
-    fn handle_is_live(&self, handle: &crate::chunk_render::RegionAllocationHandle) -> bool {
-        region_allocation_handle_is_live(
-            self.region_instance_id,
-            &self.vertex_freelist,
-            &self.index_freelist,
-            handle,
-        )
-    }
-
-    fn empty_rebuild_worthwhile(&self) -> bool {
-        empty_region_rebuild_worthwhile(
-            self.vertex_freelist.used_units(),
-            self.index_freelist.used_units(),
-            self.vertex_capacity,
-            self.index_capacity,
-        )
-    }
-
-    pub fn committed_bytes(&self) -> usize {
-        (self.vertex_capacity as usize) * std::mem::size_of::<crate::chunk_render::TerrainVertex>()
-            + (self.index_capacity as usize) * std::mem::size_of::<u32>()
-    }
-
-    pub fn used_bytes(&self) -> usize {
-        (self.vertex_freelist.used_units() as usize)
-            * std::mem::size_of::<crate::chunk_render::TerrainVertex>()
-            + (self.index_freelist.used_units() as usize) * std::mem::size_of::<u32>()
-    }
-
-    pub fn buffer_object_count(&self) -> usize {
-        // vertex + index + region uniform; bind groups are not buffers.
-        3
-    }
-
-    pub fn ensure_capacity(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        needed_vertices: u32,
-        needed_indices: u32,
-    ) -> Result<(), crate::chunk_render::FreeListError> {
-        let mut grow_v = false;
-        let mut new_v_cap = self.vertex_capacity;
-        if self.vertex_freelist.largest_free_block() < needed_vertices {
-            grow_v = true;
-            new_v_cap = self
-                .vertex_capacity
-                .checked_add(needed_vertices)
-                .and_then(|needed| {
-                    self.vertex_capacity
-                        .checked_mul(2)
-                        .map(|doubled| needed.max(doubled))
-                })
-                .ok_or(crate::chunk_render::FreeListError::ArithmeticOverflow)?;
-        }
-
-        let mut grow_i = false;
-        let mut new_i_cap = self.index_capacity;
-        if self.index_freelist.largest_free_block() < needed_indices {
-            grow_i = true;
-            new_i_cap = self
-                .index_capacity
-                .checked_add(needed_indices)
-                .and_then(|needed| {
-                    self.index_capacity
-                        .checked_mul(2)
-                        .map(|doubled| needed.max(doubled))
-                })
-                .ok_or(crate::chunk_render::FreeListError::ArithmeticOverflow)?;
-        }
-
-        if grow_v {
-            self.vertex_freelist.resize(new_v_cap)?;
-            let vertex_bytes =
-                (new_v_cap as usize) * std::mem::size_of::<crate::chunk_render::TerrainVertex>();
-            let new_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Render Region Vertex Buffer (Resized)"),
-                size: vertex_bytes as u64,
-                usage: wgpu::BufferUsages::VERTEX
-                    | wgpu::BufferUsages::COPY_DST
-                    | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            });
-
-            if self.vertex_freelist.used_units() > 0 {
-                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Resize Region Vertex Buffer Encoder"),
-                });
-                let copy_size = (self.vertex_capacity as usize
-                    * std::mem::size_of::<crate::chunk_render::TerrainVertex>())
-                    as u64;
-                encoder.copy_buffer_to_buffer(
-                    &self.vertex_buffer,
-                    0,
-                    &new_vertex_buffer,
-                    0,
-                    copy_size,
-                );
-                queue.submit(Some(encoder.finish()));
-            }
-
-            self.vertex_buffer = new_vertex_buffer;
-            self.vertex_capacity = new_v_cap;
-        }
-
-        if grow_i {
-            self.index_freelist.resize(new_i_cap)?;
-            let index_bytes = (new_i_cap as usize) * std::mem::size_of::<u32>();
-            let new_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Render Region Index Buffer (Resized)"),
-                size: index_bytes as u64,
-                usage: wgpu::BufferUsages::INDEX
-                    | wgpu::BufferUsages::COPY_DST
-                    | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            });
-
-            if self.index_freelist.used_units() > 0 {
-                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Resize Region Index Buffer Encoder"),
-                });
-                let copy_size = (self.index_capacity as usize * std::mem::size_of::<u32>()) as u64;
-                encoder.copy_buffer_to_buffer(
-                    &self.index_buffer,
-                    0,
-                    &new_index_buffer,
-                    0,
-                    copy_size,
-                );
-                queue.submit(Some(encoder.finish()));
-            }
-
-            self.index_buffer = new_index_buffer;
-            self.index_capacity = new_i_cap;
-        }
-        Ok(())
-    }
-
-    pub fn upload_mesh_layer(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        data: &crate::chunk_render::ChunkMeshData,
-        owner: u64,
-    ) -> (GpuMeshLayer, UploadMetrics) {
-        if data.is_empty() {
-            return (GpuMeshLayer::empty(), UploadMetrics::default());
-        }
-
-        let num_vertices = data.vertices.len() as u32;
-        let num_indices = data.indices.len() as u32;
-
-        self.ensure_capacity(device, queue, num_vertices, num_indices)
-            .unwrap_or_else(|error| {
-                panic!("render-region freelist capacity growth failed: {error:?}")
-            });
-
-        let vertex_token = self
-            .vertex_freelist
-            .allocate_owned(num_vertices, owner)
-            .map_err(|e| format!("vertex allocation failed: {e:?}"))
-            .expect("vertex freelist allocation failed");
-        let index_token = self
-            .index_freelist
-            .allocate_owned(num_indices, owner)
-            .map_err(|e| format!("index allocation failed: {e:?}"))
-            .expect("index freelist allocation failed");
-        let vertex_offset = vertex_token.offset;
-        let index_offset = index_token.offset;
-
-        let vertex_bytes = bytemuck::cast_slice(&data.vertices);
-        let index_bytes = bytemuck::cast_slice(&data.indices);
-
-        let v_byte_offset = (vertex_offset as usize
-            * std::mem::size_of::<crate::chunk_render::TerrainVertex>())
-            as u64;
-        let i_byte_offset = (index_offset as usize * std::mem::size_of::<u32>()) as u64;
-
-        let upload_started = Instant::now();
-        queue.write_buffer(&self.vertex_buffer, v_byte_offset, vertex_bytes);
-        queue.write_buffer(&self.index_buffer, i_byte_offset, index_bytes);
-        let metrics = UploadMetrics {
-            elapsed_ns: upload_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-            bytes: (vertex_bytes.len() + index_bytes.len()) as u64,
-        };
-
-        (
-            GpuMeshLayer {
-                handle: Some(crate::chunk_render::RegionAllocationHandle {
-                    region_instance_id: self.region_instance_id,
-                    vertex_token,
-                    index_token,
-                    vertex_offset,
-                    index_offset,
-                    num_vertices,
-                    num_indices,
-                }),
-                bounds: data.bounds,
-                vertex_bytes: vertex_bytes.len(),
-                index_bytes: index_bytes.len(),
-            },
-            metrics,
-        )
-    }
-}
-
-fn region_allocation_handle_is_live(
-    region_instance_id: u64,
-    vertex_freelist: &crate::chunk_render::FreeList,
-    index_freelist: &crate::chunk_render::FreeList,
-    handle: &crate::chunk_render::RegionAllocationHandle,
-) -> bool {
-    handle.region_instance_id == region_instance_id
-        && vertex_freelist.validate_owned(handle.vertex_token).is_ok()
-        && index_freelist.validate_owned(handle.index_token).is_ok()
-}
-
-fn should_decrement_region_active_chunks(
-    mesh_has_resident_section: bool,
-    mesh_has_allocation_handles: bool,
-    mesh_has_matching_region_handle: bool,
-) -> bool {
-    mesh_has_resident_section && (!mesh_has_allocation_handles || mesh_has_matching_region_handle)
-}
-
-fn chunk_mesh_is_registered_with_region(mesh: &ChunkMesh, region: Option<&RenderRegion>) -> bool {
-    if !mesh.has_resident_section() {
-        return false;
-    }
-    let Some(region) = region else {
-        return false;
-    };
-    let (has_handles, has_matching_handle) =
-        mesh.allocation_handle_region_membership(region.region_instance_id);
-    !has_handles || has_matching_handle
-}
-
-fn empty_region_rebuild_worthwhile(
-    used_vertices: u32,
-    used_indices: u32,
-    vertex_capacity: u32,
-    index_capacity: u32,
-) -> bool {
-    used_vertices == 0
-        && used_indices == 0
-        && (vertex_capacity > RenderRegion::INITIAL_VERTEX_CAPACITY
-            || index_capacity > RenderRegion::INITIAL_INDEX_CAPACITY)
-}
-
-pub struct GpuMeshLevel {
-    opaque: GpuMeshLayer,
-    transparent: GpuMeshLayer,
-    bounds: Option<MeshBounds>,
-}
-
-pub struct GpuSectionMesh {
-    levels: Option<[GpuMeshLevel; 3]>,
-    connectivity: crate::culling::SectionConnectivityState,
-    revision: u64,
-    meshed_revision: u64,
-}
-
-impl GpuSectionMesh {
-    fn pending() -> Self {
-        Self {
-            levels: None,
-            connectivity: crate::culling::SectionConnectivityState::Invalid,
-            revision: 0,
-            meshed_revision: u64::MAX,
-        }
-    }
-
-    fn invalidate(&mut self) {
-        self.revision = self.revision.wrapping_add(1);
-        self.connectivity = crate::culling::SectionConnectivityState::Invalid;
-    }
-
-    fn needs_rebuild(&self) -> bool {
-        self.levels.is_none() || self.meshed_revision != self.revision
-    }
-
-    fn level(&self, lod: LodLevel) -> Option<&GpuMeshLevel> {
-        self.levels.as_ref().map(|levels| &levels[lod as usize])
-    }
-
-    fn finest_bounds(&self) -> Option<MeshBounds> {
-        self.level(LodLevel::L0).and_then(|level| level.bounds)
-    }
-
-    fn total_indices(&self) -> usize {
-        self.levels
-            .as_ref()
-            .into_iter()
-            .flatten()
-            .map(|level| {
-                level.opaque.num_indices() as usize + level.transparent.num_indices() as usize
-            })
-            .sum()
-    }
-
-    fn gpu_bytes(&self) -> usize {
-        self.levels
-            .as_ref()
-            .into_iter()
-            .flatten()
-            .map(|level| {
-                level.opaque.vertex_bytes
-                    + level.opaque.index_bytes
-                    + level.transparent.vertex_bytes
-                    + level.transparent.index_bytes
-            })
-            .sum()
-    }
-}
-
-pub struct ChunkMesh {
-    pub min_section_y: i8,
-    sections: Vec<GpuSectionMesh>,
-}
-
-impl ChunkMesh {
-    fn pending() -> Self {
-        Self::pending_for_dimension(crate::dimension::Dimension::Overworld)
-    }
-
-    fn pending_for_dimension(dimension: crate::dimension::Dimension) -> Self {
-        let height = dimension.height();
-        Self::pending_for_height(height.min_section_y(), height.section_count())
-    }
-
-    fn pending_for_height(min_section_y: i8, section_count: usize) -> Self {
-        Self {
-            min_section_y,
-            sections: (0..section_count)
-                .map(|_| GpuSectionMesh::pending())
-                .collect(),
-        }
-    }
-
-    fn section_index(&self, section_y: i8) -> Option<usize> {
-        let idx = (section_y as i32) - (self.min_section_y as i32);
-        if idx >= 0 && (idx as usize) < self.sections.len() {
-            Some(idx as usize)
-        } else {
-            None
-        }
-    }
-
-    fn section_y_at_index(&self, index: usize) -> i8 {
-        self.min_section_y + index as i8
-    }
-
-    fn section(&self, section_y: i8) -> Option<&GpuSectionMesh> {
-        let idx = self.section_index(section_y)?;
-        self.sections.get(idx)
-    }
-
-    fn section_mut(&mut self, section_y: i8) -> Option<&mut GpuSectionMesh> {
-        let idx = self.section_index(section_y)?;
-        self.sections.get_mut(idx)
-    }
-
-    fn finest_bounds(&self) -> Option<MeshBounds> {
-        self.sections
-            .iter()
-            .filter_map(GpuSectionMesh::finest_bounds)
-            .reduce(|left, right| left.union(right))
-    }
-
-    fn total_indices(&self) -> usize {
-        self.sections
-            .iter()
-            .map(GpuSectionMesh::total_indices)
-            .sum()
-    }
-
-    fn gpu_bytes(&self) -> usize {
-        self.sections.iter().map(GpuSectionMesh::gpu_bytes).sum()
-    }
-
-    fn has_resident_section(&self) -> bool {
-        self.sections.iter().any(|section| section.levels.is_some())
-    }
-
-    fn allocation_handle_region_membership(&self, region_instance_id: u64) -> (bool, bool) {
-        let mut has_handles = false;
-        let mut has_matching_handle = false;
-        for section in &self.sections {
-            let Some(levels) = &section.levels else {
-                continue;
-            };
-            for level in levels {
-                for layer in [&level.opaque, &level.transparent] {
-                    let Some(handle) = layer.handle else {
-                        continue;
-                    };
-                    has_handles = true;
-                    has_matching_handle |= handle.region_instance_id == region_instance_id;
-                }
-            }
-        }
-        (has_handles, has_matching_handle)
-    }
-}
-
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct MeshVoxel {
     block: BlockType,
@@ -1801,13 +314,17 @@ struct MeshVoxel {
     fluid: u8,
 }
 
+#[cfg(test)]
 struct MeshSnapshot {
     min_world_x: i32,
+    min_world_y: i32,
     min_world_z: i32,
+    y_count: usize,
     voxels: Vec<MeshVoxel>,
     default_sky_light: u8,
 }
 
+#[cfg(test)]
 impl MeshSnapshot {
     const WIDTH: usize = CHUNK_WIDTH + 2;
     const DEPTH: usize = CHUNK_DEPTH + 2;
@@ -1817,17 +334,18 @@ impl MeshSnapshot {
         chunks: &std::collections::HashMap<(i32, i32), Chunk>,
         default_sky_light: u8,
     ) -> Option<Self> {
-        if !chunks.contains_key(&coord) {
-            return None;
-        }
+        let center = chunks.get(&coord)?;
         let min_world_x = coord.0 * CHUNK_WIDTH as i32 - 1;
+        let min_world_y = center.min_world_y();
         let min_world_z = coord.1 * CHUNK_DEPTH as i32 - 1;
-        let mut voxels = Vec::with_capacity(Self::WIDTH * CHUNK_HEIGHT * Self::DEPTH);
+        let y_count = (center.max_world_y_exclusive() - min_world_y) as usize;
+        let mut voxels = Vec::with_capacity(Self::WIDTH * y_count * Self::DEPTH);
         for x in 0..Self::WIDTH {
             let world_x = min_world_x + x as i32;
             let chunk_x = world_x.div_euclid(CHUNK_WIDTH as i32);
             let local_x = world_x.rem_euclid(CHUNK_WIDTH as i32) as usize;
-            for y in 0..CHUNK_HEIGHT {
+            for y in 0..y_count {
+                let world_y = min_world_y + y as i32;
                 for z in 0..Self::DEPTH {
                     let world_z = min_world_z + z as i32;
                     let chunk_z = world_z.div_euclid(CHUNK_DEPTH as i32);
@@ -1835,10 +353,10 @@ impl MeshSnapshot {
                     let voxel = chunks
                         .get(&(chunk_x, chunk_z))
                         .map(|neighbor| MeshVoxel {
-                            block: neighbor.get_block_local(local_x, y as i32, local_z),
-                            sky_light: neighbor.get_sky_light(local_x, y as i32, local_z),
-                            block_light: neighbor.get_block_light(local_x, y as i32, local_z),
-                            fluid: neighbor.get_fluid_level(local_x, y as i32, local_z),
+                            block: neighbor.get_block_local(local_x, world_y, local_z),
+                            sky_light: neighbor.get_sky_light(local_x, world_y, local_z),
+                            block_light: neighbor.get_block_light(local_x, world_y, local_z),
+                            fluid: neighbor.get_fluid_level(local_x, world_y, local_z),
                         })
                         .unwrap_or(MeshVoxel {
                             block: BlockType::Air,
@@ -1852,17 +370,19 @@ impl MeshSnapshot {
         }
         Some(Self {
             min_world_x,
+            min_world_y,
             min_world_z,
+            y_count,
             voxels,
             default_sky_light,
         })
     }
 
     fn get(&self, world_x: i32, world_y: i32, world_z: i32) -> (BlockType, u8, u8, u8, bool) {
-        if world_y < 0 {
+        if world_y < self.min_world_y {
             return (BlockType::Air, 0, 0, 0, false);
         }
-        if world_y >= CHUNK_HEIGHT as i32 {
+        if world_y >= self.min_world_y + self.y_count as i32 {
             return (BlockType::Air, self.default_sky_light, 0, 0, false);
         }
         let x = world_x - self.min_world_x;
@@ -1870,7 +390,8 @@ impl MeshSnapshot {
         if x < 0 || x >= Self::WIDTH as i32 || z < 0 || z >= Self::DEPTH as i32 {
             return (BlockType::Air, self.default_sky_light, 0, 0, false);
         }
-        let index = (x as usize * CHUNK_HEIGHT + world_y as usize) * Self::DEPTH + z as usize;
+        let local_y = (world_y - self.min_world_y) as usize;
+        let index = (x as usize * self.y_count + local_y) * Self::DEPTH + z as usize;
         let voxel = self.voxels[index];
         (
             voxel.block,
@@ -1888,8 +409,7 @@ struct ChunkLoadResult {
     generation: u64,
     lifetime: u64,
     chunk: Chunk,
-    mutated: bool,
-    redstone_metadata: Vec<crate::redstone::RedstoneComponentMetadata>,
+    restore_failed: bool,
 }
 
 struct SectionMeshResult {
@@ -1979,32 +499,6 @@ impl Vertex {
     }
 }
 
-impl TerrainVertex {
-    fn desc() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<TerrainVertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Uint16x4,
-                },
-                wgpu::VertexAttribute {
-                    offset: 8,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Uint16x2,
-                },
-                wgpu::VertexAttribute {
-                    offset: 12,
-                    shader_location: 2,
-                    format: wgpu::VertexFormat::Uint16x2,
-                },
-            ],
-        }
-    }
-}
-
 impl State {
     /// Drop all terrain GPU/CPU runtime state as one lifecycle boundary.
     /// Incrementing the generation invalidates every in-flight worker result.
@@ -2051,7 +545,7 @@ impl State {
             return;
         }
         let active_chunks = region.active_chunks;
-        let mut rebuilt = RenderRegion::new(&self.device, &self.region_bind_group_layout, coord);
+        let mut rebuilt = RenderRegion::new(self.device.as_ref().unwrap(), &self.region_bind_group_layout, coord);
         rebuilt.active_chunks = active_chunks;
         self.render_regions.insert(coord, rebuilt);
     }
@@ -2073,388 +567,13 @@ impl State {
             }
         }
     }
-    fn apply_block_changes(&mut self, changes: &[((i32, i32, i32), BlockType)]) {
-        if self.has_in_process_runtime() {
-            for &((x, y, z), block) in changes {
-                let _ = self.submit_local_authority_block_use(x, y, z, block);
-            }
-            return;
-        }
-        let mut dirty_chunks = std::collections::HashSet::new();
-        let mut broadcast: Vec<((i32, i32, i32), BlockType)> = Vec::new();
-        let mut entity_broadcasts: Vec<(
-            (i32, i32, i32),
-            Option<crate::block_entity::BlockEntity>,
-        )> = Vec::new();
-        for &((x, y, z), new_block) in changes {
-            let old_block = self.chunk_manager.get_block(x, y, z);
-            if old_block == new_block {
-                continue;
-            }
-            if old_block != BlockType::Air {
-                let old_entity = self.chunk_manager.get_block_entity(x, y, z).cloned();
-                let new_accepts_old = old_entity
-                    .as_ref()
-                    .is_some_and(|entity| entity.matches_block_type(new_block));
-                if let Some(entity) = old_entity {
-                    if !new_accepts_old {
-                        let sound_pos =
-                            glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
-                        for stack in entity.clone().drain_stacks() {
-                            self.spawn_dropped_stack(stack, sound_pos);
-                        }
-                        self.chunk_manager.set_block_entity(x, y, z, None);
-                        entity_broadcasts.push(((x, y, z), None));
-                    }
-                }
-                self.chunk_manager.set_block(x, y, z, BlockType::Air);
-                crate::lighting::update_sky_light_after_removed(
-                    &mut self.chunk_manager,
-                    x,
-                    y,
-                    z,
-                    &mut dirty_chunks,
-                );
-                crate::lighting::update_block_light_after_removed(
-                    &mut self.chunk_manager,
-                    x,
-                    y,
-                    z,
-                    old_block.properties().light_emission,
-                    &mut dirty_chunks,
-                );
-            }
-            self.chunk_manager.set_block(x, y, z, new_block);
-            let existing_matches = self
-                .chunk_manager
-                .get_block_entity(x, y, z)
-                .is_some_and(|entity| entity.matches_block_type(new_block));
-            if !existing_matches {
-                if let Some(default_entity) = crate::block_entity::default_stub_for_block(new_block)
-                {
-                    self.chunk_manager
-                        .set_block_entity(x, y, z, Some(default_entity.clone()));
-                    entity_broadcasts.push(((x, y, z), Some(default_entity)));
-                }
-            }
-            crate::lighting::update_sky_light_after_placed(
-                &mut self.chunk_manager,
-                x,
-                y,
-                z,
-                &mut dirty_chunks,
-            );
-            crate::lighting::update_block_light_after_placed(
-                &mut self.chunk_manager,
-                x,
-                y,
-                z,
-                new_block.properties().light_emission,
-                &mut dirty_chunks,
-            );
-            mark_block_mesh_dependencies(&mut dirty_chunks, x, z);
-            self.redstone.on_block_changed(
-                &self.chunk_manager,
-                (x, y, z),
-                crate::redstone::Direction::North,
-            );
-            self.check_and_break_unsupported_above(x, y, z, &mut dirty_chunks);
-            broadcast.push(((x, y, z), new_block));
-        }
-        self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Block);
-        // Fan each authoritative batch mutation out to connected clients.
-        for ((x, y, z), block) in broadcast {
-            self.broadcast_block_change(x, y, z, block);
-        }
-        for ((x, y, z), entity) in entity_broadcasts {
-            self.broadcast_block_entity_delta(x, y, z, entity);
-        }
-    }
 
-    pub fn check_and_break_unsupported_above(
-        &mut self,
-        wx: i32,
-        wy: i32,
-        wz: i32,
-        dirty_chunks: &mut std::collections::HashSet<(i32, i32)>,
-    ) {
-        let mut broken_blocks = Vec::new();
-        self.chunk_manager.check_and_break_unsupported_above(
-            wx,
-            wy,
-            wz,
-            dirty_chunks,
-            |(x, y, z), block| {
-                broken_blocks.push(((x, y, z), block));
-            },
-        );
-        self.finish_unsupported_breaks(broken_blocks);
-    }
-
-    fn check_and_break_unsupported_for_loaded_chunk(
-        &mut self,
-        cx: i32,
-        cz: i32,
-        dirty_chunks: &mut std::collections::HashSet<(i32, i32)>,
-    ) {
-        let mut broken_blocks = Vec::new();
-        self.chunk_manager
-            .check_and_break_unsupported_for_loaded_chunk(
-                cx,
-                cz,
-                dirty_chunks,
-                |position, block| broken_blocks.push((position, block)),
-            );
-        self.finish_unsupported_breaks(broken_blocks);
-    }
-
-    fn finish_unsupported_breaks(&mut self, broken_blocks: Vec<((i32, i32, i32), BlockType)>) {
-        for ((x, y, z), block) in broken_blocks {
-            if self.game_mode_policy().can_take_damage {
-                let drop_item = match block {
-                    BlockType::TallGrass => {
-                        let rng = (x as u32)
-                            .wrapping_mul(31)
-                            .wrapping_add(y as u32 * 17)
-                            .wrapping_add(z as u32);
-                        if rng % 8 == 0 {
-                            Some(crate::inventory::Item::Seeds)
-                        } else {
-                            None
-                        }
-                    }
-                    BlockType::SnowLayer => None,
-                    _ => Some(crate::inventory::Item::from_block(block)),
-                };
-                if let Some(item) = drop_item {
-                    self.spawn_dropped_item(
-                        item,
-                        glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
-                    );
-                }
-            }
-            self.broadcast_block_change(x, y, z, BlockType::Air);
-        }
-    }
-
-    fn safe_dimension_spawn_y(&mut self, x: i32, z: i32) -> f32 {
-        let top = if self.current_dimension == crate::dimension::Dimension::Nether {
-            120
-        } else {
-            180
-        };
-        for y in (2..=top).rev() {
-            if self
-                .chunk_manager
-                .get_block(x, y - 1, z)
-                .properties()
-                .is_solid
-                && self
-                    .chunk_manager
-                    .get_block(x, y, z)
-                    .properties()
-                    .is_passable
-                && self
-                    .chunk_manager
-                    .get_block(x, y + 1, z)
-                    .properties()
-                    .is_passable
-            {
-                return y as f32;
-            }
-        }
-        let floor = match self.current_dimension {
-            crate::dimension::Dimension::Nether => BlockType::Netherrack,
-            crate::dimension::Dimension::End => BlockType::EndStone,
-            crate::dimension::Dimension::Overworld => BlockType::Stone,
-        };
-        self.apply_block_changes(&[
-            ((x, 63, z), floor),
-            ((x, 64, z), BlockType::Air),
-            ((x, 65, z), BlockType::Air),
-        ]);
-        64.0
-    }
-
-    fn build_linked_nether_portal(&mut self, chunk_x: i32, chunk_z: i32, spawn_y: i32) -> Vec3 {
-        let base_x = chunk_x * CHUNK_WIDTH as i32 + 6;
-        let base_z = chunk_z * CHUNK_DEPTH as i32 + 8;
-        let height = self.chunk_manager.dimension.height();
-        let clamp_min = height.min_y + 1;
-        let clamp_max = height.max_y_exclusive() - 5;
-        let base_y = (spawn_y - 1).clamp(clamp_min, clamp_max);
-        let mut changes = Vec::new();
-        for x in base_x..=base_x + 3 {
-            changes.push(((x, base_y, base_z), BlockType::Obsidian));
-            changes.push(((x, base_y + 4, base_z), BlockType::Obsidian));
-        }
-        for y in base_y + 1..=base_y + 3 {
-            changes.push(((base_x, y, base_z), BlockType::Obsidian));
-            changes.push(((base_x + 3, y, base_z), BlockType::Obsidian));
-            changes.push(((base_x + 1, y, base_z), BlockType::NetherPortal));
-            changes.push(((base_x + 2, y, base_z), BlockType::NetherPortal));
-        }
-        self.apply_block_changes(&changes);
-        Vec3::new(
-            base_x as f32 + 1.5,
-            base_y as f32 + 1.0,
-            base_z as f32 + 0.5,
-        )
-    }
-
+    /// Reset only renderer/presentation caches after an authority-owned
+    /// dimension transfer (portal, respawn, or session projection). No local
+    /// worldgen, lighting, save, or gameplay mutation is allowed here;
+    /// subsequent ChunkData/Entity events repopulate the destination.
     fn switch_dimension(&mut self, target: crate::dimension::Dimension) {
-        if target == self.current_dimension {
-            return;
-        }
-        if !self.is_authoritative() {
-            // Join Clients do not infer a portal transfer from their local
-            // chunk cache.  The authority changes the session dimension and
-            // the ordered PlayerSessionUpdate/ChunkData projection below
-            // rebuilds this presentation root.
-            return;
-        }
-        if let Some(runtime) = self.embedded_runtime.as_mut() {
-            if !runtime.set_session_dimension(target) {
-                return;
-            }
-        }
-        self.close_inventory();
-        self.player_physics.set_flying(false);
-        self.jump_taps.reset();
-        let source = self.current_dimension;
-        let tracker = self.chunk_manager.dirty_chunks.clone();
-        if !self.has_in_process_runtime() {
-            for ((cx, cz), revision) in tracker.dirty_revisions() {
-                if let Some(chunk) = self.chunk_manager.chunks.get(&(cx, cz)) {
-                    let redstone_metadata =
-                        self.redstone
-                            .collect_chunk_metadata(&self.chunk_manager, cx, cz);
-                    let snapshot =
-                        crate::save::UncompressedChunkSnapshot::from_chunk_with_redstone(
-                            source,
-                            chunk,
-                            redstone_metadata,
-                        )
-                        .with_mutation_revision(self.mutation_revisions.latest(source, cx, cz));
-                    if let Err(error) = self.enqueue_chunk_save(snapshot, tracker.clone(), revision)
-                    {
-                        eprintln!("[Save] Could not queue dimension-switch chunk: {error}");
-                    }
-                }
-            }
-        }
-
-        let mut destination =
-            crate::dimension::transform_position(source, target, self.player_physics.position);
-        if target == crate::dimension::Dimension::End {
-            destination = Vec3::new(0.5, 80.0, 0.5);
-        } else if source == crate::dimension::Dimension::End {
-            destination = Vec3::new(8.5, 80.0, 8.5);
-        }
-
-        if !self.has_in_process_runtime() {
-            if let Err(error) = self.save_current_dimension_entities() {
-                eprintln!("[Save] Could not save dimension entities: {error}");
-            }
-        }
-        self.current_dimension = target;
-        let render_distance = self.chunk_manager.render_distance;
-        self.teardown_terrain_runtime("dimension switch");
-        self.chunk_manager = ChunkManager::new_in_dimension(render_distance, target);
-        self.entity_manager = crate::entity::EntityManager::new();
-        self.load_current_dimension_entities();
-        self.particles = crate::particles::ParticleSystem::new();
-        self.redstone = crate::redstone::RedstoneSystem::new();
-        self.redstone_tick_timer = 0.0;
-        self.pending_chunk_payloads.clear();
-        self.pending_block_changes.clear();
-        self.client_chunk_revisions.clear();
-        self.mining_target = None;
-        self.mining_progress = 0.0;
-        self.left_mouse_pressed = false;
-        self.water_tick_timer = 0.0;
-        self.lava_tick_timer = 0.0;
-        self.lava_damage_timer = 0.0;
-        self.cactus_damage_timer = 0.0;
-        self.boss_maintenance_timer = 0.0;
-        self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
-
-        let cx = (destination.x / CHUNK_WIDTH as f32).floor() as i32;
-        let cz = (destination.z / CHUNK_DEPTH as f32).floor() as i32;
-        let mut chunk = crate::dimension::generate_chunk_with_options(
-            target,
-            cx,
-            cz,
-            self.world_seed,
-            crate::dimension::WorldGenerationOptions {
-                world_type: self.world_type,
-                generate_structures: self.generate_structures,
-            },
-        );
-        let mut restored_redstone = Vec::new();
-        let saved_chunk = self
-            .save_manager
-            .lock()
-            .unwrap()
-            .load_chunk_in(target, cx, cz);
-        if let Some(saved) = saved_chunk {
-            let generated_blocks = crate::save::ChunkSaveData::from_chunk(&chunk).blocks;
-            if saved.blocks != generated_blocks {
-                match self.mutation_revisions.ensure_at_least(target, cx, cz, 1) {
-                    Ok(true) => {
-                        self.mutation_revision_generation =
-                            self.mutation_revision_generation.saturating_add(1);
-                        self.mutation_index_dirty = true;
-                    }
-                    Ok(false) => {}
-                    Err(error) => self.report_mutation_revision_error(
-                        error,
-                        "restoring a mutated destination chunk",
-                    ),
-                }
-            }
-            restored_redstone = saved.redstone_metadata();
-            saved.restore_to_chunk(&mut chunk);
-        }
-        self.chunk_manager.chunks.insert((cx, cz), chunk);
-        if !restored_redstone.is_empty() {
-            self.redstone
-                .restore_chunk_metadata(&self.chunk_manager, cx, cz, &restored_redstone);
-        }
-        let lifetime = self.next_chunk_lifetime();
-        self.chunk_lifetimes.insert((cx, cz), lifetime);
-        self.chunk_meshes.insert((cx, cz), ChunkMesh::pending());
-        let mut dirty = std::collections::HashSet::new();
-        crate::lighting::propagate_chunk_lighting(&mut self.chunk_manager, cx, cz, &mut dirty);
-
-        let wx = destination.x.floor() as i32;
-        let wz = destination.z.floor() as i32;
-        destination.y = self.safe_dimension_spawn_y(wx, wz);
-        if matches!(
-            target,
-            crate::dimension::Dimension::Overworld | crate::dimension::Dimension::Nether
-        ) && matches!(
-            source,
-            crate::dimension::Dimension::Overworld | crate::dimension::Dimension::Nether
-        ) {
-            destination = self.build_linked_nether_portal(cx, cz, destination.y as i32);
-        }
-        self.player_physics.position = destination;
-        self.prev_player_position = destination;
-        self.player_physics.velocity = Vec3::ZERO;
-        self.player_physics.on_ground = false;
-        self.player_physics.highest_y = destination.y;
-        self.camera.position = destination + Vec3::new(0.0, 1.6, 0.0);
-        self.portal_contact_time = 0.0;
-        self.portal_cooldown = 3.0;
-        if !self.has_in_process_runtime() {
-            let _ = self
-                .save_manager
-                .lock()
-                .unwrap()
-                .save_current_dimension(target);
-        }
-        println!("[Dimension] {} -> {}", source.name(), target.name());
+        self.reset_presented_dimension(target);
     }
 
     /// Reset only renderer/presentation caches after an authority-owned
@@ -2475,30 +594,20 @@ impl State {
         self.sync_cursor_mode();
 
         clear_remote_players(&mut self.remote_players, &mut self.entity_manager);
-        self.remote_player_health.clear();
-        self.remote_player_effects.clear();
         self.clear_replicated_entities();
-        self.fishing_manager.active_hooks.clear();
+        self.presented_fishing_hook_entity = None;
         self.current_dimension = target;
-        let render_distance = self.chunk_manager.render_distance;
+        let render_distance = self.chunk_manager.view_distance;
         self.teardown_terrain_runtime("authority dimension projection");
-        self.chunk_manager = ChunkManager::new_in_dimension(render_distance, target);
+        self.chunk_manager = PresentationChunks::new_in_dimension(render_distance, target);
         self.entity_manager = crate::entity::EntityManager::new();
-        self.mount_manager = crate::vehicle::MountManager::new();
         self.particles = crate::particles::ParticleSystem::new();
-        self.redstone = crate::redstone::RedstoneSystem::new();
-        self.redstone_tick_timer = 0.0;
         self.pending_chunk_payloads.clear();
         self.pending_block_changes.clear();
         self.client_chunk_revisions.clear();
         self.mining_target = None;
         self.mining_progress = 0.0;
         self.left_mouse_pressed = false;
-        self.water_tick_timer = 0.0;
-        self.lava_tick_timer = 0.0;
-        self.lava_damage_timer = 0.0;
-        self.cactus_damage_timer = 0.0;
-        self.boss_maintenance_timer = 0.0;
         self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
     }
 
@@ -2527,140 +636,20 @@ impl State {
         } else {
             None
         };
-        if self.has_in_process_runtime() || !self.is_authoritative() {
-            if let Some(((portal_x, portal_y, portal_z), portal_block)) = portal {
-                if self.portal_contact_time == 0.0 {
-                    let _ = self.submit_local_authority_block_action(
-                        crate::network::protocol::BlockActionKind::EnterPortal,
-                        portal_x,
-                        portal_y,
-                        portal_z,
-                        [0, 0, 0],
-                        portal_block,
-                    );
-                    self.portal_contact_time = dt.max(f32::EPSILON);
-                }
-            } else {
-                self.portal_contact_time = 0.0;
-            }
-            return;
-        }
-        if feet == BlockType::EndGateway || body == BlockType::EndGateway {
-            if self.current_dimension == crate::dimension::Dimension::End {
-                let dist = pos.length();
-                let target_pos = if dist < 300.0 {
-                    glam::Vec3::new(1000.0, 65.0, 0.0)
-                } else {
-                    glam::Vec3::new(0.0, 65.0, 0.0)
-                };
-                self.player_physics.position = target_pos;
-                self.portal_cooldown = 2.0;
-                return;
-            }
-        }
-        if feet == BlockType::EndPortal || body == BlockType::EndPortal {
-            let target = if self.current_dimension == crate::dimension::Dimension::End {
-                crate::dimension::Dimension::Overworld
-            } else {
-                crate::dimension::Dimension::End
-            };
-            self.switch_dimension(target);
-            return;
-        }
-        if feet == BlockType::NetherPortal || body == BlockType::NetherPortal {
-            self.portal_contact_time += dt;
-            if self.portal_contact_time >= 1.0 {
-                let target = if self.current_dimension == crate::dimension::Dimension::Nether {
-                    crate::dimension::Dimension::Overworld
-                } else {
-                    crate::dimension::Dimension::Nether
-                };
-                self.switch_dimension(target);
+        if let Some(((portal_x, portal_y, portal_z), portal_block)) = portal {
+            if self.portal_contact_time == 0.0 {
+                let _ = self.submit_local_authority_block_action(
+                    crate::network::protocol::BlockActionKind::EnterPortal,
+                    portal_x,
+                    portal_y,
+                    portal_z,
+                    [0, 0, 0],
+                    portal_block,
+                );
+                self.portal_contact_time = dt.max(f32::EPSILON);
             }
         } else {
             self.portal_contact_time = 0.0;
-        }
-    }
-
-    fn apply_boss_events(&mut self, events: crate::boss::BossEvents) {
-        let authoritative = self.is_authoritative();
-        for hit in events.player_damage {
-            let can_receive_impact = authoritative
-                && self.game_mode != GameMode::Creative
-                && !self.player_state.is_dead
-                && self.player_state.invulnerable_time <= 0.0;
-            self.take_damage(hit.amount, DamageSource::Mob);
-            if can_receive_impact && hit.knockback.length_squared() > 0.0 {
-                self.player_physics.velocity += hit.knockback;
-            }
-        }
-        for effect in events.apply_wither {
-            self.wither_effect_timer = self.wither_effect_timer.max(effect.duration);
-        }
-        for explosion in events.explosions {
-            if authoritative {
-                let remove_entity_ids: Vec<u64> = self
-                    .entity_manager
-                    .entities
-                    .iter()
-                    .filter(|e| {
-                        matches!(
-                            e.entity_type,
-                            crate::entity::EntityType::DroppedItem
-                                | crate::entity::EntityType::ExperienceOrb
-                        ) && e.position.distance(explosion.position) <= explosion.radius
-                    })
-                    .map(|e| e.id)
-                    .collect();
-                for id in remove_entity_ids {
-                    self.entity_manager.remove_by_id(id);
-                }
-            }
-            if explosion.break_blocks && authoritative {
-                let mut dirty_meshes = std::collections::HashSet::new();
-                let removed = crate::mob::explode(
-                    explosion.position,
-                    explosion.radius,
-                    &mut self.chunk_manager,
-                    &mut dirty_meshes,
-                    &mut self.player_physics,
-                    &mut self.player_state,
-                    true,
-                    GameMode::Creative,
-                    0.0,
-                );
-                self.invalidate_chunk_meshes(dirty_meshes, DependencyReason::Mob);
-                for (x, y, z) in removed {
-                    self.broadcast_block_change(x, y, z, BlockType::Air);
-                }
-            }
-            self.audio_manager
-                .play_sound(crate::audio::SoundId::Explosion);
-        }
-        for drop in events.drops {
-            for _ in 0..drop.count {
-                self.spawn_dropped_item(drop.item, drop.position);
-            }
-        }
-        let changes: Vec<_> = events
-            .block_placements
-            .into_iter()
-            .map(|placement| (placement.position, placement.block))
-            .collect();
-        if authoritative {
-            self.apply_block_changes(&changes);
-        }
-        if events.dragon_completion.is_some() {
-            self.end_flash_time = 0.45;
-            self.audio_manager
-                .play_sound(crate::audio::SoundId::Explosion);
-            self.player_state.add_experience(120);
-            if authoritative {
-                self.apply_block_changes(&[
-                    ((96, 75, 0), BlockType::EndGateway),
-                    ((1000, 65, 0), BlockType::EndGateway),
-                ]);
-            }
         }
     }
 }
@@ -2737,7 +726,6 @@ pub struct KeyState {
     pub space: bool,
     pub ctrl: bool,
     pub shift: bool,
-    pub f: bool,
 }
 
 pub(crate) fn allows_camera_look(
@@ -2775,57 +763,6 @@ fn cursor_position_to_ndc(x: f64, y: f64, width: u32, height: u32) -> [f32; 2] {
     ]
 }
 
-#[cfg(test)]
-mod camera_input_tests {
-    use super::{allows_camera_look, allows_continuous_mining, cursor_position_to_ndc, GameMode};
-
-    #[test]
-    fn every_gameplay_blocker_disables_camera_look() {
-        assert!(allows_camera_look(
-            false, false, false, false, false, false, true
-        ));
-
-        assert!(!allows_camera_look(
-            true, false, false, false, false, false, true
-        ));
-        assert!(!allows_camera_look(
-            false, true, false, false, false, false, true
-        ));
-        assert!(!allows_camera_look(
-            false, false, true, false, false, false, true
-        ));
-        assert!(!allows_camera_look(
-            false, false, false, true, false, false, true
-        ));
-        assert!(!allows_camera_look(
-            false, false, false, false, true, false, true
-        ));
-        assert!(!allows_camera_look(
-            false, false, false, false, false, true, true
-        ));
-        assert!(!allows_camera_look(
-            false, false, false, false, false, false, false
-        ));
-    }
-
-    #[test]
-    fn cursor_position_still_maps_to_ui_coordinates() {
-        assert_eq!(cursor_position_to_ndc(0.0, 0.0, 1280, 720), [-1.0, 1.0]);
-        assert_eq!(cursor_position_to_ndc(640.0, 360.0, 1280, 720), [0.0, 0.0]);
-        assert_eq!(
-            cursor_position_to_ndc(1280.0, 720.0, 1280, 720),
-            [1.0, -1.0]
-        );
-    }
-
-    #[test]
-    fn continuous_mining_requires_unblocked_survival_input() {
-        assert!(allows_continuous_mining(true, GameMode::Survival, true));
-        assert!(!allows_continuous_mining(false, GameMode::Survival, true));
-        assert!(!allows_continuous_mining(true, GameMode::Creative, true));
-        assert!(!allows_continuous_mining(true, GameMode::Survival, false));
-    }
-}
 
 #[derive(Debug, Default)]
 struct DoubleTapTracker {
@@ -2883,447 +820,15 @@ fn sprint_exhaustion_amount(
     }
 }
 
-#[cfg(test)]
-mod creative_flight_input_tests {
-    use super::*;
 
-    #[test]
-    fn double_tap_toggles_only_inside_the_window() {
-        let start = Instant::now();
-        let mut tracker = DoubleTapTracker::default();
 
-        assert!(!tracker.register(start, true, false));
-        assert!(tracker.register(start + Duration::from_millis(300), true, false));
-
-        assert!(!tracker.register(start + Duration::from_secs(1), true, false));
-        assert!(!tracker.register(start + Duration::from_millis(1301), true, false));
-    }
-
-    #[test]
-    fn repeat_does_not_count_as_a_second_tap() {
-        let start = Instant::now();
-        let mut tracker = DoubleTapTracker::default();
-
-        assert!(!tracker.register(start, true, false));
-        assert!(!tracker.register(start + Duration::from_millis(50), true, true));
-        assert!(tracker.register(start + Duration::from_millis(100), true, false));
-    }
-
-    #[test]
-    fn disabled_or_reset_tracker_cannot_prearm_creative_flight() {
-        let start = Instant::now();
-        let mut tracker = DoubleTapTracker::default();
-
-        assert!(!tracker.register(start, false, false));
-        assert!(!tracker.register(start + Duration::from_millis(100), true, false));
-        tracker.reset();
-        assert!(!tracker.register(start + Duration::from_millis(200), true, false));
-        assert!(tracker.register(start + Duration::from_millis(250), true, false));
-    }
-
-    #[test]
-    fn successful_double_tap_starts_a_fresh_pair() {
-        let start = Instant::now();
-        let mut tracker = DoubleTapTracker::default();
-
-        assert!(!tracker.register(start, true, false));
-        assert!(tracker.register(start + Duration::from_millis(50), true, false));
-        assert!(!tracker.register(start + Duration::from_millis(100), true, false));
-        assert!(tracker.register(start + Duration::from_millis(150), true, false));
-    }
-
-    #[test]
-    fn only_descending_onto_the_ground_exits_flight() {
-        assert!(should_exit_creative_flight(true, -1.0, true));
-        assert!(!should_exit_creative_flight(true, 0.0, true));
-        assert!(!should_exit_creative_flight(true, 1.0, true));
-        assert!(!should_exit_creative_flight(true, -1.0, false));
-        assert!(!should_exit_creative_flight(false, -1.0, true));
-    }
-}
-
-#[cfg(test)]
-mod sprint_policy_tests {
-    use super::*;
-
-    #[test]
-    fn creative_sprint_ignores_hunger_and_exhaustion() {
-        assert!(sprint_allowed(GameMode::Creative, 0.0));
-        assert_eq!(
-            sprint_exhaustion_amount(GameMode::Creative, true, true, 10.0),
-            0.0
-        );
-    }
-
-    #[test]
-    fn survival_sprint_keeps_hunger_and_exhaustion_rules() {
-        assert!(!sprint_allowed(GameMode::Survival, 6.0));
-        assert!(sprint_allowed(GameMode::Survival, 6.01));
-        assert!(
-            (sprint_exhaustion_amount(GameMode::Survival, true, true, 10.0) - 1.5).abs()
-                < f32::EPSILON
-        );
-        assert_eq!(
-            sprint_exhaustion_amount(GameMode::Survival, false, true, 10.0),
-            0.0
-        );
-        assert_eq!(
-            sprint_exhaustion_amount(GameMode::Survival, true, false, 10.0),
-            0.0
-        );
-    }
-}
-
-#[cfg(test)]
-mod authority_policy_tests {
-    use super::*;
-
-    #[test]
-    fn multiplayer_host_keeps_world_ticks_running_while_paused_or_dead() {
-        let host = MultiplayerRole::Host { port: 25565 };
-        assert!(should_advance_simulation(&host, true, true, false));
-        assert!(should_advance_simulation(&host, true, false, true));
-        assert!(should_advance_simulation(&host, true, true, true));
-        assert!(!should_advance_simulation(&host, false, false, false));
-    }
-
-    #[test]
-    fn singleplayer_pause_and_death_still_stop_world_ticks() {
-        assert!(!should_advance_simulation(
-            &MultiplayerRole::Singleplayer,
-            true,
-            true,
-            false,
-        ));
-        assert!(!should_advance_simulation(
-            &MultiplayerRole::Singleplayer,
-            true,
-            false,
-            true,
-        ));
-        assert!(should_advance_simulation(
-            &MultiplayerRole::Singleplayer,
-            true,
-            false,
-            false,
-        ));
-    }
-
-    #[test]
-    fn replicated_entity_samples_interpolate_without_mutating_authority() {
-        let mut replicated = ReplicatedEntityState::new(99);
-        let state = |sequence, x| crate::network::protocol::EntityStateWire {
-            entity_id: 7,
-            entity_type: crate::entity::EntityType::Zombie.to_wire(),
-            position: [x, 64.0, 0.0],
-            velocity: [1.0, 0.0, 0.0],
-            yaw: 0.0,
-            pitch: 0.0,
-            health: 20.0 - sequence as f32,
-            animation_state: 0,
-            item: None,
-        };
-        assert!(!replicated.push(state(1, 0.0), 1, 1.0));
-        assert!(!replicated.push(state(2, 2.0), 2, 2.0));
-        let sample = replicated.sample(1.5).unwrap();
-        assert_eq!(sample.position, [1.0, 64.0, 0.0]);
-        assert_eq!(sample.health, 18.5);
-        assert_eq!(replicated.snapshots.back().unwrap().state.position[0], 2.0);
-    }
-
-    #[test]
-    fn host_client_sixty_second_entity_checksum_converges_without_client_spawns() {
-        let host_player = Vec3::new(0.0, 64.0, 0.0);
-        let client_player = Vec3::new(96.0, 64.0, 96.0);
-        assert!(host_player.distance(client_player) > 128.0);
-
-        let mut host = crate::entity::Entity::new(
-            7,
-            crate::entity::EntityType::Zombie,
-            Vec3::new(8.0, 64.0, 8.0),
-        );
-        host.velocity = Vec3::new(0.5, 0.0, -0.25);
-        let mut client_entities = crate::entity::EntityManager::new();
-        let local_id = client_entities.spawn(host.entity_type, host.position);
-        let mut replica = ReplicatedEntityState::new(local_id);
-
-        for tick in 1..=1_200u64 {
-            host.position += host.velocity * SIM_TICK_TIME;
-            host.yaw += 0.0025;
-            let state = entity_state_wire(&host);
-            assert!(!replica.push(state, tick, tick as f64 * f64::from(SIM_TICK_TIME)));
-            let visual = replica
-                .sample(tick as f64 * f64::from(SIM_TICK_TIME))
-                .unwrap();
-            apply_entity_wire_state(client_entities.get_by_id_mut(local_id).unwrap(), visual);
-            assert_eq!(
-                client_entities.entities.len(),
-                1,
-                "client spawned an authority-owned living entity at tick {tick}"
-            );
-        }
-
-        let client = client_entities.get_by_id(local_id).unwrap();
-        let checksum = |entity: &crate::entity::Entity| {
-            entity.position.x.to_bits() as u64
-                ^ (entity.position.y.to_bits() as u64).rotate_left(11)
-                ^ (entity.position.z.to_bits() as u64).rotate_left(22)
-                ^ (entity.health.to_bits() as u64).rotate_left(33)
-        };
-        assert_eq!(checksum(client), checksum(&host));
-    }
-
-    #[test]
-    fn host_clamps_remote_pose_before_echoing_authoritative_correction() {
-        let latest = PlayerSnapshot {
-            position: Vec3::ZERO,
-            yaw: 0.0,
-            pitch: 0.0,
-            time: 0.0,
-            sequence: 1,
-            sender_time_millis: 1_000,
-        };
-        let accepted = validated_remote_position(Some(&latest), Vec3::new(1.2, 0.0, 0.0), 1_050);
-        assert_eq!(accepted, Vec3::new(1.2, 0.0, 0.0));
-
-        let corrected = validated_remote_position(Some(&latest), Vec3::new(100.0, 0.0, 0.0), 1_050);
-        assert!((corrected.x - 1.6).abs() < f32::EPSILON);
-        assert_eq!(
-            validated_remote_position(Some(&latest), Vec3::ONE, 999),
-            Vec3::ZERO
-        );
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StationKind {
     Enchanting,
     Brewing,
     Anvil,
-    Furnace,
     Merchant,
-}
-
-pub enum NetworkHandle {
-    None,
-    Host {
-        server_to_host: std::sync::mpsc::Receiver<crate::network::server::ServerToHost>,
-        host_to_server: std::sync::mpsc::Sender<crate::network::server::HostToServer>,
-        thread: Option<std::thread::JoinHandle<()>>,
-    },
-    Client {
-        client_to_game: std::sync::mpsc::Receiver<crate::network::client::ClientToGame>,
-        game_to_client: std::sync::mpsc::Sender<crate::network::client::GameToClient>,
-        thread: Option<std::thread::JoinHandle<()>>,
-    },
-}
-
-/// Opaque bridge between the GPU presentation root and the shared headless
-/// runtime.  Local input is always published through `RuntimeInput`; the
-/// runtime owns authority state and only exposes results after a fixed tick.
-/// Keeping this adapter in the presentation module prevents the renderer from
-/// retaining a second `AuthorityCore` or observing mutable core internals.
-struct EmbeddedRuntimeBridge {
-    runtime: crate::server_runtime::ServerRuntime,
-    input: crate::server_runtime::RuntimeInput,
-    session_id: crate::network::protocol::PlayerId,
-    topology: AuthorityTopology,
-    next_request_id: u128,
-    next_client_sequence: u64,
-    next_pose_sender_time_millis: u64,
-    revisions: std::collections::HashMap<crate::dimension::Dimension, u64>,
-    pending_request_dimensions: std::collections::HashMap<u128, crate::dimension::Dimension>,
-}
-
-impl EmbeddedRuntimeBridge {
-    fn new(
-        role: &MultiplayerRole,
-        world_dir: std::path::PathBuf,
-        seed: u32,
-        difficulty: Difficulty,
-        render_distance: u32,
-        pvp: bool,
-    ) -> Result<Self, crate::server_runtime::ServerConfigError> {
-        let session_id = u64::MAX;
-        let (topology, options) = match role {
-            MultiplayerRole::Singleplayer => (
-                AuthorityTopology::Singleplayer,
-                crate::server_runtime::EmbeddedRuntimeOptions::singleplayer(
-                    crate::server_runtime::LocalSessionProfile::new(session_id, "local"),
-                ),
-            ),
-            MultiplayerRole::Host { .. } => (
-                AuthorityTopology::ListenServer,
-                crate::server_runtime::EmbeddedRuntimeOptions::listen(
-                    crate::server_runtime::LocalSessionProfile::new(session_id, "host"),
-                ),
-            ),
-            MultiplayerRole::Client { .. } => {
-                return Err(crate::server_runtime::ServerConfigError::Invalid {
-                    key: "embedded-runtime".into(),
-                    value: "client".into(),
-                    reason: "client presentations use NetworkClient transport".into(),
-                })
-            }
-        };
-        let mut properties = crate::server_runtime::ServerProperties::default();
-        properties.world_dir = world_dir;
-        properties.seed = u64::from(seed);
-        properties.pvp = pvp;
-        properties.view_distance = render_distance.clamp(2, 32) as u8;
-        properties.simulation_distance = render_distance.clamp(2, 32) as u8;
-        properties.difficulty = match difficulty {
-            Difficulty::Peaceful => "peaceful",
-            Difficulty::Easy => "easy",
-            Difficulty::Normal => "normal",
-            Difficulty::Hard => "hard",
-        }
-        .to_string();
-        if let MultiplayerRole::Host { port } = role {
-            properties.port = *port;
-        }
-        let (runtime, input) =
-            crate::server_runtime::ServerRuntime::new_embedded(properties, options)?;
-        Ok(Self {
-            runtime,
-            input,
-            session_id,
-            topology,
-            next_request_id: 1,
-            next_client_sequence: 1,
-            next_pose_sender_time_millis: 1,
-            revisions: std::collections::HashMap::new(),
-            pending_request_dimensions: std::collections::HashMap::new(),
-        })
-    }
-
-    fn session_id(&self) -> crate::network::protocol::PlayerId {
-        self.session_id
-    }
-
-    fn session_game_mode(&self) -> Option<crate::inventory::GameMode> {
-        self.runtime
-            .authority
-            .session(self.session_id)
-            .map(|session| session.game_mode)
-    }
-
-    fn topology(&self) -> AuthorityTopology {
-        self.topology
-    }
-
-    fn revision_for_dimension(&self, dimension: crate::dimension::Dimension) -> u64 {
-        self.revisions.get(&dimension).copied().unwrap_or_default()
-    }
-
-    fn queue_request(
-        &mut self,
-        mut request: crate::network::protocol::GameplayRequest,
-    ) -> Result<(), crate::server_runtime::RuntimeInputError> {
-        request.request_id = self.next_request_id;
-        request.client_sequence = self.next_client_sequence;
-        request.session_id = self.session_id;
-        request.client_revision = self.revision_for_dimension(
-            crate::dimension::Dimension::from_wire(request.dimension).unwrap_or_default(),
-        );
-        let request_id = request.request_id;
-        let dimension =
-            crate::dimension::Dimension::from_wire(request.dimension).unwrap_or_default();
-        self.input.submit_request(self.session_id, request)?;
-        self.pending_request_dimensions
-            .insert(request_id, dimension);
-        self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
-        self.next_client_sequence = self.next_client_sequence.saturating_add(1);
-        Ok(())
-    }
-
-    fn queue_position(
-        &mut self,
-        sequence: u32,
-        position: glam::Vec3,
-        yaw: f32,
-        pitch: f32,
-    ) -> Result<(), crate::server_runtime::RuntimeInputError> {
-        let sender_time_millis = self.next_pose_sender_time_millis;
-        self.next_pose_sender_time_millis = self
-            .next_pose_sender_time_millis
-            .saturating_add(50)
-            .max(sender_time_millis.saturating_add(1));
-        self.input
-            .try_send(crate::network::server::ServerToHost::ClientPosition {
-                id: self.session_id,
-                sequence,
-                sender_time_millis,
-                x: position.x,
-                y: position.y,
-                z: position.z,
-                yaw,
-                pitch,
-            })
-    }
-
-    fn tick(&mut self) -> std::io::Result<crate::server_runtime::RuntimeTickOutput> {
-        let output = self.runtime.tick_with_output()?;
-        for mutation in &output.snapshot.mutations {
-            if let Some(dimension) = crate::dimension::Dimension::from_wire(mutation.dimension) {
-                self.revisions
-                    .entry(dimension)
-                    .and_modify(|revision| *revision = (*revision).max(mutation.revision))
-                    .or_insert(mutation.revision);
-            }
-        }
-        for event in &output.presentation_events {
-            let crate::server_runtime::RuntimePresentationEvent::GameplayResponse {
-                response, ..
-            } = event
-            else {
-                continue;
-            };
-            if let crate::network::protocol::GameplayOutcome::Accepted { revision } =
-                &response.outcome
-            {
-                if let Some(dimension) =
-                    self.pending_request_dimensions.remove(&response.request_id)
-                {
-                    self.revisions
-                        .entry(dimension)
-                        .and_modify(|current| *current = (*current).max(*revision))
-                        .or_insert(*revision);
-                }
-            } else {
-                self.pending_request_dimensions.remove(&response.request_id);
-            }
-        }
-        Ok(output)
-    }
-
-    fn save_all(&mut self) -> std::io::Result<()> {
-        self.runtime.save_all()
-    }
-
-    fn shutdown(&mut self) -> std::io::Result<()> {
-        self.runtime.shutdown()
-    }
-
-    fn set_session_dimension(&mut self, dimension: crate::dimension::Dimension) -> bool {
-        self.runtime
-            .set_session_dimension(self.session_id, dimension)
-    }
-}
-
-trait TrackedNetworkSender<T> {
-    fn tracked_send(&self, value: T) -> Result<(), std::sync::mpsc::SendError<T>>;
-}
-
-impl<T> TrackedNetworkSender<T> for std::sync::mpsc::Sender<T> {
-    fn tracked_send(&self, value: T) -> Result<(), std::sync::mpsc::SendError<T>> {
-        crate::perf::tracked_send(
-            self,
-            value,
-            std::mem::size_of::<T>() as u64,
-            &crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
-        )
-    }
 }
 
 /// Explicit lifecycle for asynchronous GPU timestamp readback.  Mapping is
@@ -3331,7 +836,6 @@ impl<T> TrackedNetworkSender<T> for std::sync::mpsc::Sender<T> {
 /// in Mapped and is consumed exactly once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuTimestampReadbackState {
-    Unsupported,
     Unmapped,
     CopyEncoded,
     Mapping,
@@ -3426,223 +930,17 @@ impl GpuTimestampReadbackStatus {
 struct GpuTimestampReadbackSlot {
     buffer: wgpu::Buffer,
     status: std::sync::Arc<std::sync::Mutex<GpuTimestampReadbackStatus>>,
+    /// Set by the map_async callback path; polled without taking the mutex.
+    mapping: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Capability gate used by the renderer and HUD. Pass-local timing is only
 /// valid when both feature bits are available.
-pub const fn gpu_timestamp_capability(
-    timestamp_query: bool,
-    inside_passes: bool,
-) -> GpuTimestampReadbackState {
-    if timestamp_query {
-        if inside_passes {
-            GpuTimestampReadbackState::Unmapped
-        } else {
-            GpuTimestampReadbackState::Unsupported
-        }
-    } else {
-        GpuTimestampReadbackState::Unsupported
-    }
-}
-
 #[cfg(test)]
-mod gpu_timestamp_state_tests {
-    use super::GpuTimestampReadbackState as S;
-    #[test]
-    fn transitions_are_ordered_and_failure_is_recoverable() {
-        assert_eq!(S::Unmapped.map_requested(), S::Unmapped);
-        assert_eq!(S::CopyEncoded.map_requested(), S::Mapping);
-        assert_eq!(S::Mapping.map_completed(true), S::Mapped);
-        assert_eq!(S::Mapped.consume(), S::Consumed);
-        assert_eq!(S::Mapping.map_completed(false), S::Unmapped);
-        assert_eq!(S::Unsupported.map_requested(), S::Unsupported);
-        assert_eq!(S::Consumed.consume(), S::Consumed);
-        assert_eq!(S::Mapped.map_requested(), S::Mapped);
-    }
-
-    #[test]
-    fn two_submission_tagged_slots_cannot_be_reused_while_mapping_or_mapped() {
-        let mut slots = [
-            super::GpuTimestampReadbackStatus::unmapped(),
-            super::GpuTimestampReadbackStatus::unmapped(),
-        ];
-        assert!(slots[0].reserve_copy(10));
-        assert!(slots[0].begin_mapping(10));
-        assert!(!slots[0].reserve_copy(11));
-        assert!(slots[1].reserve_copy(11));
-        assert!(slots[1].begin_mapping(11));
-
-        slots[0].map_completed(10, true);
-        assert!(!slots[0].reserve_copy(12));
-        assert!(slots[0].consume(10));
-        assert!(slots[0].reserve_copy(12));
-        assert_eq!(slots[0].submission_tag, Some(12));
-    }
-
-    #[test]
-    fn capability_requires_timestamp_query_and_inside_passes() {
-        assert_eq!(
-            super::gpu_timestamp_capability(false, false),
-            S::Unsupported
-        );
-        assert_eq!(super::gpu_timestamp_capability(true, false), S::Unsupported);
-        assert_eq!(super::gpu_timestamp_capability(true, true), S::Unmapped);
-    }
+pub const fn gpu_timestamp_capability(timestamp_query: bool, inside_passes: bool) -> bool {
+    timestamp_query && inside_passes
 }
 
-#[derive(Debug, Clone, Copy)]
-struct PlayerSnapshot {
-    position: Vec3,
-    yaw: f32,
-    pitch: f32,
-    time: f64,
-    sequence: u32,
-    sender_time_millis: u64,
-}
-
-#[derive(Debug, Clone)]
-struct RemotePlayerState {
-    entity_id: u64,
-    snapshots: std::collections::VecDeque<PlayerSnapshot>,
-    username: String,
-    health: f32,
-    hunger: f32,
-    is_dead: bool,
-    spawn_point: Option<[i32; 3]>,
-    spawn_dimension: Option<crate::dimension::Dimension>,
-    is_sleeping: bool,
-    bed_pos: Option<[i32; 3]>,
-    dimension: crate::dimension::Dimension,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct EntitySnapshot {
-    state: crate::network::protocol::EntityStateWire,
-    time: f64,
-    sequence: u64,
-}
-
-#[derive(Debug)]
-struct ReplicatedEntityState {
-    local_entity_id: u64,
-    snapshots: std::collections::VecDeque<EntitySnapshot>,
-}
-
-impl ReplicatedEntityState {
-    fn new(local_entity_id: u64) -> Self {
-        Self {
-            local_entity_id,
-            snapshots: std::collections::VecDeque::with_capacity(ENTITY_SNAPSHOT_CAPACITY),
-        }
-    }
-
-    fn push(
-        &mut self,
-        state: crate::network::protocol::EntityStateWire,
-        sequence: u64,
-        arrival_time: f64,
-    ) -> bool {
-        if !state.position.iter().all(|value| value.is_finite())
-            || !state.velocity.iter().all(|value| value.is_finite())
-            || !state.yaw.is_finite()
-            || !state.pitch.is_finite()
-            || !state.health.is_finite()
-        {
-            return false;
-        }
-        if self
-            .snapshots
-            .back()
-            .is_some_and(|latest| sequence <= latest.sequence)
-        {
-            return false;
-        }
-        let position = Vec3::from_array(state.position);
-        let should_snap = self.snapshots.back().is_some_and(|latest| {
-            position.distance(Vec3::from_array(latest.state.position)) > ENTITY_SNAP_DISTANCE
-        });
-        if should_snap {
-            self.snapshots.clear();
-        } else if self.snapshots.len() == ENTITY_SNAPSHOT_CAPACITY {
-            self.snapshots.pop_front();
-        }
-        self.snapshots.push_back(EntitySnapshot {
-            state,
-            time: arrival_time,
-            sequence,
-        });
-        should_snap
-    }
-
-    fn sample(&self, target_time: f64) -> Option<crate::network::protocol::EntityStateWire> {
-        let first = self.snapshots.front().copied()?;
-        if self.snapshots.len() == 1 || target_time <= first.time {
-            return Some(first.state);
-        }
-        for index in 1..self.snapshots.len() {
-            let next = self.snapshots[index];
-            if target_time <= next.time {
-                let prev = self.snapshots[index - 1];
-                let span = (next.time - prev.time).max(f64::EPSILON);
-                let t = ((target_time - prev.time) / span).clamp(0.0, 1.0) as f32;
-                let mut state = next.state;
-                state.position = Vec3::from_array(prev.state.position)
-                    .lerp(Vec3::from_array(next.state.position), t)
-                    .to_array();
-                state.velocity = Vec3::from_array(prev.state.velocity)
-                    .lerp(Vec3::from_array(next.state.velocity), t)
-                    .to_array();
-                state.yaw = prev.state.yaw
-                    + ((next.state.yaw - prev.state.yaw + std::f32::consts::PI)
-                        .rem_euclid(std::f32::consts::TAU)
-                        - std::f32::consts::PI)
-                        * t;
-                state.pitch = prev.state.pitch + (next.state.pitch - prev.state.pitch) * t;
-                state.health = prev.state.health + (next.state.health - prev.state.health) * t;
-                return Some(state);
-            }
-        }
-        self.snapshots.back().map(|snapshot| snapshot.state)
-    }
-}
-
-fn entity_animation_state(entity: &crate::entity::Entity) -> u8 {
-    u8::from(entity.on_ground)
-        | (u8::from(entity.target_player) << 1)
-        | (u8::from(entity.is_ignited) << 2)
-        | (u8::from(entity.fire_aspect_timer > 0.0) << 3)
-}
-
-fn entity_state_wire(entity: &crate::entity::Entity) -> crate::network::protocol::EntityStateWire {
-    let item = entity
-        .dropped_stack
-        .as_ref()
-        .map(crate::network::protocol::ItemWire::from_stack)
-        .or_else(|| {
-            entity.dropped_item.map(|item| {
-                let stack = ItemStack::new(item, entity.dropped_count.max(1));
-                crate::network::protocol::ItemWire::from_stack(&stack)
-            })
-        })
-        .or_else(|| {
-            entity.potion.map(|potion| {
-                let mut stack = ItemStack::new(Item::SplashPotion, 1);
-                stack.potion = Some(potion);
-                crate::network::protocol::ItemWire::from_stack(&stack)
-            })
-        });
-    crate::network::protocol::EntityStateWire {
-        entity_id: entity.id,
-        entity_type: entity.entity_type.to_wire(),
-        position: entity.position.to_array(),
-        velocity: entity.velocity.to_array(),
-        yaw: entity.yaw,
-        pitch: entity.pitch,
-        health: entity.health,
-        animation_state: entity_animation_state(entity),
-        item,
-    }
-}
 
 fn apply_entity_wire_state(
     entity: &mut crate::entity::Entity,
@@ -3682,29 +980,6 @@ fn is_replicated_entity_type(entity_type: crate::entity::EntityType) -> bool {
         || entity_type == crate::entity::EntityType::EndCrystal
 }
 
-fn effect_to_wire(
-    effect: crate::brewing::PotionEffect,
-) -> crate::network::protocol::PlayerEffectWire {
-    use crate::brewing::PotionEffect;
-    let (kind, level) = match effect {
-        PotionEffect::Speed { level, .. } => (0, level),
-        PotionEffect::Strength { level, .. } => (1, level),
-        PotionEffect::Healing { level } => (2, level),
-        PotionEffect::Regeneration { level, .. } => (3, level),
-        PotionEffect::NightVision { .. } => (4, 1),
-        PotionEffect::Invisibility { .. } => (5, 1),
-        PotionEffect::FireResistance { .. } => (6, 1),
-        PotionEffect::WaterBreathing { .. } => (7, 1),
-        PotionEffect::Poison { level, .. } => (8, level),
-        PotionEffect::Slowness { level, .. } => (9, level),
-    };
-    crate::network::protocol::PlayerEffectWire {
-        kind,
-        level,
-        remaining_seconds: effect.remaining(),
-    }
-}
-
 fn effect_from_wire(
     effect: crate::network::protocol::PlayerEffectWire,
 ) -> Option<crate::brewing::PotionEffect> {
@@ -3742,207 +1017,6 @@ fn effect_from_wire(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SnapshotPushResult {
-    Accepted,
-    Snapped,
-    Rejected,
-}
-
-impl RemotePlayerState {
-    fn new(entity_id: u64, username: String) -> Self {
-        Self {
-            entity_id,
-            snapshots: std::collections::VecDeque::with_capacity(REMOTE_SNAPSHOT_CAPACITY),
-            username,
-            health: 20.0,
-            hunger: 20.0,
-            is_dead: false,
-            spawn_point: None,
-            spawn_dimension: None,
-            is_sleeping: false,
-            bed_pos: None,
-            dimension: crate::dimension::Dimension::Overworld,
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn push_snapshot(
-        &mut self,
-        position: Vec3,
-        yaw: f32,
-        pitch: f32,
-        sequence: u32,
-        sender_time_millis: u64,
-        arrival_time: f64,
-    ) -> SnapshotPushResult {
-        if !position.is_finite()
-            || !yaw.is_finite()
-            || !pitch.is_finite()
-            || !arrival_time.is_finite()
-        {
-            return SnapshotPushResult::Rejected;
-        }
-
-        let Some(latest) = self.snapshots.back().copied() else {
-            self.snapshots.push_back(PlayerSnapshot {
-                position,
-                yaw,
-                pitch,
-                time: arrival_time,
-                sequence,
-                sender_time_millis,
-            });
-            return SnapshotPushResult::Snapped;
-        };
-
-        if !sequence_is_newer(sequence, latest.sequence)
-            || sender_time_millis <= latest.sender_time_millis
-        {
-            return SnapshotPushResult::Rejected;
-        }
-
-        let sender_delta = (sender_time_millis - latest.sender_time_millis) as f64 / 1000.0;
-        let should_snap = sender_delta > REMOTE_TELEPORT_GAP
-            || position.distance(latest.position) > REMOTE_TELEPORT_DISTANCE;
-        let local_time = if should_snap {
-            arrival_time
-        } else {
-            latest.time + sender_delta
-        };
-
-        if should_snap {
-            self.snapshots.clear();
-        } else if self.snapshots.len() == REMOTE_SNAPSHOT_CAPACITY {
-            self.snapshots.pop_front();
-        }
-        self.snapshots.push_back(PlayerSnapshot {
-            position,
-            yaw,
-            pitch,
-            time: local_time,
-            sequence,
-            sender_time_millis,
-        });
-
-        if should_snap {
-            SnapshotPushResult::Snapped
-        } else {
-            SnapshotPushResult::Accepted
-        }
-    }
-
-    fn sample(&self, target_time: f64) -> Option<PlayerSnapshot> {
-        sample_snapshot_buffer(&self.snapshots, target_time)
-    }
-}
-
-fn placement_decision_for_players<'a>(
-    block: BlockType,
-    block_pos: (i32, i32, i32),
-    local_player_aabb: AABB,
-    remote_players: impl IntoIterator<Item = &'a RemotePlayerState>,
-) -> BlockPlacementDecision {
-    if !block.properties().is_solid {
-        return BlockPlacementDecision::Allowed;
-    }
-
-    let mut player_aabbs = vec![local_player_aabb];
-    for remote in remote_players {
-        let Some(latest) = remote.snapshots.back() else {
-            // Until the host has an authenticated pose for every connected
-            // player, conservatively reject solid placement rather than risk
-            // creating a block inside an unknown player.
-            return BlockPlacementDecision::BlockedByPlayer;
-        };
-        player_aabbs.push(player_aabb_at(latest.position));
-    }
-
-    block_placement_decision(block, 0, block_pos, player_aabbs)
-}
-
-fn sequence_is_newer(candidate: u32, previous: u32) -> bool {
-    let distance = candidate.wrapping_sub(previous);
-    distance != 0 && distance < (1 << 31)
-}
-
-fn interpolate_snapshot(
-    prev: PlayerSnapshot,
-    latest: PlayerSnapshot,
-    target_time: f64,
-) -> PlayerSnapshot {
-    let span = (latest.time - prev.time).max(f64::EPSILON);
-    let t = ((target_time - prev.time) / span).clamp(0.0, 1.0) as f32;
-    PlayerSnapshot {
-        position: prev.position.lerp(latest.position, t),
-        yaw: prev.yaw
-            + ((latest.yaw - prev.yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
-                - std::f32::consts::PI)
-                * t,
-        pitch: prev.pitch + (latest.pitch - prev.pitch) * t,
-        time: target_time,
-        sequence: latest.sequence,
-        sender_time_millis: latest.sender_time_millis,
-    }
-}
-
-fn sample_snapshot_buffer(
-    snapshots: &std::collections::VecDeque<PlayerSnapshot>,
-    target_time: f64,
-) -> Option<PlayerSnapshot> {
-    let first = snapshots.front().copied()?;
-    if snapshots.len() == 1 || target_time <= first.time {
-        return Some(PlayerSnapshot {
-            time: target_time,
-            ..first
-        });
-    }
-
-    for index in 1..snapshots.len() {
-        let next = snapshots[index];
-        if target_time <= next.time {
-            return Some(interpolate_snapshot(
-                snapshots[index - 1],
-                next,
-                target_time,
-            ));
-        }
-    }
-
-    let latest = snapshots.back().copied().unwrap();
-    let previous = snapshots[snapshots.len() - 2];
-    let span = latest.time - previous.time;
-    if span <= f64::EPSILON {
-        return Some(PlayerSnapshot {
-            time: target_time,
-            ..latest
-        });
-    }
-
-    let extrapolation = (target_time - latest.time).clamp(0.0, REMOTE_MAX_EXTRAPOLATION);
-    let mut velocity = (latest.position - previous.position) / span as f32;
-    let speed = velocity.length();
-    if speed > REMOTE_MAX_EXTRAPOLATION_SPEED {
-        velocity *= REMOTE_MAX_EXTRAPOLATION_SPEED / speed;
-    }
-    let yaw_delta = (latest.yaw - previous.yaw + std::f32::consts::PI)
-        .rem_euclid(std::f32::consts::TAU)
-        - std::f32::consts::PI;
-    let yaw_rate =
-        (yaw_delta / span as f32).clamp(-REMOTE_MAX_ANGULAR_SPEED, REMOTE_MAX_ANGULAR_SPEED);
-    let pitch_rate = ((latest.pitch - previous.pitch) / span as f32)
-        .clamp(-REMOTE_MAX_ANGULAR_SPEED, REMOTE_MAX_ANGULAR_SPEED);
-
-    Some(PlayerSnapshot {
-        position: latest.position + velocity * extrapolation as f32,
-        yaw: latest.yaw + yaw_rate * extrapolation as f32,
-        pitch: (latest.pitch + pitch_rate * extrapolation as f32)
-            .clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2),
-        time: target_time,
-        ..latest
-    })
-}
-
 fn normalized_chat_message(input: &str) -> Option<String> {
     let message: String = input
         .trim()
@@ -3951,14 +1025,6 @@ fn normalized_chat_message(input: &str) -> Option<String> {
         .take(CHAT_INPUT_CAPACITY)
         .collect();
     (!message.is_empty()).then_some(message)
-}
-
-fn parse_command_bool(value: &str) -> Option<bool> {
-    match value {
-        "true" | "1" | "yes" | "on" => Some(true),
-        "false" | "0" | "no" | "off" => Some(false),
-        _ => None,
-    }
 }
 
 fn push_chat_history(
@@ -3995,1534 +1061,6 @@ fn project_name_tag(position: Vec3, view_proj: Mat4) -> Option<Vec2> {
         return None;
     }
     Some(Vec2::new(ndc.x, ndc.y))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CatchupStatus {
-    Pending,
-    WorkerInFlight,
-    ServerSubmission { since: Instant },
-    AwaitingAck { since: Instant },
-}
-
-#[derive(Debug)]
-struct PlayerCatchupEntry {
-    key: crate::save::NetworkSnapshotKey,
-    status: CatchupStatus,
-    retries: u8,
-}
-
-enum NetworkInbound {
-    Connected {
-        player_id: crate::network::protocol::PlayerId,
-        seed: u64,
-        gamemode: u8,
-    },
-    Disconnected(String),
-    PlayerJoin {
-        id: crate::network::protocol::PlayerId,
-        username: String,
-    },
-    PlayerLeave(crate::network::protocol::PlayerId),
-    PlayerPosition {
-        id: crate::network::protocol::PlayerId,
-        sequence: u32,
-        sender_time_millis: u64,
-        x: f32,
-        y: f32,
-        z: f32,
-        yaw: f32,
-        pitch: f32,
-    },
-    PlayerAction {
-        id: crate::network::protocol::PlayerId,
-        action: crate::network::protocol::Action,
-    },
-    GameplayRequest {
-        id: crate::network::protocol::PlayerId,
-        request: crate::network::protocol::GameplayRequest,
-    },
-    ClientBlockChange {
-        id: crate::network::protocol::PlayerId,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-        state: u8,
-    },
-    ClientBlockAction {
-        id: crate::network::protocol::PlayerId,
-        action: crate::network::protocol::Action,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-        held_item: Option<crate::network::protocol::ItemWire>,
-    },
-    BlockActionResult {
-        x: i32,
-        y: i32,
-        z: i32,
-        success: bool,
-        consumed_item: bool,
-        drops: Vec<crate::network::protocol::ItemWire>,
-    },
-    AuthoritativeBlockChange {
-        dimension: u8,
-        revision: u64,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-        state: u8,
-        raw_fluid: u8,
-    },
-    BlockEntityDelta {
-        dimension: u8,
-        revision: u64,
-        x: i32,
-        y: i32,
-        z: i32,
-        entity: Option<crate::block_entity::BlockEntity>,
-    },
-    ChunkData {
-        dimension: u8,
-        cx: i32,
-        cz: i32,
-        revision: u64,
-        min_section_y: i8,
-        section_count: u16,
-        blocks: Vec<u8>,
-        block_states: Vec<u8>,
-        fluid_levels: Vec<u8>,
-        block_entities: Vec<u8>,
-    },
-    EntitySpawn {
-        dimension: u8,
-        sequence: u64,
-        state: crate::network::protocol::EntityStateWire,
-    },
-    EntityState {
-        dimension: u8,
-        sequence: u64,
-        state: crate::network::protocol::EntityStateWire,
-    },
-    EntityDespawn {
-        dimension: u8,
-        sequence: u64,
-        entity_id: u64,
-    },
-    PlayerHealth {
-        sequence: u64,
-        player_id: crate::network::protocol::PlayerId,
-        health: f32,
-        max_health: f32,
-        hunger: f32,
-        saturation: f32,
-        oxygen: f32,
-        is_dead: bool,
-        death_reason: u8,
-    },
-    PlayerEffect {
-        sequence: u64,
-        player_id: crate::network::protocol::PlayerId,
-        effects: Vec<crate::network::protocol::PlayerEffectWire>,
-    },
-    PlayerSessionUpdate {
-        sequence: u64,
-        player_id: crate::network::protocol::PlayerId,
-        dimension: u8,
-        state: crate::network::protocol::SessionGameplayWire,
-    },
-    TimeSync {
-        ticks: u64,
-        weather: u8,
-        weather_remaining_ticks: f32,
-    },
-    WorldRulesSync {
-        rules: crate::game_rules::WorldRules,
-    },
-    LightningStrike(crate::network::protocol::LightningStrike),
-    ChatFromClient {
-        id: crate::network::protocol::PlayerId,
-        message: String,
-    },
-    CatchupAccepted {
-        id: crate::network::protocol::PlayerId,
-        dimension: u8,
-        cx: i32,
-        cz: i32,
-        revision: u64,
-    },
-    CatchupBackpressured {
-        id: crate::network::protocol::PlayerId,
-        dimension: u8,
-        cx: i32,
-        cz: i32,
-        revision: u64,
-        mailbox_full_count: u64,
-    },
-    CatchupAck {
-        id: crate::network::protocol::PlayerId,
-        dimension: u8,
-        cx: i32,
-        cz: i32,
-        revision: u64,
-    },
-    ClientRespawnRequest {
-        id: crate::network::protocol::PlayerId,
-    },
-    ClientSleepRequest {
-        id: crate::network::protocol::PlayerId,
-        bed_x: i32,
-        bed_y: i32,
-        bed_z: i32,
-    },
-    Chat {
-        sender: String,
-        message: String,
-    },
-    StatusUpdate(String),
-    GameplayResponse {
-        response: crate::network::protocol::GameplayResponse,
-    },
-    ContainerOpenRequest {
-        id: crate::network::protocol::PlayerId,
-        dimension: u8,
-        x: i32,
-        y: i32,
-        z: i32,
-    },
-    ContainerClickRequest {
-        id: crate::network::protocol::PlayerId,
-        dimension: u8,
-        revision: u64,
-        slot_index: u16,
-        is_left: bool,
-        dragged: Option<crate::network::protocol::ItemWire>,
-    },
-    ContainerClose {
-        id: crate::network::protocol::PlayerId,
-        dimension: u8,
-        x: i32,
-        y: i32,
-        z: i32,
-    },
-    ContainerOpenResult {
-        dimension: u8,
-        success: bool,
-        x: i32,
-        y: i32,
-        z: i32,
-        slots: Vec<Option<crate::network::protocol::ItemWire>>,
-        revision: u64,
-    },
-    ContainerClickResult {
-        dimension: u8,
-        success: bool,
-        slot_index: u16,
-        slot: Option<crate::network::protocol::ItemWire>,
-        dragged: Option<crate::network::protocol::ItemWire>,
-    },
-    ContainerSlotUpdate {
-        dimension: u8,
-        revision: u64,
-        x: i32,
-        y: i32,
-        z: i32,
-        slot_index: u16,
-        slot: Option<crate::network::protocol::ItemWire>,
-    },
-    PlayerRespawnResult {
-        position: [f32; 3],
-        dimension: u8,
-    },
-    SleepStateSync {
-        player_id: crate::network::protocol::PlayerId,
-        is_sleeping: bool,
-    },
-    DimensionTransfer {
-        dimension: u8,
-        position: [f32; 3],
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NetworkDeliveryClass {
-    Reliable,
-    LatestPosition,
-    LatestEntity,
-    LatestHealth,
-    LatestEffect,
-    LatestTimeSync,
-}
-
-fn classify_network_event(event: &NetworkInbound) -> NetworkDeliveryClass {
-    match event {
-        NetworkInbound::PlayerPosition { .. } => NetworkDeliveryClass::LatestPosition,
-        NetworkInbound::EntityState { .. } => NetworkDeliveryClass::LatestEntity,
-        NetworkInbound::PlayerHealth { .. } => NetworkDeliveryClass::LatestHealth,
-        NetworkInbound::PlayerEffect { .. } => NetworkDeliveryClass::LatestEffect,
-        NetworkInbound::TimeSync { .. } => NetworkDeliveryClass::LatestTimeSync,
-        _ => NetworkDeliveryClass::Reliable,
-    }
-}
-
-impl NetworkInbound {
-    fn estimated_bytes(&self) -> usize {
-        let inline = std::mem::size_of_val(self);
-        let heap = match self {
-            Self::Disconnected(reason) | Self::StatusUpdate(reason) => reason.len(),
-            Self::GameplayRequest { request, .. } => request.encoded_len(),
-            Self::GameplayResponse { response } => std::mem::size_of_val(response),
-            Self::PlayerJoin { username, .. } => username.len(),
-            Self::ChunkData {
-                blocks,
-                block_states,
-                ..
-            } => blocks.len().saturating_add(block_states.len()),
-            Self::PlayerEffect { effects, .. } => {
-                effects.len() * std::mem::size_of::<crate::network::protocol::PlayerEffectWire>()
-            }
-            Self::BlockActionResult { drops, .. } => {
-                drops.len() * std::mem::size_of::<crate::network::protocol::ItemWire>()
-            }
-            Self::ChatFromClient { message, .. } => message.len(),
-            Self::Chat { sender, message } => sender.len().saturating_add(message.len()),
-            Self::ContainerOpenRequest { .. } => 0,
-            Self::ContainerClickRequest { dragged, .. } => {
-                dragged.as_ref().map_or(0, |w| std::mem::size_of_val(w))
-            }
-            Self::ContainerClose { .. } => 0,
-            Self::ContainerOpenResult { slots, .. } => {
-                slots.len() * std::mem::size_of::<Option<crate::network::protocol::ItemWire>>()
-            }
-            Self::ContainerClickResult { slot, dragged, .. } => {
-                slot.as_ref().map_or(0, |w| std::mem::size_of_val(w))
-                    + dragged.as_ref().map_or(0, |w| std::mem::size_of_val(w))
-            }
-            Self::ContainerSlotUpdate { slot, .. } => {
-                slot.as_ref().map_or(0, |w| std::mem::size_of_val(w))
-            }
-            _ => 0,
-        };
-        inline.saturating_add(heap)
-    }
-}
-
-#[derive(Default)]
-struct NetworkStaging {
-    reliable: std::collections::VecDeque<NetworkInbound>,
-    latest_positions: std::collections::HashMap<crate::network::protocol::PlayerId, NetworkInbound>,
-    latest_entities: std::collections::HashMap<(u8, u64), NetworkInbound>,
-    latest_health: std::collections::HashMap<crate::network::protocol::PlayerId, NetworkInbound>,
-    latest_effects: std::collections::HashMap<crate::network::protocol::PlayerId, NetworkInbound>,
-    latest_time_sync: Option<NetworkInbound>,
-}
-
-impl NetworkStaging {
-    fn stage(&mut self, event: NetworkInbound) {
-        match classify_network_event(&event) {
-            NetworkDeliveryClass::Reliable => self.reliable.push_back(event),
-            NetworkDeliveryClass::LatestPosition => {
-                let NetworkInbound::PlayerPosition { id, sequence, .. } = &event else {
-                    unreachable!("position delivery class must contain a position event");
-                };
-                let replace = self.latest_positions.get(id).map_or(true, |previous| {
-                    matches!(
-                        previous,
-                        NetworkInbound::PlayerPosition {
-                            sequence: old_sequence,
-                            ..
-                        } if sequence_is_newer(*sequence, *old_sequence)
-                    )
-                });
-                if replace {
-                    self.latest_positions.insert(*id, event);
-                }
-            }
-            NetworkDeliveryClass::LatestEntity => {
-                let NetworkInbound::EntityState {
-                    dimension,
-                    sequence,
-                    state,
-                } = &event
-                else {
-                    unreachable!("entity delivery class must contain an entity-state event");
-                };
-                let key = (*dimension, state.entity_id);
-                let replace = self.latest_entities.get(&key).map_or(true, |previous| {
-                    matches!(
-                        previous,
-                        NetworkInbound::EntityState {
-                            sequence: old_sequence,
-                            ..
-                        } if sequence > old_sequence
-                    )
-                });
-                if replace {
-                    self.latest_entities.insert(key, event);
-                }
-            }
-            NetworkDeliveryClass::LatestHealth => {
-                let NetworkInbound::PlayerHealth {
-                    player_id,
-                    sequence,
-                    ..
-                } = &event
-                else {
-                    unreachable!("health delivery class must contain a health event");
-                };
-                let replace = self.latest_health.get(player_id).map_or(true, |previous| {
-                    matches!(
-                        previous,
-                        NetworkInbound::PlayerHealth {
-                            sequence: old_sequence,
-                            ..
-                        } if sequence > old_sequence
-                    )
-                });
-                if replace {
-                    self.latest_health.insert(*player_id, event);
-                }
-            }
-            NetworkDeliveryClass::LatestEffect => {
-                let NetworkInbound::PlayerEffect {
-                    player_id,
-                    sequence,
-                    ..
-                } = &event
-                else {
-                    unreachable!("effect delivery class must contain an effect event");
-                };
-                let replace = self.latest_effects.get(player_id).map_or(true, |previous| {
-                    matches!(
-                        previous,
-                        NetworkInbound::PlayerEffect {
-                            sequence: old_sequence,
-                            ..
-                        } if sequence > old_sequence
-                    )
-                });
-                if replace {
-                    self.latest_effects.insert(*player_id, event);
-                }
-            }
-            NetworkDeliveryClass::LatestTimeSync => {
-                let NetworkInbound::TimeSync { ticks, .. } = &event else {
-                    unreachable!("time-sync delivery class must contain a time-sync event");
-                };
-                let replace = self.latest_time_sync.as_ref().map_or(true, |previous| {
-                    matches!(
-                        previous,
-                        NetworkInbound::TimeSync {
-                            ticks: old_ticks,
-                            ..
-                        } if ticks > old_ticks
-                    )
-                });
-                if replace {
-                    self.latest_time_sync = Some(event);
-                }
-            }
-        }
-    }
-
-    fn take_smallest_if_fits<K>(
-        map: &mut std::collections::HashMap<K, NetworkInbound>,
-        remaining_bytes: usize,
-    ) -> Option<(NetworkInbound, usize)>
-    where
-        K: Copy + Ord + std::hash::Hash + Eq,
-    {
-        let key = map.keys().min().copied()?;
-        let event_bytes = map.get(&key)?.estimated_bytes();
-        if event_bytes > remaining_bytes {
-            return None;
-        }
-        map.remove(&key).map(|event| (event, event_bytes))
-    }
-
-    /// Remove one event only when its full estimated footprint fits. Reliable
-    /// events are considered first and never skipped, preserving strict FIFO.
-    fn pop_next_if_fits(&mut self, remaining_bytes: usize) -> Option<(NetworkInbound, usize)> {
-        if let Some(event) = self.reliable.front() {
-            let event_bytes = event.estimated_bytes();
-            if event_bytes > remaining_bytes {
-                return None;
-            }
-            return self.reliable.pop_front().map(|event| (event, event_bytes));
-        }
-
-        if !self.latest_positions.is_empty() {
-            return Self::take_smallest_if_fits(&mut self.latest_positions, remaining_bytes);
-        }
-        if !self.latest_entities.is_empty() {
-            return Self::take_smallest_if_fits(&mut self.latest_entities, remaining_bytes);
-        }
-        if !self.latest_health.is_empty() {
-            return Self::take_smallest_if_fits(&mut self.latest_health, remaining_bytes);
-        }
-        if !self.latest_effects.is_empty() {
-            return Self::take_smallest_if_fits(&mut self.latest_effects, remaining_bytes);
-        }
-        let event_bytes = self.latest_time_sync.as_ref()?.estimated_bytes();
-        if event_bytes > remaining_bytes {
-            return None;
-        }
-        self.latest_time_sync
-            .take()
-            .map(|event| (event, event_bytes))
-    }
-
-    fn reliable_len(&self) -> usize {
-        self.reliable.len()
-    }
-
-    fn latest_len(&self) -> usize {
-        self.latest_positions.len()
-            + self.latest_entities.len()
-            + self.latest_health.len()
-            + self.latest_effects.len()
-            + usize::from(self.latest_time_sync.is_some())
-    }
-
-    fn len(&self) -> usize {
-        self.reliable_len() + self.latest_len()
-    }
-
-    fn reliable_bytes(&self) -> u64 {
-        self.reliable
-            .iter()
-            .map(|event| event.estimated_bytes() as u64)
-            .sum()
-    }
-
-    fn latest_bytes(&self) -> u64 {
-        self.latest_positions
-            .values()
-            .chain(self.latest_entities.values())
-            .chain(self.latest_health.values())
-            .chain(self.latest_effects.values())
-            .chain(self.latest_time_sync.iter())
-            .map(|event| event.estimated_bytes() as u64)
-            .sum()
-    }
-}
-
-impl NetworkHandle {
-    fn drain_inbound(&self) -> Vec<NetworkInbound> {
-        const MAX_EVENTS: usize = 256;
-        let started = Instant::now();
-        match self {
-            NetworkHandle::None => Vec::new(),
-            NetworkHandle::Host { server_to_host, .. } => {
-                let mut raw = Vec::with_capacity(MAX_EVENTS);
-                while raw.len() < MAX_EVENTS && started.elapsed() < Duration::from_millis(2) {
-                    match crate::perf::tracked_try_recv(
-                        server_to_host,
-                        std::mem::size_of::<crate::network::server::ServerToHost>() as u64,
-                        &crate::perf::queue_stats(crate::perf::QueueCategory::Inbound),
-                    ) {
-                        Ok(event) => raw.push(event),
-                        Err(_) => break,
-                    }
-                }
-                raw.into_iter()
-                    .into_iter()
-                    .map(|event| match event {
-                        crate::network::server::ServerToHost::Disconnected { reason } => {
-                            NetworkInbound::Disconnected(reason)
-                        }
-                        crate::network::server::ServerToHost::ClientJoined { id, username } => {
-                            NetworkInbound::PlayerJoin { id, username }
-                        }
-                        crate::network::server::ServerToHost::ClientLeft { id } => {
-                            NetworkInbound::PlayerLeave(id)
-                        }
-                        crate::network::server::ServerToHost::ClientPosition {
-                            id,
-                            sequence,
-                            sender_time_millis,
-                            x,
-                            y,
-                            z,
-                            yaw,
-                            pitch,
-                        } => NetworkInbound::PlayerPosition {
-                            id,
-                            sequence,
-                            sender_time_millis,
-                            x,
-                            y,
-                            z,
-                            yaw,
-                            pitch,
-                        },
-                        crate::network::server::ServerToHost::ClientAction { id, action } => {
-                            NetworkInbound::PlayerAction { id, action }
-                        }
-                        crate::network::server::ServerToHost::GameplayRequest { id, request } => {
-                            NetworkInbound::GameplayRequest { id, request }
-                        }
-                        crate::network::server::ServerToHost::ClientBlockChange {
-                            id,
-                            x,
-                            y,
-                            z,
-                            block,
-                            state,
-                        } => NetworkInbound::ClientBlockChange {
-                            id,
-                            x,
-                            y,
-                            z,
-                            block,
-                            state,
-                        },
-                        crate::network::server::ServerToHost::ClientBlockAction {
-                            id,
-                            action,
-                            x,
-                            y,
-                            z,
-                            block,
-                            held_item,
-                        } => NetworkInbound::ClientBlockAction {
-                            id,
-                            action,
-                            x,
-                            y,
-                            z,
-                            block,
-                            held_item,
-                        },
-                        crate::network::server::ServerToHost::ChatFromClient { id, message } => {
-                            NetworkInbound::ChatFromClient { id, message }
-                        }
-                        crate::network::server::ServerToHost::CatchupAccepted {
-                            id,
-                            dimension,
-                            cx,
-                            cz,
-                            revision,
-                        } => NetworkInbound::CatchupAccepted {
-                            id,
-                            dimension,
-                            cx,
-                            cz,
-                            revision,
-                        },
-                        crate::network::server::ServerToHost::CatchupBackpressured {
-                            id,
-                            dimension,
-                            cx,
-                            cz,
-                            revision,
-                            mailbox_full_count,
-                        } => NetworkInbound::CatchupBackpressured {
-                            id,
-                            dimension,
-                            cx,
-                            cz,
-                            revision,
-                            mailbox_full_count,
-                        },
-                        crate::network::server::ServerToHost::CatchupAck {
-                            id,
-                            dimension,
-                            cx,
-                            cz,
-                            revision,
-                        } => NetworkInbound::CatchupAck {
-                            id,
-                            dimension,
-                            cx,
-                            cz,
-                            revision,
-                        },
-                        crate::network::server::ServerToHost::ClientRespawnRequest { id } => {
-                            NetworkInbound::ClientRespawnRequest { id }
-                        }
-                        crate::network::server::ServerToHost::ClientSleepRequest {
-                            id,
-                            bed_x,
-                            bed_y,
-                            bed_z,
-                        } => NetworkInbound::ClientSleepRequest {
-                            id,
-                            bed_x,
-                            bed_y,
-                            bed_z,
-                        },
-                        crate::network::server::ServerToHost::ContainerOpenRequest {
-                            id,
-                            dimension,
-                            x,
-                            y,
-                            z,
-                        } => NetworkInbound::ContainerOpenRequest {
-                            id,
-                            dimension,
-                            x,
-                            y,
-                            z,
-                        },
-                        crate::network::server::ServerToHost::ContainerClickRequest {
-                            id,
-                            dimension,
-                            revision,
-                            slot_index,
-                            is_left,
-                            dragged,
-                        } => NetworkInbound::ContainerClickRequest {
-                            id,
-                            dimension,
-                            revision,
-                            slot_index,
-                            is_left,
-                            dragged,
-                        },
-                        crate::network::server::ServerToHost::ContainerClose {
-                            id,
-                            dimension,
-                            x,
-                            y,
-                            z,
-                        } => NetworkInbound::ContainerClose {
-                            id,
-                            dimension,
-                            x,
-                            y,
-                            z,
-                        },
-                    })
-                    .collect()
-            }
-            NetworkHandle::Client { client_to_game, .. } => {
-                let mut raw = Vec::with_capacity(MAX_EVENTS);
-                while raw.len() < MAX_EVENTS && started.elapsed() < Duration::from_millis(2) {
-                    match crate::perf::tracked_try_recv(
-                        client_to_game,
-                        std::mem::size_of::<crate::network::client::ClientToGame>() as u64,
-                        &crate::perf::queue_stats(crate::perf::QueueCategory::Inbound),
-                    ) {
-                        Ok(event) => raw.push(event),
-                        Err(_) => break,
-                    }
-                }
-                raw.into_iter()
-                    .map(|event| match event {
-                        crate::network::client::ClientToGame::Connected {
-                            player_id,
-                            seed,
-                            gamemode,
-                        } => NetworkInbound::Connected {
-                            player_id,
-                            seed,
-                            gamemode,
-                        },
-                        crate::network::client::ClientToGame::Disconnected { reason } => {
-                            NetworkInbound::Disconnected(reason)
-                        }
-                        crate::network::client::ClientToGame::PlayerJoin { id, username } => {
-                            NetworkInbound::PlayerJoin { id, username }
-                        }
-                        crate::network::client::ClientToGame::PlayerLeave { id } => {
-                            NetworkInbound::PlayerLeave(id)
-                        }
-                        crate::network::client::ClientToGame::PlayerPosition {
-                            id,
-                            sequence,
-                            sender_time_millis,
-                            x,
-                            y,
-                            z,
-                            yaw,
-                            pitch,
-                        } => NetworkInbound::PlayerPosition {
-                            id,
-                            sequence,
-                            sender_time_millis,
-                            x,
-                            y,
-                            z,
-                            yaw,
-                            pitch,
-                        },
-                        crate::network::client::ClientToGame::PlayerAction { id, action } => {
-                            NetworkInbound::PlayerAction { id, action }
-                        }
-                        crate::network::client::ClientToGame::BlockChange {
-                            dimension,
-                            revision,
-                            x,
-                            y,
-                            z,
-                            block,
-                            state,
-                            raw_fluid,
-                        } => NetworkInbound::AuthoritativeBlockChange {
-                            dimension,
-                            revision,
-                            x,
-                            y,
-                            z,
-                            block,
-                            state,
-                            raw_fluid,
-                        },
-                        crate::network::client::ClientToGame::BlockActionResult {
-                            x,
-                            y,
-                            z,
-                            success,
-                            consumed_item,
-                            drops,
-                        } => NetworkInbound::BlockActionResult {
-                            x,
-                            y,
-                            z,
-                            success,
-                            consumed_item,
-                            drops,
-                        },
-                        crate::network::client::ClientToGame::BlockEntityDelta {
-                            dimension,
-                            revision,
-                            x,
-                            y,
-                            z,
-                            entity,
-                        } => NetworkInbound::BlockEntityDelta {
-                            dimension,
-                            revision,
-                            x,
-                            y,
-                            z,
-                            entity,
-                        },
-                        crate::network::client::ClientToGame::ChunkData {
-                            dimension,
-                            cx,
-                            cz,
-                            revision,
-                            min_section_y,
-                            section_count,
-                            blocks,
-                            block_states,
-                            fluid_levels,
-                            block_entities,
-                        } => NetworkInbound::ChunkData {
-                            dimension,
-                            cx,
-                            cz,
-                            revision,
-                            min_section_y,
-                            section_count,
-                            blocks,
-                            block_states,
-                            fluid_levels,
-                            block_entities,
-                        },
-                        crate::network::client::ClientToGame::EntitySpawn {
-                            dimension,
-                            sequence,
-                            state,
-                        } => NetworkInbound::EntitySpawn {
-                            dimension,
-                            sequence,
-                            state,
-                        },
-                        crate::network::client::ClientToGame::EntityState {
-                            dimension,
-                            sequence,
-                            state,
-                        } => NetworkInbound::EntityState {
-                            dimension,
-                            sequence,
-                            state,
-                        },
-                        crate::network::client::ClientToGame::EntityDespawn {
-                            dimension,
-                            sequence,
-                            entity_id,
-                        } => NetworkInbound::EntityDespawn {
-                            dimension,
-                            sequence,
-                            entity_id,
-                        },
-                        crate::network::client::ClientToGame::PlayerHealth {
-                            sequence,
-                            player_id,
-                            health,
-                            max_health,
-                            hunger,
-                            saturation,
-                            oxygen,
-                            is_dead,
-                            death_reason,
-                        } => NetworkInbound::PlayerHealth {
-                            sequence,
-                            player_id,
-                            health,
-                            max_health,
-                            hunger,
-                            saturation,
-                            oxygen,
-                            is_dead,
-                            death_reason,
-                        },
-                        crate::network::client::ClientToGame::PlayerEffect {
-                            sequence,
-                            player_id,
-                            effects,
-                        } => NetworkInbound::PlayerEffect {
-                            sequence,
-                            player_id,
-                            effects,
-                        },
-                        crate::network::client::ClientToGame::PlayerSessionUpdate {
-                            sequence,
-                            player_id,
-                            dimension,
-                            state,
-                        } => NetworkInbound::PlayerSessionUpdate {
-                            sequence,
-                            player_id,
-                            dimension,
-                            state,
-                        },
-                        crate::network::client::ClientToGame::TimeSync {
-                            ticks,
-                            weather,
-                            weather_remaining_ticks,
-                        } => NetworkInbound::TimeSync {
-                            ticks,
-                            weather,
-                            weather_remaining_ticks,
-                        },
-                        crate::network::client::ClientToGame::WorldRulesSync { rules } => {
-                            NetworkInbound::WorldRulesSync { rules }
-                        }
-                        crate::network::client::ClientToGame::GameplayResponse { response } => {
-                            NetworkInbound::GameplayResponse { response }
-                        }
-                        crate::network::client::ClientToGame::LightningStrike(strike) => {
-                            NetworkInbound::LightningStrike(strike)
-                        }
-                        crate::network::client::ClientToGame::Chat { sender, message } => {
-                            NetworkInbound::Chat { sender, message }
-                        }
-                        crate::network::client::ClientToGame::StatusUpdate { message } => {
-                            NetworkInbound::StatusUpdate(message)
-                        }
-                        crate::network::client::ClientToGame::ContainerOpenResult {
-                            dimension,
-                            success,
-                            x,
-                            y,
-                            z,
-                            slots,
-                            revision,
-                        } => NetworkInbound::ContainerOpenResult {
-                            dimension,
-                            success,
-                            x,
-                            y,
-                            z,
-                            slots,
-                            revision,
-                        },
-                        crate::network::client::ClientToGame::ContainerClose {
-                            id,
-                            dimension,
-                            x,
-                            y,
-                            z,
-                        } => NetworkInbound::ContainerClose {
-                            id,
-                            dimension,
-                            x,
-                            y,
-                            z,
-                        },
-                        crate::network::client::ClientToGame::ContainerClickResult {
-                            dimension,
-                            success,
-                            slot_index,
-                            slot,
-                            dragged,
-                        } => NetworkInbound::ContainerClickResult {
-                            dimension,
-                            success,
-                            slot_index,
-                            slot,
-                            dragged,
-                        },
-                        crate::network::client::ClientToGame::ContainerSlotUpdate {
-                            dimension,
-                            revision,
-                            x,
-                            y,
-                            z,
-                            slot_index,
-                            slot,
-                        } => NetworkInbound::ContainerSlotUpdate {
-                            dimension,
-                            revision,
-                            x,
-                            y,
-                            z,
-                            slot_index,
-                            slot,
-                        },
-                        crate::network::client::ClientToGame::PlayerRespawnResult {
-                            position,
-                            dimension,
-                        } => NetworkInbound::PlayerRespawnResult {
-                            position,
-                            dimension,
-                        },
-                        crate::network::client::ClientToGame::SleepStateSync {
-                            player_id,
-                            is_sleeping,
-                        } => NetworkInbound::SleepStateSync {
-                            player_id,
-                            is_sleeping,
-                        },
-                        crate::network::client::ClientToGame::DimensionTransfer {
-                            dimension,
-                            position,
-                        } => NetworkInbound::DimensionTransfer {
-                            dimension,
-                            position,
-                        },
-                    })
-                    .collect()
-            }
-        }
-    }
-
-    fn send_gameplay_response(
-        &self,
-        to: crate::network::protocol::PlayerId,
-        response: crate::network::protocol::GameplayResponse,
-    ) {
-        if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::SendGameplayResponse { to, response },
-            );
-        }
-    }
-
-    fn send_position(
-        &self,
-        sequence: u32,
-        sender_time_millis: u64,
-        position: Vec3,
-        yaw: f32,
-        pitch: f32,
-    ) {
-        match self {
-            NetworkHandle::Host { host_to_server, .. } => {
-                let _ = crate::perf::tracked_send(
-                    host_to_server,
-                    crate::network::server::HostToServer::BroadcastPlayerPosition {
-                        id: 0,
-                        sequence,
-                        sender_time_millis,
-                        x: position.x,
-                        y: position.y,
-                        z: position.z,
-                        yaw,
-                        pitch,
-                    },
-                    std::mem::size_of::<crate::network::server::HostToServer>() as u64,
-                    &crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
-                );
-            }
-            NetworkHandle::Client { game_to_client, .. } => {
-                let _ = crate::perf::tracked_send(
-                    game_to_client,
-                    crate::network::client::GameToClient::SendPosition {
-                        sequence,
-                        sender_time_millis,
-                        x: position.x,
-                        y: position.y,
-                        z: position.z,
-                        yaw,
-                        pitch,
-                    },
-                    std::mem::size_of::<crate::network::client::GameToClient>() as u64,
-                    &crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
-                );
-            }
-            NetworkHandle::None => {}
-        }
-    }
-
-    fn broadcast_player_position(
-        &self,
-        id: crate::network::protocol::PlayerId,
-        sequence: u32,
-        sender_time_millis: u64,
-        position: Vec3,
-        yaw: f32,
-        pitch: f32,
-    ) {
-        if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = crate::perf::tracked_send(
-                host_to_server,
-                crate::network::server::HostToServer::BroadcastPlayerPosition {
-                    id,
-                    sequence,
-                    sender_time_millis,
-                    x: position.x,
-                    y: position.y,
-                    z: position.z,
-                    yaw,
-                    pitch,
-                },
-                std::mem::size_of::<crate::network::server::HostToServer>() as u64,
-                &crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
-            );
-        }
-    }
-
-    fn request_block_change(&self, x: i32, y: i32, z: i32, block: u32) {
-        if let NetworkHandle::Client { game_to_client, .. } = self {
-            let _ = crate::perf::tracked_send(
-                game_to_client,
-                crate::network::client::GameToClient::RequestBlockChange { x, y, z, block },
-                std::mem::size_of::<crate::network::client::GameToClient>() as u64,
-                &crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
-            );
-        }
-    }
-
-    /// Publish one already-typed gameplay operation to a joining client.
-    /// Embedded hosts use `State::submit_authority_request` so their local
-    /// producer shares the runtime FIFO; this method is deliberately a
-    /// socket-only egress seam and never mutates a presentation cache.
-    fn request_gameplay(&self, request: crate::network::protocol::GameplayRequest) {
-        if let NetworkHandle::Client { game_to_client, .. } = self {
-            let _ = crate::perf::tracked_send(
-                game_to_client,
-                crate::network::client::GameToClient::GameplayRequest { request },
-                std::mem::size_of::<crate::network::client::GameToClient>() as u64,
-                &crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
-            );
-        }
-    }
-
-    fn request_block_action(
-        &self,
-        action: crate::network::protocol::Action,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-        held_item: Option<crate::network::protocol::ItemWire>,
-    ) {
-        if let NetworkHandle::Client { game_to_client, .. } = self {
-            let _ = crate::perf::tracked_send(
-                game_to_client,
-                crate::network::client::GameToClient::RequestBlockAction {
-                    action,
-                    x,
-                    y,
-                    z,
-                    block,
-                    held_item,
-                },
-                std::mem::size_of::<crate::network::client::GameToClient>() as u64,
-                &crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
-            );
-        }
-    }
-
-    /// Host-only: fan a block mutation out to every connected client. The host
-    /// applies the mutation locally through the canonical path and then calls
-    /// this so peers render the same world state.
-    fn broadcast_block_change(
-        &self,
-        dimension: crate::dimension::Dimension,
-        revision: u64,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-        state: u8,
-    ) {
-        self.broadcast_block_change_with_raw(dimension, revision, x, y, z, block, state, 0);
-    }
-
-    fn broadcast_block_change_with_raw(
-        &self,
-        dimension: crate::dimension::Dimension,
-        revision: u64,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-        state: u8,
-        raw_fluid: u8,
-    ) {
-        if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::BroadcastBlockChange {
-                    dimension: dimension as u8,
-                    revision,
-                    x,
-                    y,
-                    z,
-                    block,
-                    state,
-                    raw_fluid,
-                },
-            );
-        }
-    }
-
-    fn broadcast_block_entity_delta(
-        &self,
-        dimension: crate::dimension::Dimension,
-        revision: u64,
-        x: i32,
-        y: i32,
-        z: i32,
-        entity: Option<crate::block_entity::BlockEntity>,
-    ) {
-        if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::BroadcastBlockEntityDelta {
-                    dimension: dimension as u8,
-                    revision,
-                    x,
-                    y,
-                    z,
-                    entity,
-                },
-            );
-        }
-    }
-
-    fn broadcast_entity_spawn(
-        &self,
-        dimension: crate::dimension::Dimension,
-        sequence: u64,
-        state: crate::network::protocol::EntityStateWire,
-    ) {
-        if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::BroadcastEntitySpawn {
-                    dimension: dimension as u8,
-                    sequence,
-                    state,
-                },
-            );
-        }
-    }
-
-    fn broadcast_entity_state(
-        &self,
-        dimension: crate::dimension::Dimension,
-        sequence: u64,
-        state: crate::network::protocol::EntityStateWire,
-    ) {
-        if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::BroadcastEntityState {
-                    dimension: dimension as u8,
-                    sequence,
-                    state,
-                },
-            );
-        }
-    }
-
-    fn broadcast_entity_despawn(
-        &self,
-        dimension: crate::dimension::Dimension,
-        sequence: u64,
-        entity_id: u64,
-    ) {
-        if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::BroadcastEntityDespawn {
-                    dimension: dimension as u8,
-                    sequence,
-                    entity_id,
-                },
-            );
-        }
-    }
-
-    fn broadcast_container_slot_update(
-        &self,
-        dimension: u8,
-        revision: u64,
-        x: i32,
-        y: i32,
-        z: i32,
-        slot_index: u16,
-        slot: Option<crate::network::protocol::ItemWire>,
-    ) {
-        if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::BroadcastContainerSlotUpdate {
-                    dimension,
-                    revision,
-                    x,
-                    y,
-                    z,
-                    slot_index,
-                    slot,
-                },
-            );
-        }
-    }
-
-    fn broadcast_player_health(
-        &self,
-        sequence: u64,
-        player_id: crate::network::protocol::PlayerId,
-        state: &PlayerState,
-    ) {
-        if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::BroadcastPlayerHealth {
-                    sequence,
-                    player_id,
-                    health: state.health,
-                    max_health: state.max_health,
-                    hunger: state.hunger,
-                    saturation: state.saturation,
-                    oxygen: state.oxygen,
-                    is_dead: state.is_dead,
-                    death_reason: state.death_reason.map_or(0, DamageSource::to_wire),
-                },
-            );
-        }
-    }
-
-    fn broadcast_player_effects(
-        &self,
-        sequence: u64,
-        player_id: crate::network::protocol::PlayerId,
-        effects: Vec<crate::network::protocol::PlayerEffectWire>,
-    ) {
-        if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::BroadcastPlayerEffect {
-                    sequence,
-                    player_id,
-                    effects,
-                },
-            );
-        }
-    }
-
-    /// Host-only: push a full chunk payload to a specific joining client as
-    /// part of mid-game join catch-up.
-    fn send_chunk_to(
-        &self,
-        dimension: crate::dimension::Dimension,
-        cx: i32,
-        cz: i32,
-        revision: u64,
-        min_section_y: i8,
-        section_count: u16,
-        blocks: Vec<u8>,
-        block_states: Vec<u8>,
-        block_entities: Vec<u8>,
-        to: crate::network::protocol::PlayerId,
-    ) {
-        if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.tracked_send(crate::network::server::HostToServer::SendChunk {
-                dimension: dimension as u8,
-                cx,
-                cz,
-                revision,
-                min_section_y,
-                section_count,
-                blocks,
-                block_states,
-                fluid_levels: Vec::new(),
-                block_entities,
-                to,
-            });
-        }
-    }
-
-    fn disconnect_slow_catchup_client(
-        &self,
-        to: crate::network::protocol::PlayerId,
-        reason: String,
-    ) {
-        if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server
-                .send(crate::network::server::HostToServer::DisconnectCatchupClient { to, reason });
-        }
-    }
-
-    fn broadcast_time_sync(&self, ticks: u64, weather: u8, weather_remaining_ticks: f32) {
-        if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::BroadcastTimeSync {
-                    ticks,
-                    weather,
-                    weather_remaining_ticks,
-                },
-            );
-        }
-    }
-
-    fn send_time_sync_to(
-        &self,
-        ticks: u64,
-        weather: u8,
-        weather_remaining_ticks: f32,
-        to: crate::network::protocol::PlayerId,
-    ) {
-        if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ =
-                host_to_server.tracked_send(crate::network::server::HostToServer::SendTimeSync {
-                    ticks,
-                    weather,
-                    weather_remaining_ticks,
-                    to,
-                });
-        }
-    }
-
-    fn broadcast_world_rules(&self, rules: crate::game_rules::WorldRules) {
-        if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server
-                .tracked_send(crate::network::server::HostToServer::BroadcastWorldRules { rules });
-        }
-    }
-
-    fn send_world_rules_to(
-        &self,
-        rules: crate::game_rules::WorldRules,
-        to: crate::network::protocol::PlayerId,
-    ) {
-        if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server
-                .tracked_send(crate::network::server::HostToServer::SendWorldRules { rules, to });
-        }
-    }
-
-    fn broadcast_lightning_strike(&self, strike: crate::network::protocol::LightningStrike) {
-        if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server
-                .send(crate::network::server::HostToServer::BroadcastLightningStrike { strike });
-        }
-    }
-
-    fn send_respawn_request(&self) {
-        if let NetworkHandle::Client { game_to_client, .. } = self {
-            let _ = game_to_client
-                .tracked_send(crate::network::client::GameToClient::PlayerRespawnRequest);
-        }
-    }
-
-    fn send_sleep_request(&self, x: i32, y: i32, z: i32) {
-        if let NetworkHandle::Client { game_to_client, .. } = self {
-            let _ = game_to_client
-                .tracked_send(crate::network::client::GameToClient::SleepRequest { x, y, z });
-        }
-    }
-
-    fn send_respawn_result(&self, player_id: u64, position: [f32; 3], dimension: u8) {
-        if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::SendPlayerRespawnResult {
-                    to: player_id,
-                    position,
-                    dimension,
-                },
-            );
-        }
-    }
-
-    fn broadcast_sleep_state_sync(&self, player_id: u64, is_sleeping: bool) {
-        if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::BroadcastSleepStateSync {
-                    player_id,
-                    is_sleeping,
-                },
-            );
-        }
-    }
-
-    fn send_action(&self, action: crate::network::protocol::Action) {
-        match self {
-            NetworkHandle::Host { host_to_server, .. } => {
-                let _ = host_to_server.tracked_send(
-                    crate::network::server::HostToServer::BroadcastPlayerAction { id: 0, action },
-                );
-            }
-            NetworkHandle::Client { game_to_client, .. } => {
-                let _ = game_to_client
-                    .tracked_send(crate::network::client::GameToClient::SendAction { action });
-            }
-            NetworkHandle::None => {}
-        }
-    }
-
-    fn send_chat(&self, sender: String, message: String) {
-        match self {
-            NetworkHandle::Host { host_to_server, .. } => {
-                let _ = host_to_server.tracked_send(
-                    crate::network::server::HostToServer::BroadcastChat { sender, message },
-                );
-            }
-            NetworkHandle::Client { game_to_client, .. } => {
-                let _ = game_to_client
-                    .tracked_send(crate::network::client::GameToClient::SendChat { message });
-            }
-            NetworkHandle::None => {}
-        }
-    }
-
-    fn notify_player_join(&self, id: crate::network::protocol::PlayerId, username: String) {
-        if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::NotifyPlayerJoin { id, username },
-            );
-        }
-    }
-
-    fn shutdown(&mut self) {
-        let thread = match self {
-            NetworkHandle::None => None,
-            NetworkHandle::Host {
-                host_to_server,
-                thread,
-                ..
-            } => {
-                let _ = host_to_server.tracked_send(crate::network::server::HostToServer::Stop);
-                thread.take()
-            }
-            NetworkHandle::Client {
-                game_to_client,
-                thread,
-                ..
-            } => {
-                let _ =
-                    game_to_client.tracked_send(crate::network::client::GameToClient::Disconnect);
-                thread.take()
-            }
-        };
-        if let Some(thread) = thread {
-            let _ = thread.join();
-        }
-        crate::perf::reset_network_queue_stats();
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -5565,47 +1103,17 @@ fn perspective_camera_transform(
     }
 }
 
-#[cfg(test)]
-mod camera_perspective_tests {
-    use super::*;
-
-    #[test]
-    fn f5_cycles_like_minecraft() {
-        let first = CameraPerspective::FirstPerson;
-        let back = first.next();
-        let front = back.next();
-        assert_eq!(back, CameraPerspective::ThirdPersonBack);
-        assert_eq!(front, CameraPerspective::ThirdPersonFront);
-        assert_eq!(front.next(), CameraPerspective::FirstPerson);
-    }
-
-    #[test]
-    fn front_camera_sits_ahead_and_looks_back_at_player() {
-        let (offset, view_yaw, view_pitch) =
-            perspective_camera_transform(CameraPerspective::ThirdPersonFront, 0.35, -0.2);
-        let view_forward = Vec3::new(
-            view_yaw.cos() * view_pitch.cos(),
-            view_pitch.sin(),
-            view_yaw.sin() * view_pitch.cos(),
-        )
-        .normalize();
-        assert!((offset.length() - 4.0).abs() < 1e-5);
-        assert!(offset.normalize().dot(view_forward) < -0.999);
-    }
-}
 
 pub struct State {
     pub window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    surface: Option<wgpu::Surface<'static>>,
+    device: Option<wgpu::Device>,
+    queue: Option<wgpu::Queue>,
     config: wgpu::SurfaceConfiguration,
     pub size: winit::dpi::PhysicalSize<u32>,
     terrain_render_pipeline: wgpu::RenderPipeline,
     terrain_trans_pipeline: wgpu::RenderPipeline,
     region_bind_group_layout: wgpu::BindGroupLayout,
-    render_pipeline: wgpu::RenderPipeline,
-    trans_pipeline: wgpu::RenderPipeline,
     crack_pipeline: wgpu::RenderPipeline,
     sky_pipeline: wgpu::RenderPipeline,
     pub camera: Camera,
@@ -5613,7 +1121,7 @@ pub struct State {
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     depth_view: wgpu::TextureView,
-    pub chunk_manager: ChunkManager,
+    pub chunk_manager: PresentationChunks,
     pub chunk_meshes: std::collections::HashMap<(i32, i32), ChunkMesh>,
     pub render_regions: std::collections::HashMap<(i32, i32), RenderRegion>,
     /// At most one low-priority compaction candidate is staged per frame.
@@ -5629,7 +1137,6 @@ pub struct State {
     chunk_lifetimes: std::collections::HashMap<(i32, i32), u64>,
     next_chunk_lifetime: u64,
     terrain_generation: u64,
-    los_world_revision: u64,
     submitted_terrain_triangles: u64,
     submitted_terrain_draw_calls: usize,
     visible_chunk_count: usize,
@@ -5640,7 +1147,6 @@ pub struct State {
     jump_taps: DoubleTapTracker,
     #[allow(dead_code)]
     texture_atlas: crate::texture::TextureAtlas,
-    crosshair_pipeline: wgpu::RenderPipeline,
     crosshair_buffer: wgpu::Buffer,
     pub is_paused: bool,
     mouse_ndc: [f32; 2],
@@ -5674,15 +1180,13 @@ pub struct State {
     crack_vertex_buffer: wgpu::Buffer,
     crack_index_buffer: wgpu::Buffer,
     pub player_state: PlayerState,
-    pub void_damage_timer: f32,
     pub world_time: crate::camera::WorldTime,
     pub show_debug: bool,
     /// F5 cycles first person, third-person back, and third-person front.
     pub camera_perspective: CameraPerspective,
     pub entity_manager: crate::entity::EntityManager,
-    pub mount_manager: crate::vehicle::MountManager,
-    pub fishing_manager: crate::fishing::FishingManager,
-    pub map_manager: crate::navigation::MapManager,
+    /// Authority session overlay: local player's fishing hook entity id, if any.
+    presented_fishing_hook_entity: Option<u64>,
     mob_instanced_pipeline: wgpu::RenderPipeline,
     particle_instanced_pipeline: wgpu::RenderPipeline,
 
@@ -5698,7 +1202,7 @@ pub struct State {
     mob_cuboid_instance_buffers: [wgpu::Buffer; 3],
     mob_quad_instance_buffers: [wgpu::Buffer; 3],
     particle_instance_buffers: [wgpu::Buffer; 3],
-    frame_resource_pool: crate::gpu_frame_resources::FrameResourcePool<()>,
+    frame_resource_pool: crate::gpu_frame_resources::FrameResourcePool,
     gpu_completion_tx: std::sync::mpsc::Sender<u64>,
     gpu_completion_rx: std::sync::mpsc::Receiver<u64>,
     next_gpu_submission_id: u64,
@@ -5706,10 +1210,11 @@ pub struct State {
     mob_cuboid_instances_scratch: Vec<crate::mob_renderer::MobInstance>,
     mob_quad_instances_scratch: Vec<crate::mob_renderer::MobInstance>,
     particle_instances_scratch: Vec<crate::particles::ParticleInstance>,
+    /// CPU pack for one write_buffer → ring staging → GPU copies per frame.
+    frame_upload_cpu: Vec<u8>,
+    frame_upload_staging_buffers: [wgpu::Buffer; 3],
     mob_cuboid_num_instances: u32,
     mob_quad_num_instances: u32,
-    mob_vertex_buffer: wgpu::Buffer,
-    mob_index_buffer: wgpu::Buffer,
     mob_num_indices: u32,
     hand_pipeline: wgpu::RenderPipeline,
     hand_vertex_buffer: wgpu::Buffer,
@@ -5719,8 +1224,6 @@ pub struct State {
     hand_camera_buffer: wgpu::Buffer,
     hand_camera_bind_group: wgpu::BindGroup,
     pub particles: crate::particles::ParticleSystem,
-    particle_vertex_buffer: wgpu::Buffer,
-    particle_index_buffer: wgpu::Buffer,
     particle_num_indices: u32,
     torch_smoke_timer: f32,
     total_time: f32,
@@ -5739,15 +1242,6 @@ pub struct State {
     pub translation_catalog: crate::localization::TranslationCatalog,
     pub footstep_accumulator: f32,
     pub was_on_ground: bool,
-    pub water_tick_timer: f32,
-    pub lava_tick_timer: f32,
-    pub lava_damage_timer: f32,
-    pub cactus_damage_timer: f32,
-    boss_maintenance_timer: f32,
-    pub save_manager: std::sync::Arc<std::sync::Mutex<crate::save::SaveManager>>,
-    pub save_tx: crate::save::SaveQueue,
-    save_queue_stats: std::sync::Arc<crate::save::SaveQueueStats>,
-    pub autosave_timer: f32,
     pub is_saving: bool,
     pub save_error: Option<String>,
     pub is_sprinting: bool,
@@ -5762,6 +1256,7 @@ pub struct State {
     debug_frame_samples: u32,
     debug_fps: f32,
     debug_frame_ms: f32,
+    debug_memory_bytes: usize,
     perf_recorder: crate::perf::PerfRecorder,
     perf_summaries: [crate::perf::ScopeSummary; crate::perf::SCOPE_COUNT],
     perf_counters: crate::perf::PerfCounters,
@@ -5780,35 +1275,31 @@ pub struct State {
     gpu_pass_timing_submission_tag: Option<u64>,
     gpu_timestamps_supported: bool,
     gpu_timestamps_inside_passes: bool,
+    supported_present_modes: Vec<wgpu::PresentMode>,
     terrain_candidates_scratch: Vec<crate::chunk_render::DrawCandidate>,
     terrain_draw_plan_scratch: crate::chunk_render::DrawPlan,
-    pub entity_los_manager: crate::culling::EntityLosManager,
+    lod_fills_scratch: Vec<crate::world::SectionKey>,
     visible_sections_scratch: std::collections::HashSet<(i32, i8, i32)>,
     section_visibility_scratch: crate::culling::SectionVisibilityScratch,
-    mob_vertices_scratch: Vec<Vertex>,
-    mob_indices_scratch: Vec<u32>,
-    particle_vertices_scratch: Vec<Vertex>,
-    particle_indices_scratch: Vec<u32>,
     hand_vertices_scratch: Vec<Vertex>,
     hand_indices_scratch: Vec<u32>,
     last_hand_mesh_key: Option<crate::hand_renderer::HandMeshKey>,
     ui_vertices_scratch: Vec<UiVertex>,
     ui_line_vertices_scratch: Vec<UiVertex>,
+    ui_textured_vertices_scratch: Vec<TexturedUiVertex>,
     debug_str_scratch: String,
+    hud_str_scratch: String,
+    inventory_slots_scratch: Vec<(SlotType, f32, f32, f32, f32)>,
     pub active_station: Option<StationKind>,
     pub container_target: Option<(i32, i32, i32)>,
     pub container_is_double: bool,
-    pub container_sessions: crate::container_sessions::ContainerSessionManager,
     pub enchanting: crate::enchantment::EnchantingState,
     pub brewing: crate::brewing::BrewingStandState,
     pub anvil: crate::enchantment::AnvilState,
     pub potion_effects: crate::brewing::EffectManager,
-    pub redstone: crate::redstone::RedstoneSystem,
-    redstone_tick_timer: f32,
-    furnace_tick_timer: f32,
     pub recipe_book_open: bool,
     pub recipe_book_search: String,
-    pub weather: crate::weather::WeatherSystem,
+    pub weather: crate::weather::WeatherPresentation,
     pub settings: GameSettings,
     /// Presentation-only timer for the End/dragon completion flash.
     pub end_flash_time: f32,
@@ -5824,8 +1315,6 @@ pub struct State {
     pub current_dimension: crate::dimension::Dimension,
     portal_contact_time: f32,
     portal_cooldown: f32,
-    wither_effect_timer: f32,
-    wither_damage_timer: f32,
     pub advancement_manager: crate::advancements::AdvancementManager,
     pub advancement_gui: crate::advancements::AdvancementGui,
     pub role: MultiplayerRole,
@@ -5841,17 +1330,6 @@ pub struct State {
         std::collections::HashMap<crate::network::protocol::PlayerId, RemotePlayerState>,
     /// Client-only visual copies of host-owned non-player entities.
     replicated_entities: std::collections::HashMap<u64, ReplicatedEntityState>,
-    /// Host-only set used to emit reliable spawn/despawn lifecycle edges.
-    replicated_entity_ids: std::collections::HashSet<u64>,
-    entity_replication_sequence: u64,
-    /// Host-owned survival state for joining players. Clients display only the
-    /// replicated entry matching `local_player_id`.
-    remote_player_health:
-        std::collections::HashMap<crate::network::protocol::PlayerId, PlayerState>,
-    remote_player_effects: std::collections::HashMap<
-        crate::network::protocol::PlayerId,
-        crate::brewing::EffectManager,
-    >,
     client_player_health_sequence: u64,
     client_player_effect_sequence: u64,
     /// Private session projection ordering is independent from the legacy
@@ -5859,22 +1337,17 @@ pub struct State {
     /// orders snapshots within a dimension.
     client_session_projection: Option<(u8, u64, u64)>,
     pub network_status: Option<String>,
-    pub last_gameplay_response: Option<crate::network::protocol::GameplayResponse>,
     pub chat_messages: std::collections::VecDeque<(String, String)>,
     pub chat_input: String,
     pub is_chat_open: bool,
     pub connection_lost: bool,
     network_position_timer: f32,
     network_pose_sequence: u32,
-    pub poi_manager: crate::village::PoiManager,
-    pub merchant_sessions: crate::village::MerchantSessionManager,
-    pub raid_manager: crate::village::RaidManager,
     pub active_merchant_villager_id: Option<u64>,
     pub active_merchant_offers: Vec<crate::village::trade::TradeOffer>,
     pub active_merchant_profession: crate::village::poi::VillagerProfession,
     pub active_merchant_level: crate::village::trade::VillagerLevel,
     pub active_merchant_xp: u32,
-    network_time_sync_timer: f32,
     network_time: f64,
     /// Client-only: chunk payloads that arrived from the host before the chunk
     /// was streamed in. Applied when `update_chunks` loads the coordinate.
@@ -5887,138 +1360,11 @@ pub struct State {
         std::collections::HashMap<(i32, i32, i32), (u64, u32, u8, u8)>,
     >,
     client_chunk_revisions: std::collections::HashMap<(crate::dimension::Dimension, i32, i32), u64>,
-    /// Host-only persistent latest revision per mutated chunk. Keeping only
-    /// the latest value bounds history while retaining unloaded coordinates.
-    mutation_revisions: crate::save::MutationRevisionIndex,
-    mutation_revision_generation: u64,
-    mutation_index_persist_in_flight: Option<u64>,
-    mutation_index_dirty: bool,
-    network_snapshot_worker: crate::save::NetworkSnapshotWorker,
-    /// Host-only ACK-owned catch-up entries per joining client.
-    pending_player_catchups:
-        std::collections::HashMap<crate::network::protocol::PlayerId, Vec<PlayerCatchupEntry>>,
-    catchup_round_robin_cursor: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SlotType {
-    Creative(Item),
-    Hotbar(usize),
-    Backpack(usize),
-    Armor(usize),
-    Offhand,
-    CraftInput(usize),
-    CraftOutput,
-    EnchantInput,
-    EnchantLapis,
-    BrewBottle(usize),
-    BrewIngredient,
-    ContainerSlot(usize),
-    AnvilLeft,
-    AnvilRight,
-    AnvilOutput,
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InventoryLayoutKind {
-    CreativeCatalog,
-    Standard,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct InventoryUiRect {
-    x0: f32,
-    x1: f32,
-    y0: f32,
-    y1: f32,
-}
-
-impl InventoryUiRect {
-    fn contains(self, x: f32, y: f32) -> bool {
-        x >= self.x0 && x <= self.x1 && y >= self.y0 && y <= self.y1
-    }
-}
-
-fn inventory_layout_kind(
-    game_mode: GameMode,
-    station_open: bool,
-    crafting_table_open: bool,
-) -> InventoryLayoutKind {
-    if game_mode == GameMode::Creative && !station_open && !crafting_table_open {
-        InventoryLayoutKind::CreativeCatalog
-    } else {
-        InventoryLayoutKind::Standard
-    }
-}
-
-fn creative_slot_metrics(aspect: f32) -> (f32, f32, f32, f32) {
-    let safe_aspect = aspect.max(0.1);
-    let slot_w = 0.08_f32.min(0.15 / safe_aspect);
-    let slot_h = slot_w * safe_aspect;
-    let gap = 0.01;
-    let grid_w = CREATIVE_COLUMNS as f32 * slot_w + (CREATIVE_COLUMNS - 1) as f32 * gap;
-    let start_x = -grid_w / 2.0;
-    (slot_w, slot_h, gap, start_x)
-}
-
-fn creative_catalog_slot_rect(index: usize, aspect: f32) -> InventoryUiRect {
-    let (slot_w, slot_h, gap, start_x) = creative_slot_metrics(aspect);
-    let row = index / CREATIVE_COLUMNS;
-    let column = index % CREATIVE_COLUMNS;
-    let x0 = start_x + column as f32 * (slot_w + gap);
-    let y1 = 0.64 - row as f32 * (slot_h + gap);
-    InventoryUiRect {
-        x0,
-        x1: x0 + slot_w,
-        y0: y1 - slot_h,
-        y1,
-    }
-}
-
-fn creative_hotbar_slot_rect(index: usize, aspect: f32) -> InventoryUiRect {
-    let (slot_w, slot_h, gap, start_x) = creative_slot_metrics(aspect);
-    let x0 = start_x + index as f32 * (slot_w + gap);
-    InventoryUiRect {
-        x0,
-        x1: x0 + slot_w,
-        y0: -0.85,
-        y1: -0.85 + slot_h,
-    }
-}
-
-fn creative_tab_rect(index: usize) -> InventoryUiRect {
-    let width = 0.125;
-    let gap = 0.005;
-    let start_x = -(CreativeTab::TABS.len() as f32 * width
-        + (CreativeTab::TABS.len() - 1) as f32 * gap)
-        / 2.0;
-    let x0 = start_x + index as f32 * (width + gap);
-    InventoryUiRect {
-        x0,
-        x1: x0 + width,
-        y0: 0.78,
-        y1: 0.88,
-    }
-}
-
-fn creative_scroll_track_rect(aspect: f32) -> InventoryUiRect {
-    let first = creative_catalog_slot_rect(0, aspect);
-    let last = creative_catalog_slot_rect(CREATIVE_VISIBLE_SLOTS - 1, aspect);
-    InventoryUiRect {
-        x0: first.x0
-            + CREATIVE_COLUMNS as f32
-                * (creative_slot_metrics(aspect).0 + creative_slot_metrics(aspect).2)
-            - creative_slot_metrics(aspect).2
-            + 0.02,
-        x1: first.x0
-            + CREATIVE_COLUMNS as f32
-                * (creative_slot_metrics(aspect).0 + creative_slot_metrics(aspect).2)
-            - creative_slot_metrics(aspect).2
-            + 0.045,
-        y0: last.y0,
-        y1: first.y1,
-    }
-}
+use inventory_ui::*;
+pub use inventory_ui::SlotType;
 
 impl State {
     fn sync_translation_catalog(&mut self) {
@@ -6040,7 +1386,7 @@ impl State {
     }
 
     pub fn translate(&self, key: &str) -> String {
-        self.translation_catalog.lookup(key)
+        self.translation_catalog.lookup(key).to_string()
     }
 
     pub fn localized_item_name(&self, item: crate::inventory::Item) -> String {
@@ -6076,61 +1422,51 @@ impl State {
         depth_texture.create_view(&wgpu::TextureViewDescriptor::default())
     }
 
-    pub async fn new(window: Arc<Window>, launch: WorldLaunch, settings: GameSettings) -> Self {
+    pub fn into_gpu_context(mut self) -> crate::presentation::bootstrap::GpuContext {
+        crate::presentation::bootstrap::GpuContext {
+            surface: self
+                .surface
+                .take()
+                .expect("presentation surface already taken"),
+            device: self
+                .device
+                .take()
+                .expect("presentation device already taken"),
+            queue: self
+                .queue
+                .take()
+                .expect("presentation queue already taken"),
+            config: self.config.clone(),
+            size: self.size,
+            supported_present_modes: self.supported_present_modes.clone(),
+            gpu_timestamps_supported: self.gpu_timestamps_supported,
+            gpu_timestamps_inside_passes: self.gpu_timestamps_inside_passes,
+        }
+    }
+
+
+    pub async fn new(
+        window: Arc<Window>,
+        launch: WorldLaunch,
+        settings: GameSettings,
+        gpu: crate::presentation::bootstrap::GpuContext,
+    ) -> Self {
         let role = launch.role.clone();
         let is_client = matches!(role, MultiplayerRole::Client { .. });
         let in_process_authority = matches!(
             &role,
             MultiplayerRole::Singleplayer | MultiplayerRole::Host { .. }
         );
-        let size = window.inner_size();
-        // The NVIDIA Vulkan ICD crashes during the menu-to-world transition on
-        // this Windows setup. `PRIMARY` still chooses Vulkan first, so force
-        // DX12 here to match the menu and keep other platforms unchanged.
-        let backends = if cfg!(target_os = "windows") {
-            wgpu::Backends::DX12
-        } else {
-            wgpu::Backends::PRIMARY
-        };
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends,
-            ..Default::default()
-        });
-
-        let surface = instance.create_surface(window.clone()).unwrap();
-
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await
-            .unwrap();
-
-        let adapter_features = adapter.features();
-        let gpu_timestamps_supported = adapter_features.contains(wgpu::Features::TIMESTAMP_QUERY);
-        let gpu_timestamps_inside_passes =
-            adapter_features.contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES);
-        let mut required_features = wgpu::Features::empty();
-        if gpu_timestamps_supported {
-            required_features |= wgpu::Features::TIMESTAMP_QUERY;
-            if gpu_timestamps_inside_passes {
-                required_features |= wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES;
-            }
-        }
-
-        let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    required_features,
-                    required_limits: wgpu::Limits::default(),
-                    label: None,
-                },
-                None,
-            )
-            .await
-            .unwrap();
+        let crate::presentation::bootstrap::GpuContext {
+            surface,
+            device,
+            queue,
+            config,
+            size,
+            supported_present_modes,
+            gpu_timestamps_supported,
+            gpu_timestamps_inside_passes,
+        } = gpu;
 
         let (gpu_timestamp_query_set, gpu_timestamp_resolve_buffer, gpu_timestamp_readback_slots) =
             if gpu_timestamps_inside_passes {
@@ -6159,6 +1495,7 @@ impl State {
                         status: std::sync::Arc::new(std::sync::Mutex::new(
                             GpuTimestampReadbackStatus::unmapped(),
                         )),
+                        mapping: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     })
                     .collect();
                 (Some(query_set), Some(resolve_buffer), readback_slots)
@@ -6166,74 +1503,31 @@ impl State {
                 (None, None, Vec::new())
             };
 
-        let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .unwrap_or(surface_caps.formats[0]);
-
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format,
-            width: size.width,
-            height: size.height,
-            present_mode: if settings.vsync {
-                wgpu::PresentMode::Fifo
-            } else if surface_caps
-                .present_modes
-                .contains(&wgpu::PresentMode::Mailbox)
-            {
-                wgpu::PresentMode::Mailbox
-            } else if surface_caps
-                .present_modes
-                .contains(&wgpu::PresentMode::Immediate)
-            {
-                wgpu::PresentMode::Immediate
-            } else {
-                wgpu::PresentMode::Fifo
-            },
-            alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-        surface.configure(&device, &config);
-
         // Setup Depth Buffer
         let depth_view = Self::create_depth_texture(&device, &config);
 
-        // Initialize SaveManager
-        let save_manager = std::sync::Arc::new(std::sync::Mutex::new(
-            crate::save::SaveManager::new(&launch.world_dir),
-        ));
-        let current_dimension = if is_client {
-            crate::dimension::Dimension::Overworld
-        } else {
-            save_manager.lock().unwrap().load_current_dimension()
-        };
-
-        // The save queue is bounded by unique chunk keys and coalesces newer
-        // revisions before the worker sees them.
-        let save_tx = crate::save::spawn_save_worker(
-            std::sync::Arc::clone(&save_manager),
-            crate::save::SAVE_QUEUE_CAPACITY,
+        let crate::presentation::bootstrap::LaunchWorldState {
+            current_dimension,
+            player_physics,
+            game_mode,
+            inventory,
+            player_state,
+            camera_yaw,
+            camera_pitch,
+            world_time,
+            world_seed,
+            world_spawn,
+            world_rules,
+            world_type,
+            generate_structures,
+            bonus_chest,
+            cheats_enabled,
+            advancement_progress,
+        } = crate::presentation::bootstrap::load_launch_world_state(
+            &launch,
+            is_client,
+            in_process_authority,
         );
-        let save_queue_stats = save_tx.stats();
-        let network_snapshot_worker = crate::save::spawn_network_snapshot_worker(
-            std::sync::Arc::clone(&save_manager),
-            crate::save::NETWORK_SNAPSHOT_QUEUE_CAPACITY,
-        );
-        let mut mutation_revisions = if is_client {
-            crate::save::MutationRevisionIndex::default()
-        } else {
-            save_manager.lock().unwrap().load_mutation_revision_index()
-        };
-        let mut mutation_index_dirty = false;
-        let mut mutation_index_load_error = None;
-
-        // Initialize physics and keyboard input
-        let mut player_physics = PlayerPhysics::new(Vec3::new(8.0, 80.0, 8.0));
         let keys = KeyState::default();
 
         let mut resource_pack_manager = crate::resources::ResourcePackManager::discover_default();
@@ -6255,78 +1549,6 @@ impl State {
         audio_manager.set_volume(settings.effective_sound_volume());
         audio_manager.set_weather_volume(settings.weather_volume);
 
-        // Load save data if exists
-        let creation_options = crate::menu::load_world_creation_options(&launch.world_dir);
-        let mut game_mode = launch.game_mode;
-        let mut inventory = match launch.game_mode {
-            GameMode::Creative => Inventory::new_creative(),
-            GameMode::Survival | GameMode::Adventure | GameMode::Spectator => Inventory::new(),
-        };
-        let mut player_state = PlayerState::new();
-        let mut camera_yaw = f32::to_radians(90.0);
-        let mut camera_pitch = f32::to_radians(-20.0);
-        let mut world_time = crate::camera::WorldTime::new();
-        let mut world_seed = launch.seed;
-        let mut world_spawn =
-            if creation_options.world_type == crate::game_rules::WorldType::Superflat {
-                (8, 65, 8)
-            } else {
-                (8, 80, 8)
-            };
-        let mut world_rules = crate::game_rules::WorldRules {
-            hardcore: creation_options.hardcore,
-            ..Default::default()
-        };
-        let mut world_type = creation_options.world_type;
-        let mut generate_structures = creation_options.generate_structures;
-        let mut bonus_chest = creation_options.bonus_chest;
-        let mut cheats_enabled = creation_options.cheats_enabled || is_client;
-
-        let mut advancement_progress = crate::advancements::AdvancementProgressData::default();
-        let has_save = !is_client && {
-            let mgr = save_manager.lock().unwrap();
-            mgr.load_player_and_level().is_ok()
-        };
-
-        if has_save {
-            let (level, player) = {
-                let mgr = save_manager.lock().unwrap();
-                mgr.load_player_and_level().unwrap()
-            };
-            world_seed = level.seed;
-            world_time.ticks = level.time;
-            world_spawn = (level.spawn_x, level.spawn_y, level.spawn_z);
-            world_rules = level.rules.normalized();
-            world_rules.hardcore = level.hardcore || world_rules.hardcore;
-            world_type = level.world_type;
-            generate_structures = level.generate_structures;
-            bonus_chest = level.bonus_chest;
-            cheats_enabled = level.cheats_enabled || creation_options.cheats_enabled;
-            player_physics.position = Vec3::from_slice(&player.position);
-            player_physics.velocity = Vec3::from_slice(&player.velocity);
-            camera_yaw = player.yaw;
-            camera_pitch = player.pitch;
-            player_state.health = player.health;
-            player_state.hunger = player.hunger;
-            player_state.saturation = player.saturation;
-            player_state.exhaustion = player.exhaustion;
-            player_state.oxygen = player.oxygen;
-            player_state.experience = player.experience;
-            player_state.experience_level = player.experience_level;
-            player_state.spawn_point = player.spawn_point;
-            player_state.spawn_dimension = player.spawn_dimension;
-            player_state.bad_omen_level = player.bad_omen_level;
-            player_state.hero_of_the_village_timer = player.hero_of_the_village_timer;
-            player_state.is_dead = player.is_dead;
-            game_mode = crate::game_rules::persisted_player_game_mode(
-                player.game_mode,
-                launch.game_mode,
-                cheats_enabled,
-            );
-            inventory = player.inventory.to_inventory();
-            advancement_progress = player.advancements;
-        }
-
         let advancement_manager =
             crate::advancements::AdvancementManager::new(advancement_progress);
         let advancement_gui = crate::advancements::AdvancementGui::new();
@@ -6345,6 +1567,7 @@ impl State {
             &camera,
             config.width as f32 / config.height as f32,
             settings.render_distance as u32,
+            current_dimension.height().height(),
             &world_time,
             0.0,
             false,
@@ -6414,78 +1637,12 @@ impl State {
             label: Some("camera_bind_group"),
         });
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
-                "shader.wgsl"
-            ))),
-        });
-
-        let region_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-                label: Some("region_bind_group_layout"),
-            });
-
-        let render_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&camera_bind_group_layout],
-                push_constant_ranges: &[],
-            });
-
-        let terrain_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Terrain Pipeline Layout"),
-                bind_group_layouts: &[&camera_bind_group_layout, &region_bind_group_layout],
-                push_constant_ranges: &[],
-            });
-
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_main",
-                buffers: &[Vertex::desc()],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Cw,
-                cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-        });
+        let crate::presentation::bootstrap::PipelineLayouts {
+            shader,
+            region_bind_group_layout,
+            render_pipeline_layout,
+            terrain_pipeline_layout,
+        } = crate::presentation::bootstrap::create_pipelines(&device, &camera_bind_group_layout);
 
         let terrain_render_pipeline =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -6494,7 +1651,7 @@ impl State {
                 vertex: wgpu::VertexState {
                     module: &shader,
                     entry_point: "vs_terrain",
-                    buffers: &[TerrainVertex::desc()],
+                    buffers: &[crate::presentation::bootstrap::terrain_vertex_layout()],
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
@@ -6565,54 +1722,6 @@ impl State {
             multiview: None,
         });
 
-        let trans_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Translucent Render Pipeline"),
-            layout: Some(&render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_main",
-                buffers: &[Vertex::desc()],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::SrcAlpha,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Cw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-        });
-
         let terrain_trans_pipeline =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("Terrain Translucent Render Pipeline"),
@@ -6620,7 +1729,7 @@ impl State {
                 vertex: wgpu::VertexState {
                     module: &shader,
                     entry_point: "vs_terrain",
-                    buffers: &[TerrainVertex::desc()],
+                    buffers: &[crate::presentation::bootstrap::terrain_vertex_layout()],
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
@@ -6642,7 +1751,8 @@ impl State {
                     topology: wgpu::PrimitiveTopology::TriangleList,
                     strip_index_format: None,
                     front_face: wgpu::FrontFace::Cw,
-                    cull_mode: terrain_translucent_cull_mode(),
+                    // Translucent terrain is double-sided; there is no live cull mode.
+                    cull_mode: None,
                     polygon_mode: wgpu::PolygonMode::Fill,
                     unclipped_depth: false,
                     conservative: false,
@@ -6743,78 +1853,26 @@ impl State {
             multiview: None,
         });
 
-        // Initialize Crosshair Pipeline
-        let crosshair_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Crosshair Pipeline Layout"),
-                bind_group_layouts: &[],
-                push_constant_ranges: &[],
-            });
-
-        let crosshair_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Crosshair Render Pipeline"),
-            layout: Some(&crosshair_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_crosshair",
-                buffers: &[Vertex::desc()],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: "fs_crosshair",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Always,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-        });
-
-        // Crosshair Vertices (Horizontal and Vertical Lines)
+        // Crosshair uses the shared UI line pipeline (vs_ui / fs_ui).
         let aspect = size.width as f32 / size.height as f32;
         let crosshair_size = 0.02;
+        let crosshair_color = [1.0, 1.0, 1.0, 0.8];
         let crosshair_vertices = [
-            Vertex {
+            UiVertex {
                 position: [-crosshair_size, 0.0, 0.0],
-                tex_coords: [0.0, 0.0],
-                light_level: 1.0,
-                ao: 1.0,
+                color: crosshair_color,
             },
-            Vertex {
+            UiVertex {
                 position: [crosshair_size, 0.0, 0.0],
-                tex_coords: [0.0, 0.0],
-                light_level: 1.0,
-                ao: 1.0,
+                color: crosshair_color,
             },
-            Vertex {
+            UiVertex {
                 position: [0.0, -crosshair_size * aspect, 0.0],
-                tex_coords: [0.0, 0.0],
-                light_level: 1.0,
-                ao: 1.0,
+                color: crosshair_color,
             },
-            Vertex {
+            UiVertex {
                 position: [0.0, crosshair_size * aspect, 0.0],
-                tex_coords: [0.0, 0.0],
-                light_level: 1.0,
-                ao: 1.0,
+                color: crosshair_color,
             },
         ];
 
@@ -6824,160 +1882,15 @@ impl State {
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        // Initialize ChunkManager and load spawn area chunks
+        // Live launches are Join (`is_client`) or Embedded (`in_process_authority`).
+        // Presentation chunk maps start empty; terrain arrives from ServerRuntime
+        // projection or join `ChunkData`, then `update_chunks`.
         let render_distance = settings.render_distance;
-        let mut chunk_manager = ChunkManager::new_in_dimension(render_distance, current_dimension);
-        let mut chunk_meshes = std::collections::HashMap::new();
+        let chunk_manager = PresentationChunks::new_in_dimension(render_distance, current_dimension);
+        let chunk_meshes = std::collections::HashMap::new();
         let (terrain_worker_tx, terrain_worker_rx) = std::sync::mpsc::channel();
-        let mut chunk_lifetimes = std::collections::HashMap::new();
-        let mut next_chunk_lifetime = 1u64;
-
-        // Load only the immediate spawn area synchronously.  Loading every
-        // chunk in a large render distance here used to create all CPU/GPU
-        // meshes in one window event (625 chunks at distance 12), freezing the
-        // app and often causing the graphics driver to reset.  `update_chunks`
-        // loads the remaining requested chunks one at a time after the first
-        // frame is visible.
-        let player_chunk_x = (player_physics.position.x / CHUNK_WIDTH as f32).floor() as i32;
-        let player_chunk_z = (player_physics.position.z / CHUNK_DEPTH as f32).floor() as i32;
-        let mut pending_redstone_metadata: Vec<(
-            i32,
-            i32,
-            Vec<crate::redstone::RedstoneComponentMetadata>,
-        )> = Vec::new();
-        if !is_client {
-            let initial_radius = initial_chunk_radius(render_distance);
-            for cx in player_chunk_x - initial_radius..=player_chunk_x + initial_radius {
-                for cz in player_chunk_z - initial_radius..=player_chunk_z + initial_radius {
-                    let mut chunk = crate::dimension::generate_chunk_with_options(
-                        current_dimension,
-                        cx,
-                        cz,
-                        world_seed,
-                        crate::dimension::WorldGenerationOptions {
-                            world_type,
-                            generate_structures,
-                        },
-                    );
-                    let saved_chunk = {
-                        let mut manager = save_manager.lock().unwrap();
-                        manager.load_chunk_in(current_dimension, cx, cz)
-                    };
-                    if let Some(data) = saved_chunk {
-                        let generated_blocks =
-                            crate::save::ChunkSaveData::from_chunk(&chunk).blocks;
-                        if data.blocks != generated_blocks {
-                            match mutation_revisions.ensure_at_least(current_dimension, cx, cz, 1) {
-                                Ok(changed) => mutation_index_dirty |= changed,
-                                Err(error) => {
-                                    let message = format!(
-                                        "Mutation revision tracking capacity was exhausted while \
-                                         restoring spawn chunk ({cx}, {cz}): {error}"
-                                    );
-                                    eprintln!("[Save] {message}");
-                                    mutation_index_load_error.get_or_insert(message);
-                                }
-                            }
-                        }
-                        let metadata = data.redstone_metadata();
-                        data.restore_to_chunk(&mut chunk);
-                        if !metadata.is_empty() {
-                            pending_redstone_metadata.push((cx, cz, metadata));
-                        }
-                    }
-                    chunk_manager.chunks.insert((cx, cz), chunk);
-                }
-            }
-        }
-
-        // A bonus chest is created exactly once for a newly-created Overworld.
-        // Keep it in the spawn column so the option is deterministic and does
-        // not require an additional chunk-load request.  The heightmap points
-        // at the highest non-air block, therefore placing at `surface + 1`
-        // leaves the chest on top of terrain in both default and superflat
-        // presets.
-        if !is_client
-            && !in_process_authority
-            && !has_save
-            && bonus_chest
-            && current_dimension == crate::dimension::Dimension::Overworld
-        {
-            let (spawn_x, _, spawn_z) = world_spawn;
-            let chunk_key = (
-                spawn_x.div_euclid(CHUNK_WIDTH as i32),
-                spawn_z.div_euclid(CHUNK_DEPTH as i32),
-            );
-            let local_x = spawn_x.rem_euclid(CHUNK_WIDTH as i32) as usize;
-            let local_z = spawn_z.rem_euclid(CHUNK_DEPTH as i32) as usize;
-            let surface_y = chunk_manager
-                .chunks
-                .get(&chunk_key)
-                .map(|chunk| chunk.heightmap[local_x][local_z] as i32);
-            if let Some(surface_y) = surface_y {
-                let chest_y = surface_y.saturating_add(1);
-                if chunk_manager.get_block(spawn_x, chest_y, spawn_z) == BlockType::Air {
-                    chunk_manager.set_block(spawn_x, chest_y, spawn_z, BlockType::Chest);
-                    let mut chest = crate::block_entity::ChestBlockEntity::default();
-                    chest.set_stack(
-                        0,
-                        Some(crate::inventory::ItemStack::new(
-                            crate::inventory::Item::OakLog,
-                            4,
-                        )),
-                    );
-                    chest.set_stack(
-                        1,
-                        Some(crate::inventory::ItemStack::new(
-                            crate::inventory::Item::OakPlanks,
-                            8,
-                        )),
-                    );
-                    chest.set_stack(
-                        2,
-                        Some(crate::inventory::ItemStack::new(
-                            crate::inventory::Item::Stick,
-                            8,
-                        )),
-                    );
-                    chest.set_stack(
-                        3,
-                        Some(crate::inventory::ItemStack::new(
-                            crate::inventory::Item::Bread,
-                            4,
-                        )),
-                    );
-                    chest.set_stack(
-                        4,
-                        Some(crate::inventory::ItemStack::new(
-                            crate::inventory::Item::Torch,
-                            8,
-                        )),
-                    );
-                    chunk_manager.set_block_entity(
-                        spawn_x,
-                        chest_y,
-                        spawn_z,
-                        Some(crate::block_entity::BlockEntity::Chest(chest)),
-                    );
-                }
-            }
-        }
-
-        // Propagate lighting for spawn chunks synchronously
-        let mut spawn_dirty = std::collections::HashSet::new();
-        let chunk_keys: Vec<(i32, i32)> = chunk_manager.chunks.keys().cloned().collect();
-        for &(cx, cz) in &chunk_keys {
-            crate::lighting::propagate_chunk_lighting(&mut chunk_manager, cx, cz, &mut spawn_dirty);
-        }
-
-        // Spawn-area meshes are also built by the background workers. The
-        // first frame can present immediately instead of blocking on nine CPU
-        // meshes and their three LODs.
-        for &coord in &chunk_keys {
-            chunk_meshes.insert(coord, ChunkMesh::pending());
-            chunk_lifetimes.insert(coord, next_chunk_lifetime);
-            next_chunk_lifetime = next_chunk_lifetime.wrapping_add(1).max(1);
-        }
+        let chunk_lifetimes = std::collections::HashMap::new();
+        let next_chunk_lifetime = 1u64;
 
         // Initialize UI Pipelines
         let ui_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -7134,20 +2047,6 @@ impl State {
             mapped_at_creation: false,
         });
 
-        let mob_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Mob Vertex Buffer"),
-            size: (std::mem::size_of::<Vertex>() * 8192) as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let mob_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Mob Index Buffer"),
-            size: (std::mem::size_of::<u32>() * 12288) as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         // First-person hand buffers. Minecraft-style extruded tool silhouettes
         // need a few hundred vertices, still well below these fixed limits.
         let hand_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -7198,22 +2097,6 @@ impl State {
                 },
             ],
             label: Some("hand_camera_bind_group"),
-        });
-
-        let particle_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Particle Vertex Buffer"),
-            size: (std::mem::size_of::<Vertex>() * crate::particles::MAX_PARTICLES * 4)
-                as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let particle_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Particle Index Buffer"),
-            size: (std::mem::size_of::<u32>() * crate::particles::MAX_PARTICLES * 6)
-                as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
         });
 
         let (cuboid_proto_verts, cuboid_proto_inds) =
@@ -7281,6 +2164,15 @@ impl State {
                 size: (std::mem::size_of::<crate::particles::ParticleInstance>()
                     * crate::particles::MAX_PARTICLES) as wgpu::BufferAddress,
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
+
+        let frame_upload_staging_buffers = std::array::from_fn(|i| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("Frame Upload Staging {i}")),
+                size: FRAME_UPLOAD_STAGING_BYTES,
+                usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             })
         });
@@ -7384,7 +2276,7 @@ impl State {
             });
 
         let particles = crate::particles::ParticleSystem::new();
-        let weather = crate::weather::WeatherSystem::new(world_seed);
+        let weather = crate::weather::WeatherPresentation::new(world_seed);
         let network = match &role {
             // Embedded Singleplayer and listen-host sessions use the
             // ServerRuntime transport.  Keeping NetworkHandle::None here is
@@ -7397,7 +2289,9 @@ impl State {
                 username,
             } => {
                 let (game_to_client, game_commands) = std::sync::mpsc::channel();
-                let (client_events, client_to_game) = std::sync::mpsc::channel();
+                let (client_events, client_to_game) = std::sync::mpsc::sync_channel(
+                    crate::network::client::CLIENT_TO_GAME_QUEUE_CAPACITY,
+                );
                 let thread = crate::network::client::NetworkClient::spawn(
                     format!("{server_addr}:{port}"),
                     username.clone(),
@@ -7433,16 +2327,14 @@ impl State {
             .map(EmbeddedRuntimeBridge::session_id);
         let mut state = Self {
             window,
-            surface,
-            device,
-            queue,
+            surface: Some(surface),
+            device: Some(device),
+            queue: Some(queue),
             config,
             size,
             terrain_render_pipeline,
             terrain_trans_pipeline,
             region_bind_group_layout,
-            render_pipeline,
-            trans_pipeline,
             crack_pipeline,
             sky_pipeline,
             camera,
@@ -7465,7 +2357,6 @@ impl State {
             chunk_lifetimes,
             next_chunk_lifetime,
             terrain_generation: 0,
-            los_world_revision: 0,
             submitted_terrain_triangles: 0,
             submitted_terrain_draw_calls: 0,
             visible_chunk_count: 0,
@@ -7475,7 +2366,6 @@ impl State {
             keys,
             jump_taps: DoubleTapTracker::default(),
             texture_atlas,
-            crosshair_pipeline,
             crosshair_buffer,
             is_paused: false,
             mouse_ndc: [0.0, 0.0],
@@ -7502,14 +2392,11 @@ impl State {
             crack_vertex_buffer,
             crack_index_buffer,
             player_state,
-            void_damage_timer: 0.0,
             world_time,
             show_debug,
             camera_perspective: CameraPerspective::FirstPerson,
             entity_manager: crate::entity::EntityManager::new(),
-            mount_manager: crate::vehicle::MountManager::new(),
-            fishing_manager: crate::fishing::FishingManager::new(),
-            map_manager: crate::navigation::MapManager::new(),
+            presented_fishing_hook_entity: None,
             mob_instanced_pipeline,
             particle_instanced_pipeline,
             mob_cuboid_proto_vbuf,
@@ -7522,20 +2409,17 @@ impl State {
             mob_cuboid_instance_buffers,
             mob_quad_instance_buffers,
             particle_instance_buffers,
-            frame_resource_pool: crate::gpu_frame_resources::FrameResourcePool::with_initial(
-                3,
-                [(), (), ()],
-            ),
+            frame_resource_pool: crate::gpu_frame_resources::FrameResourcePool::new(),
             gpu_completion_tx,
             gpu_completion_rx,
             next_gpu_submission_id: 1,
             mob_cuboid_instances_scratch: Vec::with_capacity(1024),
             mob_quad_instances_scratch: Vec::with_capacity(512),
             particle_instances_scratch: Vec::with_capacity(4096),
+            frame_upload_cpu: Vec::with_capacity(256 * 1024),
+            frame_upload_staging_buffers,
             mob_cuboid_num_instances: 0,
             mob_quad_num_instances: 0,
-            mob_vertex_buffer,
-            mob_index_buffer,
             mob_num_indices: 0,
             hand_pipeline,
             hand_vertex_buffer,
@@ -7544,8 +2428,6 @@ impl State {
             hand_camera_buffer,
             hand_camera_bind_group,
             particles,
-            particle_vertex_buffer,
-            particle_index_buffer,
             particle_num_indices: 0,
             torch_smoke_timer: 0.0,
             total_time: 0.0,
@@ -7556,17 +2438,8 @@ impl State {
             translation_catalog,
             footstep_accumulator: 0.0,
             was_on_ground: false,
-            water_tick_timer: 0.0,
-            lava_tick_timer: 0.0,
-            lava_damage_timer: 0.0,
-            cactus_damage_timer: 0.0,
-            boss_maintenance_timer: 0.0,
-            save_manager,
-            save_tx,
-            save_queue_stats,
-            autosave_timer: 0.0,
             is_saving: false,
-            save_error: mutation_index_load_error,
+            save_error: None,
             is_sprinting: false,
             sprint_toggle_latched: false,
             sneak_toggle_latched: false,
@@ -7579,6 +2452,7 @@ impl State {
             debug_frame_samples: 0,
             debug_fps: 0.0,
             debug_frame_ms: 0.0,
+            debug_memory_bytes: 0,
             perf_recorder: crate::perf::PerfRecorder::new(),
             perf_summaries:
                 crate::perf::PerfRecorder::<{ crate::perf::DEFAULT_HISTORY_CAPACITY }>::new()
@@ -7598,34 +2472,30 @@ impl State {
             gpu_pass_timing_submission_tag: None,
             gpu_timestamps_supported,
             gpu_timestamps_inside_passes,
+            supported_present_modes,
             terrain_candidates_scratch: Vec::with_capacity(256),
             terrain_draw_plan_scratch: crate::chunk_render::DrawPlan::default(),
-            entity_los_manager: crate::culling::EntityLosManager::new(),
+            lod_fills_scratch: Vec::with_capacity(64),
             visible_sections_scratch: std::collections::HashSet::new(),
             section_visibility_scratch: crate::culling::SectionVisibilityScratch::with_capacity(
                 4096, 4096,
             ),
-            mob_vertices_scratch: Vec::with_capacity(1024),
-            mob_indices_scratch: Vec::with_capacity(1536),
-            particle_vertices_scratch: Vec::with_capacity(1024),
-            particle_indices_scratch: Vec::with_capacity(1536),
             hand_vertices_scratch: Vec::with_capacity(256),
             hand_indices_scratch: Vec::with_capacity(384),
             last_hand_mesh_key: None,
             ui_vertices_scratch: Vec::with_capacity(2048),
             ui_line_vertices_scratch: Vec::with_capacity(4096),
+            ui_textured_vertices_scratch: Vec::with_capacity(1024),
             debug_str_scratch: String::with_capacity(128),
+            hud_str_scratch: String::with_capacity(128),
+            inventory_slots_scratch: Vec::with_capacity(64),
             active_station: None,
             container_target: None,
             container_is_double: false,
-            container_sessions: crate::container_sessions::ContainerSessionManager::new(),
             enchanting: crate::enchantment::EnchantingState::default(),
             brewing: crate::brewing::BrewingStandState::default(),
             anvil: crate::enchantment::AnvilState::default(),
             potion_effects: crate::brewing::EffectManager::default(),
-            redstone: crate::redstone::RedstoneSystem::new(),
-            redstone_tick_timer: 0.0,
-            furnace_tick_timer: 0.0,
             recipe_book_open: false,
             recipe_book_search: String::new(),
             weather,
@@ -7642,8 +2512,6 @@ impl State {
             current_dimension,
             portal_contact_time: 0.0,
             portal_cooldown: 0.0,
-            wither_effect_timer: 0.0,
-            wither_damage_timer: 0.0,
             advancement_manager,
             advancement_gui,
             role,
@@ -7654,57 +2522,26 @@ impl State {
             local_player_id: embedded_session_id,
             remote_players: std::collections::HashMap::new(),
             replicated_entities: std::collections::HashMap::new(),
-            replicated_entity_ids: std::collections::HashSet::new(),
-            entity_replication_sequence: 0,
-            remote_player_health: std::collections::HashMap::new(),
-            remote_player_effects: std::collections::HashMap::new(),
             client_player_health_sequence: 0,
             client_player_effect_sequence: 0,
             client_session_projection: None,
             network_status: is_client.then(|| "CONNECTING TO SERVER...".to_string()),
-            last_gameplay_response: None,
             chat_messages: std::collections::VecDeque::new(),
             chat_input: String::new(),
             is_chat_open: false,
             connection_lost: false,
             network_position_timer: 0.0,
             network_pose_sequence: 0,
-            poi_manager: crate::village::PoiManager::new(),
-            merchant_sessions: crate::village::MerchantSessionManager::new(),
-            raid_manager: crate::village::RaidManager::new(),
             active_merchant_villager_id: None,
             active_merchant_offers: Vec::new(),
             active_merchant_profession: crate::village::poi::VillagerProfession::Unemployed,
             active_merchant_level: crate::village::trade::VillagerLevel::Novice,
             active_merchant_xp: 0,
-            network_time_sync_timer: 0.0,
             network_time: 0.0,
             pending_chunk_payloads: std::collections::HashMap::new(),
             pending_block_changes: std::collections::HashMap::new(),
             client_chunk_revisions: std::collections::HashMap::new(),
-            mutation_revisions,
-            mutation_revision_generation: u64::from(mutation_index_dirty),
-            mutation_index_persist_in_flight: None,
-            mutation_index_dirty,
-            network_snapshot_worker,
-            pending_player_catchups: std::collections::HashMap::new(),
-            catchup_round_robin_cursor: 0,
         };
-
-        // Restore persisted redstone component metadata (facing/delay/comparator
-        // mode/note) for spawn-area chunks that were loaded before the redstone
-        // system existed. The first `RedstoneSystem::tick` will call
-        // `sync_loaded_chunks`, which rebuilds default `ComponentState` entries
-        // for every loaded component; applying the sidecar first ensures those
-        // rebuilt entries pick up the saved facing/delay/mode/note rather than
-        // the defaults. The runtime first tick then settles power against the
-        // restored facings. Subsequent streaming loads go through
-        // `schedule_chunk_load`, which restores metadata alongside the chunk.
-        for (cx, cz, metadata) in pending_redstone_metadata {
-            state
-                .redstone
-                .restore_chunk_metadata(&state.chunk_manager, cx, cz, &metadata);
-        }
 
         // Apply the centralized mode policy to the freshly loaded player (in
         // particular Spectator noclip/flight) before the first simulation tick.
@@ -7713,7 +2550,6 @@ impl State {
 
         let initial_mesh_coords: Vec<_> = state.chunk_meshes.keys().copied().collect();
         state.invalidate_chunk_meshes(initial_mesh_coords, DependencyReason::ChunkLoad);
-        state.load_current_dimension_entities();
 
         state
     }
@@ -7729,2628 +2565,21 @@ impl State {
     pub fn save_settings(&mut self) {
         self.settings.fov = self.base_fov;
         self.settings.sensitivity = self.sensitivity;
-        self.settings.render_distance = self.chunk_manager.render_distance;
+        self.settings.render_distance = self.chunk_manager.view_distance;
         self.sync_audio_settings();
         self.settings.save();
     }
 
-    pub fn is_authoritative(&self) -> bool {
-        !matches!(self.role, MultiplayerRole::Client { .. })
+    /// Presentation topology derived from role + in-process runtime presence.
+    pub fn presentation_topology(&self) -> PresentationTopology {
+        PresentationTopology::from(&self.role, self.embedded_runtime.is_some())
     }
 
     /// True when this presentation root is backed by the shared headless
     /// runtime. Renderer-side simulation and persistence stay disabled while
     /// this is set; the runtime is the only authority owner.
-    fn has_in_process_runtime(&self) -> bool {
+    pub(crate) fn has_in_process_runtime(&self) -> bool {
         self.embedded_runtime.is_some()
-    }
-
-    /// Return the authority topology without exposing transport internals to
-    /// presentation/input callers.
-    pub fn authority_topology(&self) -> Option<AuthorityTopology> {
-        self.embedded_runtime
-            .as_ref()
-            .map(EmbeddedRuntimeBridge::topology)
-    }
-
-    /// Advance the in-process authority by one fixed 20 Hz tick.  Dedicated
-    /// mode has no `State`, while a network client correctly returns `None`.
-    pub fn tick_authority_boundary(
-        &mut self,
-    ) -> Option<crate::authority::contract::AuthoritySnapshot> {
-        let sequence = self.network_pose_sequence;
-        let position = self.player_physics.position;
-        let yaw = self.camera.yaw;
-        let pitch = self.camera.pitch;
-        let runtime = self.embedded_runtime.as_mut()?;
-        let session_id = runtime.session_id();
-        let _ = runtime.queue_position(sequence, position, yaw, pitch);
-        let output = match runtime.tick() {
-            Ok(output) => output,
-            Err(error) => {
-                self.save_error
-                    .get_or_insert_with(|| format!("embedded runtime tick failed: {error}"));
-                return None;
-            }
-        };
-        for event in output.presentation_events {
-            self.project_runtime_presentation_event(event, session_id);
-        }
-        self.project_authority_mutations(&output.snapshot.mutations);
-        self.project_authority_sessions(&output.snapshot.session_updates);
-        self.world_time.ticks = output.snapshot.tick;
-        Some(output.snapshot)
-    }
-
-    /// Convert the runtime's target-aware presentation lane into the existing
-    /// renderer staging path.  The runtime remains the sole mutation owner;
-    /// these handlers only update presentation caches after a fixed tick.
-    fn project_runtime_presentation_event(
-        &mut self,
-        event: crate::server_runtime::RuntimePresentationEvent,
-        session_id: crate::network::protocol::PlayerId,
-    ) {
-        use crate::server_runtime::RuntimePresentationEvent as Event;
-        let inbound = match event {
-            Event::GameplayResponse { target, response } if target == session_id => {
-                Some(NetworkInbound::GameplayResponse { response })
-            }
-            Event::BlockChange {
-                target,
-                dimension,
-                revision,
-                x,
-                y,
-                z,
-                block,
-                state,
-                raw_fluid,
-            } if target == session_id => Some(NetworkInbound::AuthoritativeBlockChange {
-                dimension,
-                revision,
-                x,
-                y,
-                z,
-                block,
-                state,
-                raw_fluid,
-            }),
-            Event::ChunkData {
-                target,
-                dimension,
-                cx,
-                cz,
-                revision,
-                min_section_y,
-                section_count,
-                blocks,
-                block_states,
-                fluid_levels,
-                block_entities,
-            } if target == session_id => Some(NetworkInbound::ChunkData {
-                dimension,
-                cx,
-                cz,
-                revision,
-                min_section_y,
-                section_count,
-                blocks,
-                block_states,
-                fluid_levels,
-                block_entities,
-            }),
-            Event::BlockEntityDelta {
-                target,
-                dimension,
-                revision,
-                x,
-                y,
-                z,
-                entity,
-            } if target == session_id => Some(NetworkInbound::BlockEntityDelta {
-                dimension,
-                revision,
-                x,
-                y,
-                z,
-                entity,
-            }),
-            Event::EntitySpawn {
-                target,
-                dimension,
-                sequence,
-                state,
-            } if target == session_id => Some(NetworkInbound::EntitySpawn {
-                dimension,
-                sequence,
-                state,
-            }),
-            Event::EntityState {
-                target,
-                dimension,
-                sequence,
-                state,
-            } if target == session_id => Some(NetworkInbound::EntityState {
-                dimension,
-                sequence,
-                state,
-            }),
-            Event::EntityDespawn {
-                target,
-                dimension,
-                sequence,
-                entity_id,
-            } if target == session_id => Some(NetworkInbound::EntityDespawn {
-                dimension,
-                sequence,
-                entity_id,
-            }),
-            Event::PlayerSessionUpdate {
-                target,
-                sequence,
-                player_id,
-                dimension,
-                state,
-            } if target == session_id => Some(NetworkInbound::PlayerSessionUpdate {
-                sequence,
-                player_id,
-                dimension,
-                state,
-            }),
-            Event::PlayerEffect {
-                target,
-                sequence,
-                player_id,
-                effects,
-            } if target == session_id => Some(NetworkInbound::PlayerEffect {
-                sequence,
-                player_id,
-                effects,
-            }),
-            Event::PlayerPosition {
-                target,
-                id,
-                sequence,
-                sender_time_millis,
-                position,
-                yaw,
-                pitch,
-            } if target == session_id => Some(NetworkInbound::PlayerPosition {
-                id,
-                sequence,
-                sender_time_millis,
-                x: position[0],
-                y: position[1],
-                z: position[2],
-                yaw,
-                pitch,
-            }),
-            Event::ContainerOpenResult {
-                target,
-                dimension,
-                success,
-                position: (x, y, z),
-                slots,
-                revision,
-            } if target == session_id => Some(NetworkInbound::ContainerOpenResult {
-                dimension,
-                success,
-                x,
-                y,
-                z,
-                slots,
-                revision,
-            }),
-            Event::ContainerClickResult {
-                target,
-                dimension,
-                success,
-                slot_index,
-                slot,
-                dragged,
-            } if target == session_id => Some(NetworkInbound::ContainerClickResult {
-                dimension,
-                success,
-                slot_index,
-                slot,
-                dragged,
-            }),
-            Event::ContainerSlotUpdate {
-                target,
-                dimension,
-                revision,
-                position: (x, y, z),
-                slot_index,
-                slot,
-            } if target == session_id => Some(NetworkInbound::ContainerSlotUpdate {
-                dimension,
-                revision,
-                x,
-                y,
-                z,
-                slot_index,
-                slot,
-            }),
-            Event::ContainerClose {
-                target,
-                dimension,
-                position: (x, y, z),
-            } if target == session_id => Some(NetworkInbound::ContainerClose {
-                id: target,
-                dimension,
-                x,
-                y,
-                z,
-            }),
-            Event::PlayerRespawnResult {
-                target,
-                position,
-                dimension,
-            } if target == session_id => Some(NetworkInbound::PlayerRespawnResult {
-                position,
-                dimension,
-            }),
-            Event::DimensionTransfer {
-                target,
-                dimension,
-                position,
-            } if target == session_id => Some(NetworkInbound::DimensionTransfer {
-                dimension,
-                position,
-            }),
-            Event::WorldRules { target, rules } if target == session_id => {
-                Some(NetworkInbound::WorldRulesSync { rules })
-            }
-            Event::TimeSync {
-                target,
-                ticks,
-                weather,
-                weather_remaining_ticks,
-            } if target == session_id => Some(NetworkInbound::TimeSync {
-                ticks,
-                weather,
-                weather_remaining_ticks,
-            }),
-            _ => None,
-        };
-        if let Some(inbound) = inbound {
-            self.handle_single_network_event(inbound);
-        }
-    }
-
-    fn session_slot_from_stack(
-        stack: Option<crate::inventory::ItemStack>,
-    ) -> Option<crate::authority::contract::SessionInventorySlot> {
-        let stack = stack?;
-        if stack.count == 0 || stack.count > u32::from(u16::MAX) {
-            return None;
-        }
-        Some(crate::authority::contract::SessionInventorySlot::from_wire(
-            crate::network::protocol::ItemWire::from_stack(&stack),
-            stack.can_break,
-            stack.can_place_on,
-        ))
-    }
-
-    fn stack_from_session_slot(
-        slot: crate::authority::contract::SessionInventorySlot,
-    ) -> Option<crate::inventory::ItemStack> {
-        let mut stack = slot.item.to_stack()?;
-        stack.can_break = slot.can_break;
-        stack.can_place_on = slot.can_place_on;
-        Some(stack)
-    }
-
-    fn authority_gameplay_from_local(&self) -> crate::authority::contract::SessionGameplayState {
-        use crate::authority::contract::{SessionGameplayState, SESSION_INVENTORY_SLOTS};
-        let mut state = SessionGameplayState::default();
-        state.health_milli = (self.player_state.health.max(0.0) * 1000.0).round() as u32;
-        state.max_health_milli = (self.player_state.max_health.max(0.0) * 1000.0).round() as u32;
-        state.hunger_milli = (self.player_state.hunger.clamp(0.0, 20.0) * 1000.0).round() as u32;
-        state.saturation_milli =
-            (self.player_state.saturation.clamp(0.0, 20.0) * 1000.0).round() as u32;
-        state.is_dead = self.player_state.is_dead;
-        let mut index = 0;
-        for stack in self
-            .inventory
-            .hotbar
-            .iter()
-            .chain(self.inventory.main.iter())
-            .chain(self.inventory.armor.iter())
-        {
-            if index >= SESSION_INVENTORY_SLOTS - 1 {
-                break;
-            }
-            state.inventory[index] = Self::session_slot_from_stack(*stack);
-            index += 1;
-        }
-        state.inventory[index] = Self::session_slot_from_stack(self.inventory.offhand);
-        state.mounted_entity = self.mount_manager.get_vehicle(0);
-        state
-    }
-
-    fn sync_authority_gameplay_from_local(&mut self) {
-        // Runtime sessions are loaded once by `ServerRuntime::new_embedded`.
-        // Do not copy renderer state back into the authority on every input;
-        // doing so would recreate a second presentation-owned authority.
-    }
-
-    fn project_authority_sessions(
-        &mut self,
-        updates: &[crate::authority::contract::SessionGameplayUpdate],
-    ) {
-        let Some(session_id) = self
-            .embedded_runtime
-            .as_ref()
-            .map(EmbeddedRuntimeBridge::session_id)
-        else {
-            return;
-        };
-        let Some(update) = updates.iter().find(|update| update.player_id == session_id) else {
-            return;
-        };
-        self.project_authority_session(update);
-    }
-
-    fn project_authority_session(
-        &mut self,
-        update: &crate::authority::contract::SessionGameplayUpdate,
-    ) {
-        let gameplay = update.state;
-        if !self.accept_session_projection(update.dimension, gameplay.revision, gameplay.revision) {
-            return;
-        }
-        self.project_gameplay_state(update.dimension, gameplay);
-    }
-
-    /// Shared one-way presentation projection for embedded and socket session
-    /// updates. Ordering is checked before any renderer-owned cache is touched:
-    /// sequence orders dimension transfers, while revision orders snapshots in
-    /// one dimension. The authority remains the sole writer of gameplay state.
-    fn accept_session_projection(&mut self, dimension: u8, sequence: u64, revision: u64) -> bool {
-        if let Some((latest_dimension, latest_sequence, latest_revision)) =
-            self.client_session_projection
-        {
-            if sequence <= latest_sequence {
-                return false;
-            }
-            if latest_dimension == dimension && revision <= latest_revision {
-                return false;
-            }
-        }
-        self.client_session_projection = Some((dimension, sequence, revision));
-        true
-    }
-
-    fn project_gameplay_state(
-        &mut self,
-        dimension: u8,
-        gameplay: crate::authority::contract::SessionGameplayState,
-    ) {
-        self.player_state.health = gameplay.health_milli as f32 / 1000.0;
-        self.player_state.max_health = gameplay.max_health_milli as f32 / 1000.0;
-        self.player_state.hunger = gameplay.hunger_milli as f32 / 1000.0;
-        self.player_state.saturation = gameplay.saturation_milli as f32 / 1000.0;
-        self.player_state.is_dead = gameplay.is_dead;
-        self.player_state.death_reason = gameplay.death_source.and_then(DamageSource::from_wire);
-        self.player_state.invulnerable_time = gameplay.invulnerability_ticks as f32 / 20.0;
-        self.player_state.experience = gameplay.experience;
-        self.player_state.experience_level = gameplay.experience_level;
-        self.player_state.attack_cooldown_ticks = u32::from(gameplay.attack_cooldown_ticks);
-        self.player_state.attack_cooldown_max_ticks = self
-            .player_state
-            .attack_cooldown_max_ticks
-            .max(self.player_state.attack_cooldown_ticks);
-        self.player_state.shield_disable_ticks = u32::from(gameplay.shield_cooldown_ticks);
-        self.enchanting.seed = gameplay.enchant_seed.min(u64::from(u32::MAX)) as u32;
-        if gameplay.shield_active {
-            self.player_state.using_item = Some(crate::player::UsingItemState {
-                hand: crate::player::Hand::MainHand,
-                action: crate::player::ItemUseAction::Block,
-                item: Item::Shield,
-                slot: crate::player::HandSlot::MainHand(self.inventory.selected),
-                ticks_held: 0,
-                max_ticks: None,
-            });
-        } else if self
-            .player_state
-            .using_item
-            .as_ref()
-            .is_some_and(|using| using.action == crate::player::ItemUseAction::Block)
-        {
-            self.player_state.using_item = None;
-        }
-        self.player_physics.velocity = Vec3::new(
-            gameplay.velocity_milli[0] as f32 / 1000.0,
-            gameplay.velocity_milli[1] as f32 / 1000.0,
-            gameplay.velocity_milli[2] as f32 / 1000.0,
-        );
-        self.inventory.selected = usize::from(gameplay.selected_hotbar_slot.min(8));
-        let mut index = 0;
-        for slot in self
-            .inventory
-            .hotbar
-            .iter_mut()
-            .chain(self.inventory.main.iter_mut())
-            .chain(self.inventory.armor.iter_mut())
-        {
-            *slot = gameplay.inventory[index].and_then(Self::stack_from_session_slot);
-            index += 1;
-        }
-        self.inventory.offhand = gameplay.inventory[index].and_then(Self::stack_from_session_slot);
-        if let Some(mining) = gameplay.mining {
-            if !self.mining_cancel_sent {
-                self.mining_target = Some(Vec3::new(
-                    mining.target[0] as f32,
-                    mining.target[1] as f32,
-                    mining.target[2] as f32,
-                ));
-                self.mining_progress = f32::from(mining.progress_milli) / 1000.0;
-                self.mining_held = mining.held;
-            }
-        } else {
-            self.mining_target = None;
-            self.mining_progress = 0.0;
-            self.mining_held = None;
-            self.mining_cancel_sent = false;
-        }
-        self.mount_manager.dismount(0);
-        if let Some(vehicle_id) = gameplay.mounted_entity {
-            if let Some(vehicle) = self.entity_manager.get_by_id(vehicle_id) {
-                let capacity = if vehicle.entity_type == crate::entity::EntityType::Boat {
-                    2
-                } else {
-                    1
-                };
-                let _ = self.mount_manager.mount(vehicle_id, 0, capacity);
-            }
-        }
-        if let Some(dimension) = crate::dimension::Dimension::from_wire(dimension) {
-            self.reset_presented_dimension(dimension);
-        }
-
-        let owner_id = self.local_player_id.unwrap_or(0);
-        if let Some(hook) = gameplay.fishing_hook {
-            if let Some(stage) = crate::fishing::FishingHookStage::from_wire(hook.stage) {
-                self.fishing_manager.active_hooks.insert(
-                    owner_id,
-                    crate::fishing::FishingHook {
-                        entity_id: hook.entity_id,
-                        owner_player_id: owner_id,
-                        position: hook.position_milli.map(|value| value as f32 / 1000.0),
-                        velocity: hook.velocity_milli.map(|value| value as f32 / 1000.0),
-                        stage,
-                        wait_ticks_remaining: hook.wait_ticks_remaining,
-                        bite_ticks_remaining: hook.bite_ticks_remaining,
-                    },
-                );
-            }
-        } else {
-            self.fishing_manager.active_hooks.remove(&owner_id);
-        }
-
-        if let Some(brew) = gameplay.brew {
-            self.active_station = Some(StationKind::Brewing);
-            self.container_target = Some((brew.station[0], brew.station[1], brew.station[2]));
-            self.brewing.progress = (10.0 - brew.remaining_ticks as f32 / 20.0).clamp(0.0, 10.0);
-            self.brewing.ingredient = Self::stack_from_session_slot(
-                crate::authority::contract::SessionInventorySlot::from_wire(
-                    brew.ingredient.expected.item,
-                    brew.ingredient.expected.can_break,
-                    brew.ingredient.expected.can_place_on,
-                ),
-            );
-            self.brewing.bottles = brew.bottles.map(|source| {
-                source.and_then(|source| {
-                    Self::stack_from_session_slot(
-                        crate::authority::contract::SessionInventorySlot::from_wire(
-                            source.expected.item,
-                            source.expected.can_break,
-                            source.expected.can_place_on,
-                        ),
-                    )
-                })
-            });
-        } else if self.active_station == Some(StationKind::Brewing) {
-            self.active_station = None;
-            self.container_target = None;
-        }
-        if gameplay.is_dead {
-            self.clear_movement_input();
-            self.sync_cursor_mode();
-        }
-    }
-
-    /// Apply authority output to the renderer-owned cache.  This is a one-way
-    /// projection: the GPU-side chunk manager is never consulted by the core
-    /// and never performs an authoritative mutation for Singleplayer/Host.
-    fn project_authority_mutations(
-        &mut self,
-        mutations: &[crate::authority::contract::WorldMutation],
-    ) {
-        let mut dirty_chunks = std::collections::HashSet::new();
-        for mutation in mutations {
-            if mutation.dimension != self.current_dimension as u8 {
-                continue;
-            }
-            let Some(block) = BlockType::from_wire(mutation.block) else {
-                continue;
-            };
-            let (x, y, z) = mutation.position;
-            let previous_block = self.chunk_manager.get_block(x, y, z);
-            let previous_state = self.chunk_manager.get_block_state(x, y, z);
-            self.play_chest_state_edge(
-                (x, y, z),
-                previous_block,
-                previous_state,
-                block,
-                mutation.state,
-            );
-            if let Some(dirty) =
-                apply_synced_block_change(&mut self.chunk_manager, x, y, z, block, mutation.state)
-            {
-                dirty_chunks.extend(dirty);
-            }
-            // C1's bounded runtime output does not carry block-entity or
-            // container payloads yet.  Keep those renderer caches untouched
-            // until a typed runtime projection event exists; never query or
-            // mutate a second local authority as a fallback.
-        }
-        if !dirty_chunks.is_empty() {
-            self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Block);
-        }
-    }
-
-    fn play_chest_state_edge(
-        &self,
-        position: (i32, i32, i32),
-        previous_block: BlockType,
-        previous_state: u8,
-        block: BlockType,
-        state: u8,
-    ) {
-        if !matches!(previous_block, BlockType::Chest | BlockType::EndCityChest)
-            || !matches!(block, BlockType::Chest | BlockType::EndCityChest)
-        {
-            return;
-        }
-        let previous = crate::world::BlockState::decode(previous_state);
-        let next = crate::world::BlockState::decode(state);
-        if previous.is_open == next.is_open {
-            return;
-        }
-        // A double chest emits two block-state mutations. Pick the
-        // lexicographically first half so one edge produces one sound.
-        if let Some(partner) =
-            crate::block_entity::double_chest_partner(&self.chunk_manager, position)
-        {
-            if position > partner {
-                return;
-            }
-        }
-        self.audio_manager.play_sound(if next.is_open {
-            crate::audio::SoundId::ChestOpen
-        } else {
-            crate::audio::SoundId::ChestClose
-        });
-    }
-
-    pub fn submit_authority_request(
-        &mut self,
-        request: crate::network::protocol::GameplayRequest,
-    ) -> Option<crate::network::protocol::GameplayResponse> {
-        if let Some(runtime) = self.embedded_runtime.as_mut() {
-            if let Err(error) = runtime.queue_request(request) {
-                self.save_error
-                    .get_or_insert_with(|| format!("embedded runtime input rejected: {error}"));
-            }
-            // ACKs are deliberately observed only from `tick_with_output`; a
-            // queued request has no synchronous response to project.
-            return None;
-        }
-        if matches!(self.role, MultiplayerRole::Client { .. }) {
-            self.network.request_gameplay(request);
-        }
-        None
-    }
-
-    /// Submit a local input envelope through the same authority path used by
-    /// a listen/dedicated transport.  Presentation code must not mutate the
-    /// renderer cache first and then ask the core for an ACK: a rejected or
-    /// stale request is intentionally a no-op on the client.
-    fn submit_local_authority_operation(
-        &mut self,
-        operation: crate::network::protocol::GameplayOperation,
-    ) -> Option<crate::network::protocol::GameplayResponse> {
-        self.submit_authority_request(crate::network::protocol::GameplayRequest {
-            request_id: 0,
-            client_sequence: 0,
-            session_id: 0,
-            dimension: self.current_dimension as u8,
-            client_revision: self
-                .embedded_runtime
-                .as_ref()
-                .map(|runtime| runtime.revision_for_dimension(self.current_dimension))
-                .or_else(|| {
-                    self.client_session_projection
-                        .map(|(_, _, revision)| revision)
-                })
-                .unwrap_or_default(),
-            operation,
-        })
-    }
-
-    fn project_authority_container(&mut self, position: (i32, i32, i32)) -> bool {
-        let _ = position;
-        // RuntimeTickOutput currently has no container/session payload.  Do
-        // not read renderer slots or fabricate an ACK as a local fallback;
-        // C3 will add the typed presentation projection lane.
-        false
-    }
-
-    fn submit_local_authority_container_action(
-        &mut self,
-        position: (i32, i32, i32),
-        action: crate::network::protocol::ContainerAction,
-        slot: u16,
-        is_left: bool,
-    ) -> bool {
-        let operation = match action {
-            crate::network::protocol::ContainerAction::Open
-            | crate::network::protocol::ContainerAction::Close => {
-                crate::network::protocol::GameplayOperation::Container {
-                    action: action.to_wire(),
-                    x: position.0,
-                    y: position.1,
-                    z: position.2,
-                    slot,
-                }
-            }
-            crate::network::protocol::ContainerAction::Click => {
-                crate::network::protocol::GameplayOperation::ContainerClick {
-                    x: position.0,
-                    y: position.1,
-                    z: position.2,
-                    slot,
-                    is_left,
-                    dragged: self
-                        .inventory
-                        .dragged
-                        .as_ref()
-                        .map(crate::network::protocol::ItemWire::from_stack),
-                }
-            }
-        };
-        let Some(response) = self.submit_local_authority_operation(operation) else {
-            return false;
-        };
-        if !matches!(
-            response.outcome,
-            crate::network::protocol::GameplayOutcome::Accepted { .. }
-        ) {
-            return false;
-        }
-        match action {
-            crate::network::protocol::ContainerAction::Open
-            | crate::network::protocol::ContainerAction::Click => {
-                let projected = self.project_authority_container(position);
-                if projected && matches!(action, crate::network::protocol::ContainerAction::Click) {
-                    self.inventory.dragged = None;
-                }
-                projected
-            }
-            crate::network::protocol::ContainerAction::Close => {
-                self.container_target = None;
-                self.container_is_double = false;
-                self.inventory.is_open = false;
-                self.active_station = None;
-                self.sync_cursor_mode();
-                true
-            }
-        }
-    }
-
-    fn submit_local_authority_block_use(
-        &mut self,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: BlockType,
-    ) -> Option<crate::network::protocol::GameplayResponse> {
-        self.submit_authority_request(crate::network::protocol::GameplayRequest {
-            request_id: 0,
-            client_sequence: 0,
-            session_id: 0,
-            dimension: self.current_dimension as u8,
-            client_revision: self
-                .embedded_runtime
-                .as_ref()
-                .map(|runtime| runtime.revision_for_dimension(self.current_dimension))
-                .unwrap_or_default(),
-            operation: crate::network::protocol::GameplayOperation::BlockUse {
-                x,
-                y,
-                z,
-                block: block.to_wire(),
-            },
-        })
-    }
-
-    fn submit_local_authority_block_action(
-        &mut self,
-        action: crate::network::protocol::BlockActionKind,
-        x: i32,
-        y: i32,
-        z: i32,
-        face: [i8; 3],
-        block: BlockType,
-    ) -> Option<crate::network::protocol::GameplayResponse> {
-        if matches!(
-            action,
-            crate::network::protocol::BlockActionKind::CancelBreak
-        ) {
-            if self.mining_cancel_sent {
-                return None;
-            }
-            self.mining_cancel_sent = true;
-        } else if matches!(
-            action,
-            crate::network::protocol::BlockActionKind::StartBreak
-        ) {
-            self.mining_cancel_sent = false;
-        }
-        let look = Vec3::new(
-            self.camera.yaw.cos() * self.camera.pitch.cos(),
-            self.camera.pitch.sin(),
-            self.camera.yaw.sin() * self.camera.pitch.cos(),
-        )
-        .normalize_or_zero();
-        let look_milli = [
-            (look.x * 1_000.0).round() as i16,
-            (look.y * 1_000.0).round() as i16,
-            (look.z * 1_000.0).round() as i16,
-        ];
-        let hand = 0;
-        let held = self.inventory.hotbar[self.inventory.selected].map(|stack| {
-            let slot = crate::authority::contract::SessionInventorySlot::from_wire(
-                crate::network::protocol::ItemWire::from_stack(&stack),
-                stack.can_break,
-                stack.can_place_on,
-            );
-            crate::network::protocol::SessionSlotWire::from(slot)
-        });
-        self.submit_authority_request(crate::network::protocol::GameplayRequest {
-            request_id: 0,
-            client_sequence: 0,
-            session_id: 0,
-            dimension: self.current_dimension as u8,
-            client_revision: self
-                .embedded_runtime
-                .as_ref()
-                .map(|runtime| runtime.revision_for_dimension(self.current_dimension))
-                .or_else(|| {
-                    self.client_session_projection
-                        .map(|(_, _, revision)| revision)
-                })
-                .unwrap_or_default(),
-            operation: crate::network::protocol::GameplayOperation::BlockAction {
-                action,
-                x,
-                y,
-                z,
-                face,
-                hand,
-                held: if matches!(
-                    action,
-                    crate::network::protocol::BlockActionKind::CancelBreak
-                ) {
-                    None
-                } else {
-                    held
-                },
-                block: if matches!(
-                    action,
-                    crate::network::protocol::BlockActionKind::Place
-                        | crate::network::protocol::BlockActionKind::IgnitePortal
-                        | crate::network::protocol::BlockActionKind::InsertEnderEye
-                        | crate::network::protocol::BlockActionKind::EnterPortal
-                ) {
-                    block.to_wire()
-                } else {
-                    BlockType::Air.to_wire()
-                },
-                look_milli,
-            },
-        })
-    }
-
-    fn selected_mining_held(&self) -> Option<crate::network::protocol::SessionSlotWire> {
-        self.inventory.hotbar[self.inventory.selected].map(|stack| {
-            let slot = crate::authority::contract::SessionInventorySlot::from_wire(
-                crate::network::protocol::ItemWire::from_stack(&stack),
-                stack.can_break,
-                stack.can_place_on,
-            );
-            crate::network::protocol::SessionSlotWire::from(slot)
-        })
-    }
-
-    fn submit_remote_authority_block_use(
-        &mut self,
-        session_id: crate::network::protocol::PlayerId,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-    ) -> Option<crate::network::protocol::GameplayResponse> {
-        let _ = (session_id, x, y, z, block);
-        // Listen transport remote events are consumed by ServerRuntime's
-        // NetworkServer. State must not service a second remote authority.
-        None
-    }
-
-    fn handle_authority_client_block_action(
-        &mut self,
-        requester_id: crate::network::protocol::PlayerId,
-        action: crate::network::protocol::Action,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-    ) {
-        let requested_block = match action {
-            crate::network::protocol::Action::Break => BlockType::Air.to_wire(),
-            crate::network::protocol::Action::Place => block,
-            crate::network::protocol::Action::Use => BlockType::Air.to_wire(),
-        };
-        let response =
-            self.submit_remote_authority_block_use(requester_id, x, y, z, requested_block);
-        let success = matches!(
-            response.as_ref().map(|response| &response.outcome),
-            Some(crate::network::protocol::GameplayOutcome::Accepted { .. })
-        );
-        self.send_block_action_result(requester_id, x, y, z, success, false, vec![]);
-    }
-
-    /// Route the command domains already understood by `ServerWorld` through
-    /// the in-process authority. Unsupported legacy command domains continue
-    /// through the existing presentation adapter until the remaining Phase A
-    /// cutover lands; they must never be reported as an authority ACK here.
-    fn submit_local_authority_command(
-        &mut self,
-        command: &str,
-    ) -> Option<crate::network::protocol::GameplayResponse> {
-        self.submit_authority_request(crate::network::protocol::GameplayRequest {
-            request_id: 0,
-            client_sequence: 0,
-            session_id: 0,
-            dimension: self.current_dimension as u8,
-            client_revision: self
-                .embedded_runtime
-                .as_ref()
-                .map(|runtime| runtime.revision_for_dimension(self.current_dimension))
-                .unwrap_or_default(),
-            operation: crate::network::protocol::GameplayOperation::Command {
-                command: command.to_string(),
-            },
-        })
-    }
-
-    fn can_place_block_at(&self, x: i32, y: i32, z: i32, block: BlockType) -> bool {
-        let policy = self.game_mode_policy();
-        if (!policy.can_place && self.game_mode != GameMode::Adventure)
-            || !policy.can_place_stack(
-                self.inventory.hotbar[self.inventory.selected].as_ref(),
-                block,
-            )
-        {
-            return false;
-        }
-        matches!(
-            placement_decision_for_players(
-                block,
-                (x, y, z),
-                self.player_physics.get_aabb(),
-                self.remote_players.values(),
-            ),
-            BlockPlacementDecision::Allowed
-        )
-    }
-
-    fn can_break_current_block(&self, block: BlockType) -> bool {
-        can_break_block(block, self.game_mode)
-            && self.game_mode_policy().can_break_stack(
-                self.inventory.hotbar[self.inventory.selected].as_ref(),
-                block,
-            )
-    }
-
-    fn broadcast_block_change(&mut self, x: i32, y: i32, z: i32, block: BlockType) {
-        self.broadcast_block_change_with_raw(x, y, z, block, 0);
-    }
-
-    fn broadcast_block_change_with_raw(
-        &mut self,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: BlockType,
-        raw_fluid: u8,
-    ) {
-        if !matches!(self.role, MultiplayerRole::Host { .. }) {
-            return;
-        }
-        let cx = x.div_euclid(CHUNK_WIDTH as i32);
-        let cz = z.div_euclid(CHUNK_DEPTH as i32);
-        let revision = match self.mutation_revisions.bump(self.current_dimension, cx, cz) {
-            Ok(revision) => revision,
-            Err(error) => {
-                self.report_mutation_revision_error(error, "broadcasting a block mutation");
-                return;
-            }
-        };
-        self.mutation_revision_generation = self.mutation_revision_generation.saturating_add(1);
-        self.mutation_index_dirty = true;
-        let state = self.chunk_manager.get_block_state(x, y, z);
-        self.network.broadcast_block_change_with_raw(
-            self.current_dimension,
-            revision,
-            x,
-            y,
-            z,
-            block.to_wire(),
-            state,
-            raw_fluid,
-        );
-    }
-
-    fn broadcast_block_entity_delta(
-        &mut self,
-        x: i32,
-        y: i32,
-        z: i32,
-        entity: Option<crate::block_entity::BlockEntity>,
-    ) {
-        if !matches!(self.role, MultiplayerRole::Host { .. }) {
-            return;
-        }
-        let cx = x.div_euclid(CHUNK_WIDTH as i32);
-        let cz = z.div_euclid(CHUNK_DEPTH as i32);
-        let revision = match self.mutation_revisions.bump(self.current_dimension, cx, cz) {
-            Ok(revision) => revision,
-            Err(error) => {
-                self.report_mutation_revision_error(error, "broadcasting a block entity delta");
-                return;
-            }
-        };
-        self.mutation_revision_generation = self.mutation_revision_generation.saturating_add(1);
-        self.mutation_index_dirty = true;
-        self.network.broadcast_block_entity_delta(
-            self.current_dimension,
-            revision,
-            x,
-            y,
-            z,
-            entity,
-        );
-    }
-
-    pub fn apply_mutation_batch(
-        &mut self,
-        requests: Vec<crate::world_mutation::BlockMutationRequest>,
-    ) -> Result<crate::world_mutation::BlockMutationOutcome, crate::world_mutation::MutationError>
-    {
-        let outcome = crate::world_mutation::apply_batch(&mut self.chunk_manager, requests)?;
-
-        for m in &outcome.mutations {
-            self.redstone.on_block_changed(
-                &self.chunk_manager,
-                m.pos,
-                crate::redstone::Direction::North,
-            );
-            if matches!(self.role, MultiplayerRole::Host { .. }) {
-                self.broadcast_block_change(m.pos.0, m.pos.1, m.pos.2, m.new_block);
-                if m.old_entity != m.new_entity {
-                    self.broadcast_block_entity_delta(
-                        m.pos.0,
-                        m.pos.1,
-                        m.pos.2,
-                        m.new_entity.clone(),
-                    );
-                }
-            }
-        }
-
-        self.invalidate_chunk_meshes(outcome.dirty_chunks.clone(), DependencyReason::BreakPlace);
-
-        Ok(outcome)
-    }
-
-    fn report_mutation_revision_error(
-        &mut self,
-        error: crate::save::MutationRevisionIndexCapacityError,
-        operation: &str,
-    ) {
-        let message = format!(
-            "Mutation revision tracking capacity was exhausted while {operation}: {error}. \
-             Multiplayer mutation delivery has been stopped to avoid sending an untracked revision."
-        );
-        eprintln!("[Save] {message}");
-        self.save_error.get_or_insert(message);
-    }
-
-    fn schedule_player_catchup(&mut self, player_id: crate::network::protocol::PlayerId) {
-        let entries = self
-            .mutation_revisions
-            .entries_in(self.current_dimension)
-            .map(|((cx, cz), revision)| PlayerCatchupEntry {
-                key: crate::save::NetworkSnapshotKey {
-                    player_id,
-                    dimension: self.current_dimension,
-                    cx,
-                    cz,
-                    revision,
-                },
-                status: CatchupStatus::Pending,
-                retries: 0,
-            })
-            .collect();
-        self.pending_player_catchups.insert(player_id, entries);
-    }
-
-    fn process_join_catchups(&mut self) {
-        if !matches!(self.role, MultiplayerRole::Host { .. }) {
-            return;
-        }
-        let started = Instant::now();
-        let worker_results: Vec<_> = self
-            .network_snapshot_worker
-            .try_iter()
-            .take(64)
-            .take_while(|_| started.elapsed() < Duration::from_millis(1))
-            .collect();
-        for result in worker_results {
-            match result {
-                crate::save::NetworkSnapshotWorkerResult::Snapshot(payload) => {
-                    let Some(entry) = self
-                        .pending_player_catchups
-                        .get_mut(&payload.key.player_id)
-                        .and_then(|entries| {
-                            entries.iter_mut().find(|entry| entry.key == payload.key)
-                        })
-                    else {
-                        continue;
-                    };
-                    match payload.result {
-                        Ok((
-                            blocks,
-                            block_states,
-                            block_entities,
-                            min_section_y,
-                            section_count,
-                        )) => {
-                            self.network.send_chunk_to(
-                                payload.key.dimension,
-                                payload.key.cx,
-                                payload.key.cz,
-                                payload.key.revision,
-                                min_section_y,
-                                section_count,
-                                blocks,
-                                block_states,
-                                block_entities,
-                                payload.key.player_id,
-                            );
-                            entry.status = CatchupStatus::ServerSubmission {
-                                since: Instant::now(),
-                            };
-                        }
-                        Err(error) => {
-                            eprintln!("[Network] Catch-up snapshot retry: {error}");
-                            entry.status = CatchupStatus::Pending;
-                        }
-                    }
-                }
-                crate::save::NetworkSnapshotWorkerResult::IndexPersisted { generation, result } => {
-                    if self.mutation_index_persist_in_flight == Some(generation) {
-                        self.mutation_index_persist_in_flight = None;
-                    }
-                    match result {
-                        Ok(()) if generation == self.mutation_revision_generation => {
-                            self.mutation_index_dirty = false;
-                        }
-                        Ok(()) => {
-                            self.mutation_index_dirty = true;
-                        }
-                        Err(error) => {
-                            eprintln!("[Network] Mutation revision index persist failed: {error}");
-                            self.mutation_index_dirty = true;
-                        }
-                    }
-                }
-            }
-        }
-
-        if self.mutation_index_dirty && self.mutation_index_persist_in_flight.is_none() {
-            let generation = self.mutation_revision_generation;
-            if self
-                .network_snapshot_worker
-                .try_persist_index(generation, self.mutation_revisions.clone())
-                .is_ok()
-            {
-                self.mutation_index_persist_in_flight = Some(generation);
-            }
-        }
-
-        let now = Instant::now();
-        let mut disconnect = Vec::new();
-        for (&player_id, entries) in &mut self.pending_player_catchups {
-            for entry in entries.iter_mut() {
-                let timed_out = match entry.status {
-                    CatchupStatus::ServerSubmission { since }
-                    | CatchupStatus::AwaitingAck { since } => {
-                        now.duration_since(since) >= CATCHUP_ACK_TIMEOUT
-                    }
-                    CatchupStatus::Pending | CatchupStatus::WorkerInFlight => false,
-                };
-                if timed_out {
-                    entry.retries = entry.retries.saturating_add(1);
-                    entry.status = CatchupStatus::Pending;
-                    if entry.retries > MAX_CATCHUP_RETRIES {
-                        disconnect.push(player_id);
-                        break;
-                    }
-                }
-            }
-        }
-        disconnect.sort_unstable();
-        disconnect.dedup();
-        for player_id in disconnect {
-            self.pending_player_catchups.remove(&player_id);
-            self.network.disconnect_slow_catchup_client(
-                player_id,
-                format!(
-                    "catch-up ACK timed out after {} retries",
-                    MAX_CATCHUP_RETRIES
-                ),
-            );
-        }
-
-        let mut player_ids: Vec<_> = self.pending_player_catchups.keys().copied().collect();
-        player_ids.sort_unstable();
-        let mut submitted = 0usize;
-        let mut visited_without_submit = 0usize;
-        while submitted < MAX_CATCHUP_SUBMITS_PER_FRAME
-            && !player_ids.is_empty()
-            && visited_without_submit < player_ids.len()
-        {
-            let slot = self.catchup_round_robin_cursor % player_ids.len();
-            self.catchup_round_robin_cursor =
-                (self.catchup_round_robin_cursor + 1) % player_ids.len();
-            let player_id = player_ids[slot];
-            let player_pos = self
-                .remote_players
-                .get(&player_id)
-                .and_then(|remote| remote.snapshots.back().map(|snapshot| snapshot.position))
-                .unwrap_or(self.player_physics.position);
-            let candidate = self
-                .pending_player_catchups
-                .get(&player_id)
-                .and_then(|entries| {
-                    entries
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, entry)| entry.status == CatchupStatus::Pending)
-                        .min_by(|(_, left), (_, right)| {
-                            let distance = |entry: &PlayerCatchupEntry| {
-                                let center_x = (entry.key.cx * CHUNK_WIDTH as i32
-                                    + CHUNK_WIDTH as i32 / 2)
-                                    as f32;
-                                let center_z = (entry.key.cz * CHUNK_DEPTH as i32
-                                    + CHUNK_DEPTH as i32 / 2)
-                                    as f32;
-                                (center_x - player_pos.x).powi(2)
-                                    + (center_z - player_pos.z).powi(2)
-                            };
-                            distance(left)
-                                .partial_cmp(&distance(right))
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        })
-                        .map(|(index, entry)| (index, entry.key))
-                });
-            let Some((entry_index, key)) = candidate else {
-                visited_without_submit += 1;
-                continue;
-            };
-            let chunk = (key.dimension == self.current_dimension)
-                .then(|| self.chunk_manager.chunks.get(&(key.cx, key.cz)).cloned())
-                .flatten()
-                .map(Arc::new);
-            match self
-                .network_snapshot_worker
-                .try_submit(crate::save::NetworkSnapshotRequest { key, chunk })
-            {
-                Ok(()) => {
-                    if let Some(entry) = self
-                        .pending_player_catchups
-                        .get_mut(&player_id)
-                        .and_then(|entries| entries.get_mut(entry_index))
-                    {
-                        entry.status = CatchupStatus::WorkerInFlight;
-                    }
-                    submitted += 1;
-                    visited_without_submit = 0;
-                }
-                Err(crate::save::NetworkSnapshotSubmitError::Full) => break,
-                Err(crate::save::NetworkSnapshotSubmitError::Closed) => {
-                    eprintln!("[Network] Catch-up snapshot worker stopped");
-                    break;
-                }
-            }
-        }
-
-        self.pending_player_catchups
-            .retain(|_, entries| !entries.is_empty());
-        self.perf_counters.network_queue_depth = self
-            .pending_player_catchups
-            .values()
-            .map(|entries| entries.len() as u64)
-            .sum::<u64>()
-            .saturating_add(self.network_staging.len() as u64);
-    }
-
-    fn weather_sync_fields(&self) -> (u8, f32) {
-        let snapshot = self.weather.snapshot();
-        (snapshot.current.wire_value(), snapshot.remaining_ticks)
-    }
-
-    fn broadcast_time_sync(&self) {
-        let (weather, weather_remaining_ticks) = self.weather_sync_fields();
-        self.network
-            .broadcast_time_sync(self.world_time.ticks, weather, weather_remaining_ticks);
-    }
-
-    fn send_time_sync_to(&self, player_id: crate::network::protocol::PlayerId) {
-        let (weather, weather_remaining_ticks) = self.weather_sync_fields();
-        self.network.send_time_sync_to(
-            self.world_time.ticks,
-            weather,
-            weather_remaining_ticks,
-            player_id,
-        );
-    }
-
-    fn drain_network_events(&mut self) {
-        // Transport draining is bounded by `NetworkHandle`; every event it
-        // yields is classified immediately so an apply-budget boundary can
-        // never demote a latest-wins event into the reliable FIFO.
-        const MAX_EVENTS: usize = NETWORK_MAX_EVENTS_PER_PASS;
-        const MAX_BYTES: usize = NETWORK_MAX_BYTES_PER_PASS;
-        const MAX_TIME: Duration = NETWORK_MAX_TIME_PER_PASS;
-        for event in self.network.drain_inbound() {
-            self.network_staging.stage(event);
-        }
-
-        let apply_started = Instant::now();
-        let mut applied = 0usize;
-        let mut applied_bytes = 0usize;
-        while applied < MAX_EVENTS
-            && applied_bytes < MAX_BYTES
-            && apply_started.elapsed() < MAX_TIME
-        {
-            let remaining_bytes = MAX_BYTES.saturating_sub(applied_bytes);
-            let Some((event, event_bytes)) = self.network_staging.pop_next_if_fits(remaining_bytes)
-            else {
-                break;
-            };
-            applied_bytes = applied_bytes.saturating_add(event_bytes);
-            applied += 1;
-            self.handle_single_network_event(event);
-        }
-        self.perf_counters.network_inbound_reliable_pending =
-            self.network_staging.reliable_len() as u64;
-        self.perf_counters.network_inbound_reliable_bytes = self.network_staging.reliable_bytes();
-        self.perf_counters.network_inbound_latest_pending =
-            self.network_staging.latest_len() as u64;
-        self.perf_counters.network_inbound_latest_bytes = self.network_staging.latest_bytes();
-    }
-
-    fn clear_replicated_entities(&mut self) {
-        let local_ids: Vec<_> = self
-            .replicated_entities
-            .drain()
-            .map(|(_, replicated)| replicated.local_entity_id)
-            .collect();
-        for local_id in local_ids {
-            self.entity_manager.remove_by_id(local_id);
-        }
-    }
-
-    fn apply_replicated_entity_state(
-        &mut self,
-        dimension_wire: u8,
-        sequence: u64,
-        state: crate::network::protocol::EntityStateWire,
-    ) {
-        if self.is_authoritative()
-            || crate::dimension::Dimension::from_wire(dimension_wire)
-                != Some(self.current_dimension)
-        {
-            return;
-        }
-        let Some(entity_type) = crate::entity::EntityType::from_wire(state.entity_type) else {
-            return;
-        };
-        if !is_replicated_entity_type(entity_type) {
-            return;
-        }
-
-        let needs_spawn = self
-            .replicated_entities
-            .get(&state.entity_id)
-            .and_then(|replicated| self.entity_manager.get_by_id(replicated.local_entity_id))
-            .map_or(true, |entity| entity.entity_type != entity_type);
-        if needs_spawn {
-            if let Some(previous) = self.replicated_entities.remove(&state.entity_id) {
-                self.entity_manager.remove_by_id(previous.local_entity_id);
-            }
-            let local_entity_id = self
-                .entity_manager
-                .spawn(entity_type, Vec3::from_array(state.position));
-            self.replicated_entities
-                .insert(state.entity_id, ReplicatedEntityState::new(local_entity_id));
-        }
-
-        let snapped = self
-            .replicated_entities
-            .get_mut(&state.entity_id)
-            .is_some_and(|replicated| replicated.push(state, sequence, self.network_time));
-        if snapped {
-            self.perf_counters.prediction_rollback =
-                self.perf_counters.prediction_rollback.saturating_add(1);
-        }
-        if let Some(local_id) = self
-            .replicated_entities
-            .get(&state.entity_id)
-            .map(|replicated| replicated.local_entity_id)
-        {
-            if let Some(entity) = self.entity_manager.get_by_id_mut(local_id) {
-                apply_entity_wire_state(entity, state);
-            }
-        }
-    }
-
-    fn apply_replicated_entity_despawn(
-        &mut self,
-        dimension_wire: u8,
-        sequence: u64,
-        entity_id: u64,
-    ) {
-        if self.is_authoritative()
-            || crate::dimension::Dimension::from_wire(dimension_wire)
-                != Some(self.current_dimension)
-        {
-            return;
-        }
-        if self
-            .replicated_entities
-            .get(&entity_id)
-            .and_then(|replicated| replicated.snapshots.back())
-            .is_some_and(|latest| sequence <= latest.sequence)
-        {
-            return;
-        }
-        if let Some(replicated) = self.replicated_entities.remove(&entity_id) {
-            self.entity_manager.remove_by_id(replicated.local_entity_id);
-        }
-    }
-
-    fn update_replicated_entity_interpolation(&mut self) {
-        if self.is_authoritative() {
-            return;
-        }
-        let target = self.network_time - ENTITY_INTERPOLATION_DELAY;
-        let samples: Vec<_> = self
-            .replicated_entities
-            .values()
-            .filter_map(|replicated| {
-                replicated
-                    .sample(target)
-                    .map(|state| (replicated.local_entity_id, state))
-            })
-            .collect();
-        let moved_ids: Vec<_> = samples.iter().map(|(local_id, _)| *local_id).collect();
-        for (local_id, state) in samples {
-            if let Some(entity) = self.entity_manager.get_by_id_mut(local_id) {
-                apply_entity_wire_state(entity, state);
-            }
-        }
-        self.entity_manager.sync_entity_positions(&moved_ids);
-    }
-
-    fn handle_single_network_event(&mut self, event: NetworkInbound) {
-        match event {
-            NetworkInbound::StatusUpdate(msg) => {
-                self.network_status = Some(msg);
-            }
-            NetworkInbound::GameplayResponse { response } => {
-                self.last_gameplay_response = Some(response);
-            }
-            NetworkInbound::GameplayRequest { id, mut request } => {
-                // Embedded listen transport is owned by ServerRuntime.  A
-                // State-side inbound GameplayRequest would be a second
-                // authority path; retain this legacy arm only for clients,
-                // where NetworkClient remains the presentation transport.
-                request.session_id = id;
-                let _ = request;
-            }
-            NetworkInbound::Connected {
-                player_id,
-                seed,
-                gamemode,
-            } => {
-                self.local_player_id = Some(player_id);
-                self.world_seed = seed as u32;
-                let game_mode = match gamemode {
-                    0 => GameMode::Creative,
-                    2 => GameMode::Adventure,
-                    3 => GameMode::Spectator,
-                    _ => GameMode::Survival,
-                };
-                self.set_game_mode(game_mode);
-                self.inventory = match self.game_mode {
-                    GameMode::Creative => Inventory::new_creative(),
-                    GameMode::Survival | GameMode::Adventure | GameMode::Spectator => {
-                        Inventory::new()
-                    }
-                };
-                self.weather = crate::weather::WeatherSystem::new(self.world_seed);
-                self.chunk_manager.chunks.clear();
-                self.teardown_terrain_runtime("network connect/reset");
-                self.pending_chunk_payloads.clear();
-                self.pending_block_changes.clear();
-                self.client_chunk_revisions.clear();
-                self.clear_replicated_entities();
-                self.client_player_health_sequence = 0;
-                self.client_player_effect_sequence = 0;
-                self.client_session_projection = None;
-                self.network_ready = true;
-                self.network_status = None;
-                self.connection_lost = false;
-                push_chat_history(
-                    &mut self.chat_messages,
-                    "[Network]".into(),
-                    format!("Connected to server as player #{player_id}"),
-                );
-            }
-            NetworkInbound::Disconnected(reason) => {
-                eprintln!("[State] Network disconnected: {reason}");
-                self.teardown_terrain_runtime("network disconnect");
-                self.network_ready = false;
-                let disconnected = self.translate("disconnect.generic");
-                self.network_status = Some(format!("{disconnected}: {reason}"));
-                self.connection_lost = true;
-                self.is_chat_open = false;
-                self.chat_input.clear();
-                clear_remote_players(&mut self.remote_players, &mut self.entity_manager);
-                self.force_close_inventory();
-                self.container_sessions.sessions.clear();
-                self.clear_replicated_entities();
-                self.client_session_projection = None;
-                self.set_paused(true);
-                push_chat_history(
-                    &mut self.chat_messages,
-                    "[Network]".into(),
-                    format!("{disconnected}: {reason}"),
-                );
-            }
-            NetworkInbound::PlayerJoin { id, username } => {
-                if self.local_player_id != Some(id) {
-                    if let Some(remote) = self.remote_players.get_mut(&id) {
-                        remote.username = username.clone();
-                        if let Some(entity) = self.entity_manager.get_by_id_mut(remote.entity_id) {
-                            entity.username = username.clone();
-                        }
-                    } else {
-                        let entity_id = self.entity_manager.spawn(
-                            crate::entity::EntityType::RemotePlayer,
-                            self.player_physics.position,
-                        );
-                        if let Some(entity) = self.entity_manager.get_by_id_mut(entity_id) {
-                            entity.player_id = id;
-                            entity.username = username.clone();
-                        }
-                        self.remote_players
-                            .insert(id, RemotePlayerState::new(entity_id, username.clone()));
-                    }
-                    push_chat_history(
-                        &mut self.chat_messages,
-                        "[Network]".into(),
-                        format!("{username} joined the game"),
-                    );
-                }
-                if matches!(self.role, MultiplayerRole::Host { .. }) {
-                    self.remote_player_health
-                        .entry(id)
-                        .or_insert_with(PlayerState::new);
-                    self.remote_player_effects.entry(id).or_default();
-                    self.network.notify_player_join(id, username);
-                    self.send_time_sync_to(id);
-                    self.network.send_world_rules_to(self.world_rules, id);
-                    self.schedule_player_catchup(id);
-                }
-            }
-            NetworkInbound::PlayerLeave(id) => {
-                self.pending_player_catchups.remove(&id);
-                self.remote_player_health.remove(&id);
-                self.remote_player_effects.remove(&id);
-                self.container_sessions.close_by_player(id);
-                if let Some(remote) = self.remote_players.remove(&id) {
-                    push_chat_history(
-                        &mut self.chat_messages,
-                        "[Network]".into(),
-                        format!("{} left the game", remote.username),
-                    );
-                    self.entity_manager.remove_by_id(remote.entity_id);
-                } else {
-                    push_chat_history(
-                        &mut self.chat_messages,
-                        "[Network]".into(),
-                        format!("Player #{id} left the game"),
-                    );
-                }
-            }
-            NetworkInbound::PlayerPosition {
-                id,
-                sequence,
-                sender_time_millis,
-                x,
-                y,
-                z,
-                yaw,
-                pitch,
-            } => {
-                if self.local_player_id == Some(id) {
-                    let authoritative = Vec3::new(x, y, z);
-                    if self.player_physics.position.distance(authoritative)
-                        > PLAYER_CORRECTION_SNAP_DISTANCE
-                    {
-                        self.player_physics.position = authoritative;
-                        self.player_physics.velocity = Vec3::ZERO;
-                        self.prev_player_position = authoritative;
-                        self.camera.yaw = yaw;
-                        self.camera.pitch = pitch;
-                        self.perf_counters.prediction_rollback =
-                            self.perf_counters.prediction_rollback.saturating_add(1);
-                    }
-                    return;
-                }
-                let candidate = Vec3::new(x, y, z);
-                let position = if matches!(self.role, MultiplayerRole::Host { .. }) {
-                    validated_remote_position(
-                        self.remote_players
-                            .get(&id)
-                            .and_then(|remote| remote.snapshots.back()),
-                        candidate,
-                        sender_time_millis,
-                    )
-                } else {
-                    candidate
-                };
-                if !self.remote_players.contains_key(&id) {
-                    let username = String::new();
-                    let entity_id = self
-                        .entity_manager
-                        .spawn(crate::entity::EntityType::RemotePlayer, position);
-                    if let Some(entity) = self.entity_manager.get_by_id_mut(entity_id) {
-                        entity.player_id = id;
-                    }
-                    self.remote_players
-                        .insert(id, RemotePlayerState::new(entity_id, username));
-                }
-
-                let mut canonical_snapshot = None;
-                if let Some(remote) = self.remote_players.get_mut(&id) {
-                    let arrival = self.network_time;
-                    let result = remote.push_snapshot(
-                        position,
-                        yaw,
-                        pitch,
-                        sequence,
-                        sender_time_millis,
-                        arrival,
-                    );
-
-                    if let Some(entity) = self.entity_manager.get_by_id_mut(remote.entity_id) {
-                        let (snap_pos, snap_yaw, snap_pitch) =
-                            if result == SnapshotPushResult::Snapped {
-                                (position, yaw, pitch)
-                            } else if let Some(samp) =
-                                remote.sample(arrival - REMOTE_INTERPOLATION_DELAY)
-                            {
-                                (samp.position, samp.yaw, samp.pitch)
-                            } else {
-                                (Vec3::new(x, y, z), yaw, pitch)
-                            };
-                        entity.position = snap_pos;
-                        entity.yaw = snap_yaw;
-                        entity.pitch = snap_pitch;
-                    }
-                    if result != SnapshotPushResult::Rejected {
-                        canonical_snapshot = remote.snapshots.back().copied();
-                    }
-                }
-                if matches!(self.role, MultiplayerRole::Host { .. }) {
-                    if let Some(snapshot) = canonical_snapshot {
-                        self.network.broadcast_player_position(
-                            id,
-                            snapshot.sequence,
-                            snapshot.sender_time_millis,
-                            snapshot.position,
-                            snapshot.yaw,
-                            snapshot.pitch,
-                        );
-                    }
-                }
-            }
-            NetworkInbound::PlayerAction { id, action } => {
-                if let Some(remote) = self.remote_players.get(&id) {
-                    if let Some(entity) = self.entity_manager.get_by_id_mut(remote.entity_id) {
-                        entity.action_cooldown = match action {
-                            crate::network::protocol::Action::Place
-                            | crate::network::protocol::Action::Break
-                            | crate::network::protocol::Action::Use => 0.25,
-                        };
-                    }
-                }
-                if matches!(self.role, MultiplayerRole::Host { .. }) {
-                    if let NetworkHandle::Host { host_to_server, .. } = &self.network {
-                        let _ = host_to_server.tracked_send(
-                            crate::network::server::HostToServer::BroadcastPlayerAction {
-                                id,
-                                action,
-                            },
-                        );
-                    }
-                }
-            }
-            NetworkInbound::ClientBlockChange {
-                id,
-                x,
-                y,
-                z,
-                block,
-                state,
-            } => {
-                if self.has_in_process_runtime() {
-                    let _ = self.submit_remote_authority_block_use(id, x, y, z, block);
-                } else {
-                    self.set_block_and_broadcast(id, x, y, z, block, state);
-                }
-            }
-            NetworkInbound::ClientBlockAction {
-                id,
-                action,
-                x,
-                y,
-                z,
-                block,
-                held_item,
-            } => {
-                if self.has_in_process_runtime() {
-                    self.handle_authority_client_block_action(id, action, x, y, z, block);
-                } else {
-                    self.handle_client_block_action(id, action, x, y, z, block, held_item);
-                }
-            }
-            NetworkInbound::BlockActionResult {
-                x,
-                y,
-                z,
-                success,
-                consumed_item,
-                drops,
-            } => {
-                if success {
-                    if consumed_item {
-                        self.inventory
-                            .use_selected_item(self.game_mode == GameMode::Creative);
-                    }
-                    for drop_wire in drops {
-                        if let Some(stack) = drop_wire.to_stack() {
-                            if let Some(leftover) = self.inventory.add_stack(stack) {
-                                let sound_pos =
-                                    glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
-                                self.spawn_dropped_item(leftover.item, sound_pos);
-                            }
-                        }
-                    }
-                    let mined_block = self.chunk_manager.get_block(x, y, z);
-                    self.trigger_advancement(crate::advancements::AdvancementTrigger::MineBlock(
-                        mined_block,
-                    ));
-                    self.damage_selected_tool(
-                        (x as u32) ^ (y as u32).rotate_left(11) ^ (z as u32).rotate_left(22),
-                    );
-                }
-            }
-            NetworkInbound::AuthoritativeBlockChange {
-                dimension,
-                revision,
-                x,
-                y,
-                z,
-                block,
-                state,
-                raw_fluid,
-            } => {
-                self.apply_remote_block_change(
-                    dimension, revision, x, y, z, block, state, raw_fluid,
-                );
-            }
-            NetworkInbound::BlockEntityDelta {
-                dimension,
-                revision,
-                x,
-                y,
-                z,
-                entity,
-            } => {
-                self.apply_remote_block_entity_delta(dimension, revision, x, y, z, entity);
-            }
-            NetworkInbound::ChunkData {
-                dimension,
-                cx,
-                cz,
-                revision,
-                min_section_y,
-                section_count,
-                blocks,
-                block_states,
-                fluid_levels,
-                block_entities,
-            } => {
-                self.apply_remote_chunk_data(
-                    dimension,
-                    cx,
-                    cz,
-                    revision,
-                    min_section_y,
-                    section_count,
-                    blocks,
-                    block_states,
-                    fluid_levels,
-                    block_entities,
-                );
-            }
-            NetworkInbound::EntitySpawn {
-                dimension,
-                sequence,
-                state,
-            }
-            | NetworkInbound::EntityState {
-                dimension,
-                sequence,
-                state,
-            } => {
-                self.apply_replicated_entity_state(dimension, sequence, state);
-            }
-            NetworkInbound::EntityDespawn {
-                dimension,
-                sequence,
-                entity_id,
-            } => {
-                self.apply_replicated_entity_despawn(dimension, sequence, entity_id);
-            }
-            NetworkInbound::PlayerHealth {
-                sequence,
-                player_id,
-                health,
-                max_health,
-                hunger,
-                saturation,
-                oxygen,
-                is_dead,
-                death_reason,
-            } => {
-                if self.local_player_id == Some(player_id)
-                    && !self.is_authoritative()
-                    && sequence > self.client_player_health_sequence
-                {
-                    self.client_player_health_sequence = sequence;
-                    self.player_state.health = health.clamp(0.0, max_health.max(0.0));
-                    self.player_state.max_health = max_health.max(0.0);
-                    self.player_state.hunger = hunger.clamp(0.0, 20.0);
-                    self.player_state.saturation = saturation.clamp(0.0, 20.0);
-                    self.player_state.oxygen = oxygen.clamp(0.0, 300.0);
-                    self.player_state.is_dead = is_dead;
-                    self.player_state.death_reason = DamageSource::from_wire(death_reason);
-                    if is_dead {
-                        self.clear_movement_input();
-                        self.sync_cursor_mode();
-                    }
-                }
-            }
-            NetworkInbound::PlayerEffect {
-                sequence,
-                player_id,
-                effects,
-            } => {
-                if self.local_player_id == Some(player_id)
-                    && !self.is_authoritative()
-                    && sequence > self.client_player_effect_sequence
-                {
-                    self.client_player_effect_sequence = sequence;
-                    self.potion_effects.active =
-                        effects.into_iter().filter_map(effect_from_wire).collect();
-                }
-            }
-            NetworkInbound::PlayerSessionUpdate {
-                sequence,
-                player_id,
-                dimension,
-                state,
-            } => {
-                if self.local_player_id != Some(player_id)
-                    || (!self.has_in_process_runtime() && self.is_authoritative())
-                {
-                    return;
-                }
-                if self.accept_session_projection(dimension, sequence, state.revision) {
-                    self.client_player_health_sequence =
-                        self.client_player_health_sequence.max(sequence);
-                    self.project_gameplay_state(
-                        dimension,
-                        crate::authority::contract::SessionGameplayState::from(state),
-                    );
-                }
-            }
-            NetworkInbound::TimeSync {
-                ticks,
-                weather,
-                weather_remaining_ticks,
-            } => {
-                if !self.is_authoritative() {
-                    self.world_time.ticks = ticks;
-                    self.world_time.tick_accumulator = 0.0;
-                    if let Some(current) = crate::weather::Weather::from_wire(weather) {
-                        self.weather
-                            .apply_snapshot(crate::weather::WeatherSnapshot {
-                                current,
-                                remaining_ticks: weather_remaining_ticks,
-                            });
-                    }
-                }
-            }
-            NetworkInbound::WorldRulesSync { rules } => {
-                if !self.is_authoritative() {
-                    self.set_world_rules(rules);
-                }
-            }
-            NetworkInbound::LightningStrike(strike) => {
-                if !self.is_authoritative()
-                    && self.current_dimension == crate::dimension::Dimension::Overworld
-                {
-                    self.apply_lightning_strike(strike);
-                }
-            }
-            NetworkInbound::ChatFromClient { id, message } => {
-                let sender = self
-                    .remote_players
-                    .get(&id)
-                    .map(|remote| remote.username.clone())
-                    .filter(|username| !username.is_empty())
-                    .unwrap_or_else(|| format!("Player {id}"));
-                let Some(message) = normalized_chat_message(&message) else {
-                    return;
-                };
-                push_chat_history(&mut self.chat_messages, sender.clone(), message.clone());
-                self.network.send_chat(sender, message);
-            }
-            NetworkInbound::Chat { sender, message } => {
-                let Some(message) = normalized_chat_message(&message) else {
-                    return;
-                };
-                push_chat_history(&mut self.chat_messages, sender, message);
-            }
-            NetworkInbound::CatchupAccepted {
-                id,
-                dimension,
-                cx,
-                cz,
-                revision,
-            } => {
-                let key = crate::dimension::Dimension::from_wire(dimension).map(|dimension| {
-                    crate::save::NetworkSnapshotKey {
-                        player_id: id,
-                        dimension,
-                        cx,
-                        cz,
-                        revision,
-                    }
-                });
-                if let Some(key) = key {
-                    if let Some(entry) = self
-                        .pending_player_catchups
-                        .get_mut(&id)
-                        .and_then(|entries| entries.iter_mut().find(|entry| entry.key == key))
-                    {
-                        entry.status = CatchupStatus::AwaitingAck {
-                            since: Instant::now(),
-                        };
-                    }
-                }
-            }
-            NetworkInbound::CatchupBackpressured {
-                id,
-                dimension,
-                cx,
-                cz,
-                revision,
-                mailbox_full_count,
-            } => {
-                self.perf_counters.network_catchup_mailbox_full = self
-                    .perf_counters
-                    .network_catchup_mailbox_full
-                    .max(mailbox_full_count);
-                let key = crate::dimension::Dimension::from_wire(dimension).map(|dimension| {
-                    crate::save::NetworkSnapshotKey {
-                        player_id: id,
-                        dimension,
-                        cx,
-                        cz,
-                        revision,
-                    }
-                });
-                if let Some(key) = key {
-                    if let Some(entry) = self
-                        .pending_player_catchups
-                        .get_mut(&id)
-                        .and_then(|entries| entries.iter_mut().find(|entry| entry.key == key))
-                    {
-                        entry.retries = entry.retries.saturating_add(1);
-                        entry.status = CatchupStatus::Pending;
-                    }
-                }
-            }
-            NetworkInbound::CatchupAck {
-                id,
-                dimension,
-                cx,
-                cz,
-                revision,
-            } => {
-                if let Some(dimension) = crate::dimension::Dimension::from_wire(dimension) {
-                    if let Some(entries) = self.pending_player_catchups.get_mut(&id) {
-                        entries.retain(|entry| {
-                            entry.key
-                                != (crate::save::NetworkSnapshotKey {
-                                    player_id: id,
-                                    dimension,
-                                    cx,
-                                    cz,
-                                    revision,
-                                })
-                        });
-                    }
-                    self.pending_player_catchups
-                        .retain(|_, entries| !entries.is_empty());
-                }
-            }
-            NetworkInbound::ContainerOpenRequest {
-                id,
-                dimension,
-                x,
-                y,
-                z,
-            } => {
-                if matches!(self.role, MultiplayerRole::Host { .. }) {
-                    let block = self.chunk_manager.get_block(x, y, z);
-                    let mut valid = dimension == self.current_dimension as u8
-                        && matches!(
-                            block,
-                            BlockType::Chest
-                                | BlockType::EndCityChest
-                                | BlockType::Furnace
-                                | BlockType::FurnaceLit
-                                | BlockType::Hopper
-                                | BlockType::Dispenser
-                                | BlockType::Dropper
-                        )
-                        && self.chunk_manager.get_block_entity(x, y, z).is_some();
-                    if valid && matches!(block, BlockType::Chest | BlockType::EndCityChest) {
-                        if self
-                            .chunk_manager
-                            .get_block(x, y + 1, z)
-                            .properties()
-                            .is_solid
-                        {
-                            valid = false;
-                        }
-                        if let Some(partner_pos) = crate::container_sessions::ContainerSessionManager::get_double_chest_partner(&self.chunk_manager, x, y, z) {
-                            if self.chunk_manager.get_block(partner_pos.0, partner_pos.1 + 1, partner_pos.2).properties().is_solid {
-                                valid = false;
-                            }
-                        }
-                    }
-                    if valid {
-                        if let Some(remote) = self.remote_players.get(&id) {
-                            if let Some(snap) = remote.snapshots.back() {
-                                let chest_center =
-                                    glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
-                                if (snap.position - chest_center).length_squared() > 64.0 {
-                                    valid = false;
-                                }
-                            }
-                        }
-                    }
-
-                    if valid {
-                        let had_viewer = self.legacy_chest_viewer_count(dimension, (x, y, z)) > 0;
-                        let replaced = self.container_sessions.close_by_player(id);
-                        for old in replaced {
-                            if old.dimension == dimension && old.x == x && old.y == y && old.z == z
-                            {
-                                continue;
-                            }
-                            if let NetworkHandle::Host { host_to_server, .. } = &self.network {
-                                let _ = host_to_server.tracked_send(
-                                    crate::network::server::HostToServer::SendContainerClose {
-                                        to: old.player_id,
-                                        dimension: old.dimension,
-                                        x: old.x,
-                                        y: old.y,
-                                        z: old.z,
-                                    },
-                                );
-                            }
-                            let old_position = (old.x, old.y, old.z);
-                            if old.dimension == self.current_dimension as u8
-                                && matches!(
-                                    self.chunk_manager.get_block(old.x, old.y, old.z),
-                                    BlockType::Chest | BlockType::EndCityChest
-                                )
-                                && self.legacy_chest_viewer_count(old.dimension, old_position) == 0
-                            {
-                                self.set_local_chest_open_state(old_position, false);
-                            }
-                        }
-                        if matches!(block, BlockType::Chest | BlockType::EndCityChest) {
-                            crate::container_sessions::ContainerSessionManager::ensure_chest_loot_generated(
-                                &mut self.chunk_manager,
-                                x,
-                                y,
-                                z,
-                                self.world_seed,
-                            );
-                        }
-                        self.container_sessions.open(id, dimension, x, y, z);
-                        if matches!(block, BlockType::Chest | BlockType::EndCityChest)
-                            && !had_viewer
-                        {
-                            self.set_local_chest_open_state((x, y, z), true);
-                        }
-                        if let Some(session) = self.container_sessions.find_by_player_mut(id) {
-                            session.revision = self
-                                .chunk_manager
-                                .get_block_entity(x, y, z)
-                                .map(crate::block_entity::BlockEntity::revision)
-                                .unwrap_or(0);
-                        }
-                        if let Some(slots_vec) =
-                            crate::container_sessions::ContainerSessionManager::get_container_slots(
-                                &self.chunk_manager,
-                                x,
-                                y,
-                                z,
-                            )
-                        {
-                            let slots: Vec<Option<crate::network::protocol::ItemWire>> = slots_vec
-                                .iter()
-                                .map(|s| {
-                                    s.as_ref()
-                                        .map(crate::network::protocol::ItemWire::from_stack)
-                                })
-                                .collect();
-                            let slot_count = slots_vec.len();
-                            self.container_is_double = slot_count > 27;
-                            let revision = self
-                                .chunk_manager
-                                .get_block_entity(x, y, z)
-                                .map(crate::block_entity::BlockEntity::revision)
-                                .unwrap_or(0);
-                            if let NetworkHandle::Host { host_to_server, .. } = &self.network {
-                                let _ = host_to_server.tracked_send(
-                                    crate::network::server::HostToServer::SendContainerOpenResult {
-                                        to: id,
-                                        dimension,
-                                        success: true,
-                                        x,
-                                        y,
-                                        z,
-                                        slots,
-                                        revision,
-                                    },
-                                );
-                            }
-                        }
-                        self.container_target = Some((x, y, z));
-                    } else {
-                        if let NetworkHandle::Host { host_to_server, .. } = &self.network {
-                            let _ = host_to_server.tracked_send(
-                                crate::network::server::HostToServer::SendContainerOpenResult {
-                                    to: id,
-                                    dimension,
-                                    success: false,
-                                    x,
-                                    y,
-                                    z,
-                                    slots: vec![],
-                                    revision: 0,
-                                },
-                            );
-                        }
-                    }
-                }
-            }
-            NetworkInbound::ContainerClickRequest {
-                id,
-                dimension,
-                revision,
-                slot_index,
-                is_left,
-                dragged,
-            } => {
-                if matches!(self.role, MultiplayerRole::Host { .. }) {
-                    if let Some(session) = self.container_sessions.find_by_player(id) {
-                        let session = session.clone();
-                        let mut valid = session.dimension == self.current_dimension as u8
-                            && dimension == self.current_dimension as u8
-                            && revision == session.revision;
-                        if let Some(remote) = self.remote_players.get(&id) {
-                            if let Some(snap) = remote.snapshots.back() {
-                                let chest_center = glam::Vec3::new(
-                                    session.x as f32 + 0.5,
-                                    session.y as f32 + 0.5,
-                                    session.z as f32 + 0.5,
-                                );
-                                if (snap.position - chest_center).length_squared() > 64.0 {
-                                    valid = false;
-                                }
-                            }
-                        }
-                        if valid {
-                            if let Some(mut slots_vec) =
-                                crate::container_sessions::ContainerSessionManager::get_container_slots(
-                                    &self.chunk_manager,
-                                    session.x,
-                                    session.y,
-                                    session.z,
-                                )
-                            {
-                                if (slot_index as usize) < slots_vec.len() {
-                                    let slot_item = slots_vec[slot_index as usize];
-                                    let dragged_stack = dragged.and_then(|w| w.to_stack());
-                                    let Some(entity) = self
-                                        .chunk_manager
-                                        .get_block_entity(session.x, session.y, session.z)
-                                    else {
-                                        return;
-                                    };
-                                    let Some(access) =
-                                        crate::block_entity::ContainerAccess::for_entity(entity)
-                                    else {
-                                        return;
-                                    };
-                                    // A double chest is exposed as one 54-slot
-                                    // view, while each half's capability still
-                                    // owns 27 physical slots.
-                                    let capability_slot = if access.kind
-                                        == crate::block_entity::ContainerKind::Chest
-                                    {
-                                        slot_index as usize % 27
-                                    } else {
-                                        slot_index as usize
-                                    };
-                                    if dragged_stack
-                                        .as_ref()
-                                        .is_some_and(|stack| {
-                                            !access.can_insert(capability_slot, stack, None)
-                                        })
-                                        || (dragged_stack.is_none()
-                                            && slot_item.is_some()
-                                            && !access.can_extract(capability_slot, None))
-                                    {
-                                        return;
-                                    }
-                                    let (new_slot, new_dragged) =
-                                        crate::container_sessions::simulate_container_click(
-                                            slot_item,
-                                            dragged_stack,
-                                            is_left,
-                                        );
-                                    slots_vec[slot_index as usize] = new_slot;
-                                    let slot_wire = new_slot
-                                        .as_ref()
-                                        .map(crate::network::protocol::ItemWire::from_stack);
-                                    let committed = crate::container_sessions::ContainerSessionManager::set_container_slots(
-                                        &mut self.chunk_manager,
-                                        session.x,
-                                        session.y,
-                                        session.z,
-                                        &slots_vec,
-                                    );
-                                    if !committed {
-                                        return;
-                                    }
-                                    let dragged_wire = new_dragged
-                                        .as_ref()
-                                        .map(crate::network::protocol::ItemWire::from_stack);
-                                    let current_revision = self
-                                        .chunk_manager
-                                        .get_block_entity(session.x, session.y, session.z)
-                                        .map(crate::block_entity::BlockEntity::revision)
-                                        .unwrap_or(session.revision);
-                                    if let Some(active) = self.container_sessions.find_by_player_mut(id) {
-                                        active.revision = current_revision;
-                                    }
-                                    self.redstone.mark_container_changed(
-                                        &self.chunk_manager,
-                                        (session.x, session.y, session.z),
-                                    );
-                                    if let NetworkHandle::Host { host_to_server, .. } =
-                                        &self.network
-                                    {
-                                        let _ = host_to_server.tracked_send(crate::network::server::HostToServer::SendContainerClickResult {
-                                            to: id, dimension: session.dimension, success: true, slot_index, slot: slot_wire, dragged: dragged_wire,
-                                        });
-                                        let _ = host_to_server.tracked_send(crate::network::server::HostToServer::BroadcastContainerSlotUpdate {
-                                            dimension: session.dimension, revision: current_revision, x: session.x, y: session.y, z: session.z, slot_index, slot: slot_wire,
-                                        });
-                                    }
-                                }
-                            }
-                        } else {
-                            self.container_sessions.close_by_player(id);
-                        }
-                    }
-                }
-            }
-            NetworkInbound::ContainerClose {
-                id,
-                dimension,
-                x,
-                y,
-                z,
-            } => {
-                if matches!(self.role, MultiplayerRole::Host { .. }) {
-                    let closed = self.container_sessions.close_exact(id, dimension, x, y, z);
-                    if let Some(session) = closed {
-                        let block = self
-                            .chunk_manager
-                            .get_block(session.x, session.y, session.z);
-                        if session.dimension == self.current_dimension as u8
-                            && matches!(block, BlockType::Chest | BlockType::EndCityChest)
-                            && self.legacy_chest_viewer_count(
-                                session.dimension,
-                                (session.x, session.y, session.z),
-                            ) == 0
-                            && self.container_target != Some((session.x, session.y, session.z))
-                        {
-                            self.set_local_chest_open_state(
-                                (session.x, session.y, session.z),
-                                false,
-                            );
-                        }
-                    }
-                }
-                if self.local_player_id == Some(id)
-                    && dimension == self.current_dimension as u8
-                    && self.container_target == Some((x, y, z))
-                {
-                    self.force_close_inventory();
-                }
-            }
-            NetworkInbound::ContainerOpenResult {
-                dimension,
-                success,
-                x,
-                y,
-                z,
-                slots,
-                revision,
-            } => {
-                if !success {
-                    if dimension == self.current_dimension as u8
-                        && self.container_target == Some((x, y, z))
-                    {
-                        self.force_close_inventory();
-                    }
-                } else if dimension == self.current_dimension as u8 {
-                    let current_revision = self
-                        .chunk_manager
-                        .get_block_entity(x, y, z)
-                        .map(crate::block_entity::BlockEntity::revision)
-                        .unwrap_or(0);
-                    if !container_revision_is_newer(current_revision, revision)
-                        && current_revision != 0
-                    {
-                        return;
-                    }
-                    let mut committed = true;
-                    if !slots.is_empty() {
-                        let stacks: Vec<Option<crate::inventory::ItemStack>> = slots
-                            .iter()
-                            .map(|slot| slot.as_ref().and_then(|wire| wire.to_stack()))
-                            .collect();
-                        committed =
-                            crate::container_sessions::ContainerSessionManager::set_container_slots(
-                                &mut self.chunk_manager,
-                                x,
-                                y,
-                                z,
-                                &stacks,
-                            );
-                    }
-                    if !committed {
-                        return;
-                    }
-                    if let Some(entity) = self.chunk_manager.get_block_entity_mut(x, y, z) {
-                        entity.set_revision(revision);
-                    }
-                    self.container_target = Some((x, y, z));
-                    self.open_inventory();
-                }
-            }
-            NetworkInbound::ContainerClickResult {
-                dimension,
-                success,
-                slot_index: _,
-                slot: _,
-                dragged,
-            } => {
-                if success
-                    && dimension == self.current_dimension as u8
-                    && self.container_target.is_some()
-                {
-                    // The click result intentionally carries no authoritative
-                    // revision.  The paired ContainerSlotUpdate/BlockEntityDelta
-                    // is the only source allowed to mutate mirrored slots;
-                    // applying this payload here could reintroduce an older value
-                    // when reliable packets are retried or reordered.
-                    self.inventory.dragged = dragged.and_then(|w| w.to_stack());
-                }
-            }
-            NetworkInbound::ContainerSlotUpdate {
-                dimension,
-                revision,
-                x,
-                y,
-                z,
-                slot_index,
-                slot,
-            } => {
-                if dimension != self.current_dimension as u8
-                    || self.container_target != Some((x, y, z))
-                {
-                    return;
-                }
-                let current_revision = self
-                    .chunk_manager
-                    .get_block_entity(x, y, z)
-                    .map(crate::block_entity::BlockEntity::revision)
-                    .unwrap_or(0);
-                if !container_revision_is_newer(current_revision, revision) {
-                    return;
-                }
-                if let Some(mut slots) =
-                    crate::container_sessions::ContainerSessionManager::get_container_slots(
-                        &self.chunk_manager,
-                        x,
-                        y,
-                        z,
-                    )
-                {
-                    if (slot_index as usize) < slots.len() {
-                        slots[slot_index as usize] = slot.and_then(|wire| wire.to_stack());
-                        if !crate::container_sessions::ContainerSessionManager::set_container_slots(
-                            &mut self.chunk_manager,
-                            x,
-                            y,
-                            z,
-                            &slots,
-                        ) {
-                            return;
-                        }
-                        if let Some(entity) = self.chunk_manager.get_block_entity_mut(x, y, z) {
-                            entity.set_revision(revision);
-                        }
-                    }
-                }
-            }
-            NetworkInbound::ClientRespawnRequest { id } => {
-                if matches!(&self.network, NetworkHandle::Host { .. }) {
-                    if let Some(remote) = self.remote_players.get_mut(&id) {
-                        if remote.is_dead || remote.health <= 0.0 {
-                            let mut spawn_pos = None;
-                            let mut spawn_dim = crate::dimension::Dimension::Overworld;
-
-                            if let (Some(bed_p), Some(dim)) =
-                                (remote.spawn_point, remote.spawn_dimension)
-                            {
-                                let chunk_pos = (bed_p[0], bed_p[1], bed_p[2]);
-                                if self.chunk_manager.get_block(
-                                    chunk_pos.0,
-                                    chunk_pos.1,
-                                    chunk_pos.2,
-                                ) == crate::world::BlockType::Bed
-                                {
-                                    let (safe_p, safe) = crate::world::find_safe_spawn_position(
-                                        &self.chunk_manager,
-                                        chunk_pos,
-                                    );
-                                    if safe {
-                                        spawn_pos = Some(safe_p);
-                                        spawn_dim = dim;
-                                    }
-                                }
-                                if spawn_pos.is_none() {
-                                    remote.spawn_point = None;
-                                    remote.spawn_dimension = None;
-                                }
-                            }
-
-                            if spawn_pos.is_none() {
-                                spawn_dim = crate::dimension::Dimension::Overworld;
-                                let target_p =
-                                    (self.world_spawn.0, self.world_spawn.1, self.world_spawn.2);
-                                let (safe_p, safe) = crate::world::find_safe_spawn_position(
-                                    &self.chunk_manager,
-                                    target_p,
-                                );
-                                if safe {
-                                    spawn_pos = Some(safe_p);
-                                } else {
-                                    spawn_pos = Some(Vec3::new(
-                                        target_p.0 as f32 + 0.5,
-                                        target_p.1 as f32,
-                                        target_p.2 as f32 + 0.5,
-                                    ));
-                                }
-                            }
-
-                            let respawn_p = spawn_pos.unwrap_or_else(|| Vec3::new(8.0, 80.0, 8.0));
-                            remote.health = 20.0;
-                            remote.hunger = 20.0;
-                            remote.is_dead = false;
-                            remote.is_sleeping = false;
-
-                            if let Some(entity) =
-                                self.entity_manager.get_by_id_mut(remote.entity_id)
-                            {
-                                entity.position = respawn_p;
-                                entity.health = 20.0;
-                            }
-
-                            self.container_sessions.close_by_player(id);
-                            self.network.send_respawn_result(
-                                id,
-                                respawn_p.to_array(),
-                                spawn_dim as u8,
-                            );
-                            let mut respawn_state = PlayerState::new();
-                            respawn_state.health = 20.0;
-                            respawn_state.hunger = 20.0;
-                            respawn_state.is_dead = false;
-                            self.network.broadcast_player_health(0, id, &respawn_state);
-                        }
-                    }
-                }
-            }
-            NetworkInbound::ClientSleepRequest {
-                id,
-                bed_x,
-                bed_y,
-                bed_z,
-            } => {
-                if matches!(&self.network, NetworkHandle::Host { .. }) {
-                    if let Some(remote) = self.remote_players.get_mut(&id) {
-                        let bed_pos =
-                            Vec3::new(bed_x as f32 + 0.5, bed_y as f32 + 0.5, bed_z as f32 + 0.5);
-                        let ent_pos = self
-                            .entity_manager
-                            .get_by_id(remote.entity_id)
-                            .map(|e| e.position)
-                            .unwrap_or(bed_pos);
-
-                        let clicked_block = self.chunk_manager.get_block(bed_x, bed_y, bed_z);
-                        if clicked_block == crate::world::BlockType::Bed
-                            && ent_pos.distance(bed_pos) <= 8.0
-                            && remote.dimension == crate::dimension::Dimension::Overworld
-                        {
-                            let bstate = crate::world::BlockState::decode(
-                                self.chunk_manager.get_block_state(bed_x, bed_y, bed_z),
-                            );
-                            let head_pos = if bstate.is_top {
-                                (bed_x, bed_y, bed_z)
-                            } else {
-                                (
-                                    bed_x + bstate.facing.dx(),
-                                    bed_y,
-                                    bed_z + bstate.facing.dz(),
-                                )
-                            };
-
-                            remote.spawn_point = Some([head_pos.0, head_pos.1, head_pos.2]);
-                            remote.spawn_dimension = Some(crate::dimension::Dimension::Overworld);
-
-                            let time_of_day = self.world_time.ticks % 24000;
-                            let is_night = time_of_day >= 12541 && time_of_day <= 23458;
-                            let is_storm = self.weather.is_thundering();
-
-                            if is_night || is_storm {
-                                let nearby_hostiles = self
-                                    .entity_manager
-                                    .query_radius(bed_pos, 8.0)
-                                    .any(|e| e.entity_type.is_hostile() && e.health > 0.0);
-                                if !nearby_hostiles {
-                                    remote.is_sleeping = true;
-                                    remote.bed_pos = Some([bed_x, bed_y, bed_z]);
-                                    self.network.broadcast_sleep_state_sync(id, true);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            NetworkInbound::PlayerRespawnResult {
-                position,
-                dimension,
-            } => {
-                let target_vec = Vec3::from_array(position);
-                self.player_physics.position = target_vec;
-                self.player_physics.velocity = Vec3::ZERO;
-                self.player_physics.on_ground = false;
-                self.player_physics.highest_y = target_vec.y;
-
-                let target_dim = crate::dimension::Dimension::from_wire(dimension)
-                    .unwrap_or(crate::dimension::Dimension::Overworld);
-                if self.current_dimension != target_dim {
-                    self.switch_dimension(target_dim);
-                }
-
-                self.player_state.reset_for_respawn();
-                self.void_damage_timer = 0.0;
-                self.sync_cursor_mode();
-            }
-            NetworkInbound::SleepStateSync {
-                player_id,
-                is_sleeping,
-            } => {
-                if matches!(&self.network, NetworkHandle::Client { .. }) {
-                    if self.local_player_id == Some(player_id) {
-                        self.player_state.is_sleeping = is_sleeping;
-                        if !is_sleeping {
-                            self.player_state.sleep_timer = 0.0;
-                        }
-                    } else if let Some(remote) = self.remote_players.get_mut(&player_id) {
-                        remote.is_sleeping = is_sleeping;
-                    }
-                }
-            }
-            NetworkInbound::DimensionTransfer {
-                dimension,
-                position,
-            } => {
-                if let Some(target) = crate::dimension::Dimension::from_wire(dimension) {
-                    self.reset_presented_dimension(target);
-                    self.player_physics.position = Vec3::from_array(position);
-                    self.camera.position = Vec3::from_array(position) + Vec3::new(0.0, 1.6, 0.0);
-                    self.portal_contact_time = 0.0;
-                    self.portal_cooldown = 3.0;
-                }
-            }
-        }
     }
 
     fn update_network_position(&mut self, dt: f32) {
@@ -10371,116 +2600,6 @@ impl State {
             self.camera.yaw,
             self.camera.pitch,
         );
-    }
-
-    fn update_network_time_sync(&mut self, dt: f32) {
-        if !matches!(self.role, MultiplayerRole::Host { .. }) || !self.network_ready {
-            return;
-        }
-        self.network_time_sync_timer += dt;
-        if self.network_time_sync_timer >= 1.0 {
-            self.network_time_sync_timer %= 1.0;
-            self.broadcast_time_sync();
-        }
-    }
-
-    fn broadcast_authoritative_replication(&mut self, dt: f32) {
-        if self.has_in_process_runtime()
-            || !matches!(self.role, MultiplayerRole::Host { .. })
-            || !self.network_ready
-        {
-            return;
-        }
-
-        self.entity_replication_sequence = self.entity_replication_sequence.wrapping_add(1).max(1);
-        let sequence = self.entity_replication_sequence;
-        let states: Vec<_> = self
-            .entity_manager
-            .entities
-            .iter()
-            .filter(|entity| is_replicated_entity_type(entity.entity_type))
-            .map(entity_state_wire)
-            .collect();
-        let current_ids: std::collections::HashSet<_> =
-            states.iter().map(|state| state.entity_id).collect();
-
-        let mut despawned: Vec<_> = self
-            .replicated_entity_ids
-            .difference(&current_ids)
-            .copied()
-            .collect();
-        despawned.sort_unstable();
-        for entity_id in despawned {
-            self.network
-                .broadcast_entity_despawn(self.current_dimension, sequence, entity_id);
-        }
-
-        for state in &states {
-            if !self.replicated_entity_ids.contains(&state.entity_id) {
-                self.network
-                    .broadcast_entity_spawn(self.current_dimension, sequence, *state);
-            }
-            self.network
-                .broadcast_entity_state(self.current_dimension, sequence, *state);
-        }
-        self.replicated_entity_ids = current_ids;
-
-        self.network
-            .broadcast_player_health(sequence, 0, &self.player_state);
-        self.network.broadcast_player_effects(
-            sequence,
-            0,
-            self.potion_effects
-                .active
-                .iter()
-                .copied()
-                .map(effect_to_wire)
-                .collect(),
-        );
-
-        let remote_positions: Vec<_> = self
-            .remote_players
-            .iter()
-            .filter_map(|(id, remote)| {
-                remote
-                    .snapshots
-                    .back()
-                    .map(|snapshot| (*id, snapshot.position))
-            })
-            .collect();
-        for (player_id, position) in remote_positions {
-            let state = self
-                .remote_player_health
-                .entry(player_id)
-                .or_insert_with(PlayerState::new);
-            if let Some((amount, source)) = state.update(dt, false) {
-                state.take_damage(amount, source);
-            }
-            let effects = self.remote_player_effects.entry(player_id).or_default();
-            let effect_health = effects.update(dt);
-            if effect_health > 0.0 {
-                state.health = (state.health + effect_health).min(state.max_health);
-            } else if effect_health < 0.0 && state.health > 1.0 {
-                state.take_damage((-effect_health).min(state.health - 1.0), DamageSource::Mob);
-            }
-
-            if self.game_mode != GameMode::Creative
-                && self
-                    .entity_manager
-                    .query_radius(position, 2.2)
-                    .any(|entity| entity.entity_type.is_hostile() && entity.health > 0.0)
-            {
-                state.take_damage(3.0, DamageSource::Mob);
-            }
-
-            self.network
-                .broadcast_player_health(sequence, player_id, state);
-            self.network.broadcast_player_effects(
-                sequence,
-                player_id,
-                effects.active.iter().copied().map(effect_to_wire).collect(),
-            );
-        }
     }
 
     pub fn shutdown_network(&mut self) {
@@ -10566,10 +2685,6 @@ impl State {
             .set_no_clip(self.game_mode_policy().can_phase);
     }
 
-    pub fn broadcast_world_rules(&self) {
-        self.network.broadcast_world_rules(self.world_rules);
-    }
-
     pub fn open_chat(&mut self) {
         if self.connection_lost
             || self.is_paused
@@ -10604,7 +2719,7 @@ impl State {
         };
 
         if message.starts_with('/') {
-            if !self.is_authoritative() {
+            if self.presentation_topology().is_join_client() {
                 let status = self.translate("command.host_only");
                 push_chat_history(&mut self.chat_messages, "System".to_string(), status);
             } else if !self.cheats_enabled && !matches!(self.role, MultiplayerRole::Host { .. }) {
@@ -10644,7 +2759,7 @@ impl State {
             }
         };
 
-        use crate::commands::{Command, CommandTarget, TimeCommand, WeatherCommand};
+        use crate::commands::Command;
 
         // Every mutating command is submitted to the headless core for
         // Singleplayer/listen-host.  Help and read-only gamerule queries are
@@ -10669,10 +2784,8 @@ impl State {
                         }
                     }
                     if matches!(&command, Command::GameRule { .. }) {
-                        self.broadcast_world_rules();
                         self.translate("command.game_rule_updated_authority")
                     } else if matches!(&command, Command::Time(_)) {
-                        self.broadcast_time_sync();
                         let ticks = self.world_time.ticks.to_string();
                         self.translation_catalog
                             .format_lookup("command.time_now", &[("ticks", &ticks)])
@@ -10694,291 +2807,10 @@ impl State {
             return;
         }
 
-        let target_is_local = |target: Option<&CommandTarget>| {
-            target.is_none()
-                || matches!(
-                    target,
-                    Some(CommandTarget::SelfPlayer | CommandTarget::NearestPlayer)
-                )
+        let feedback = match command {
+            Command::Help(command) => Some(crate::commands::help_text(command.as_deref()).into()),
+            _ => None,
         };
-        let target_is_single_local = |target: &CommandTarget| {
-            matches!(
-                target,
-                CommandTarget::SelfPlayer | CommandTarget::NearestPlayer
-            )
-        };
-        let mut feedback = None::<String>;
-
-        match command {
-            Command::Help(command) => {
-                feedback = Some(crate::commands::help_text(command.as_deref()).into())
-            }
-            Command::GameMode { mode, target } => {
-                if !target_is_local(target.as_ref()) {
-                    feedback = Some(self.translate("command.only_local_player"));
-                } else if self.world_rules.hardcore
-                    && self.player_state.is_dead
-                    && mode == GameMode::Survival
-                {
-                    feedback = Some(self.translate("command.hardcore_survival"));
-                } else {
-                    self.set_game_mode(mode);
-                    let mode = format!("{mode:?}");
-                    feedback = Some(
-                        self.translation_catalog
-                            .format_lookup("command.gamemode_set", &[("mode", &mode)]),
-                    );
-                }
-            }
-            Command::Difficulty(difficulty) => {
-                self.difficulty = if self.world_rules.hardcore {
-                    Difficulty::Hard
-                } else {
-                    difficulty
-                };
-                let difficulty = format!("{:?}", self.difficulty);
-                feedback = Some(
-                    self.translation_catalog
-                        .format_lookup("command.difficulty_set", &[("difficulty", &difficulty)]),
-                );
-            }
-            Command::GameRule { rule, value } => {
-                if let Some(value) = value {
-                    let changed = if matches!(
-                        rule.as_str(),
-                        "playerssleepingpercentage" | "sleepingpercentage" | "sleeping_percentage"
-                    ) {
-                        value
-                            .parse::<u8>()
-                            .ok()
-                            .map(|value| {
-                                self.world_rules.set_sleeping_percentage(value);
-                                true
-                            })
-                            .unwrap_or(false)
-                    } else if let Some(value) = parse_command_bool(&value) {
-                        self.world_rules.set(&rule, value).is_ok()
-                    } else {
-                        false
-                    };
-                    if changed {
-                        self.set_world_rules(self.world_rules);
-                        feedback = Some(
-                            self.translation_catalog
-                                .format_lookup("command.gamerule_updated", &[("rule", &rule)]),
-                        );
-                        self.broadcast_world_rules();
-                    } else {
-                        feedback = Some(
-                            self.translation_catalog
-                                .format_lookup("command.gamerule_invalid", &[("rule", &rule)]),
-                        );
-                    }
-                } else if let Some(current) = self.world_rules.value(&rule) {
-                    feedback = Some(format!("{rule} = {current}"));
-                } else if matches!(
-                    rule.as_str(),
-                    "playerssleepingpercentage" | "sleepingpercentage" | "sleeping_percentage"
-                ) {
-                    feedback = Some(format!(
-                        "playersSleepingPercentage = {}",
-                        self.world_rules.sleeping_percentage
-                    ));
-                } else {
-                    feedback = Some(format!("Unknown game rule: {rule}."));
-                }
-            }
-            Command::Time(time) => {
-                match time {
-                    TimeCommand::Set(ticks) => self.world_time.ticks = ticks,
-                    TimeCommand::Add(ticks) => {
-                        self.world_time.ticks = self.world_time.ticks.saturating_add(ticks)
-                    }
-                }
-                self.broadcast_time_sync();
-                let ticks = self.world_time.ticks.to_string();
-                feedback = Some(
-                    self.translation_catalog
-                        .format_lookup("command.time_set", &[("ticks", &ticks)]),
-                );
-            }
-            Command::Weather(weather) => {
-                let (kind, duration) = match weather {
-                    WeatherCommand::Clear(duration) => (crate::weather::Weather::Clear, duration),
-                    WeatherCommand::Rain(duration) => (crate::weather::Weather::Rain, duration),
-                    WeatherCommand::Thunder(duration) => {
-                        (crate::weather::Weather::Thunder, duration)
-                    }
-                };
-                self.weather.set_weather(kind, duration);
-                self.broadcast_time_sync();
-                let weather = format!("{kind:?}");
-                feedback = Some(
-                    self.translation_catalog
-                        .format_lookup("command.weather_set", &[("weather", &weather)]),
-                );
-            }
-            Command::Teleport { target, position } => {
-                if !target_is_single_local(&target) {
-                    feedback = Some(self.translate("command.only_local_player"));
-                } else if self.current_dimension.height().contains_y(position[1]) {
-                    self.player_physics.position = Vec3::new(
-                        position[0] as f32 + 0.5,
-                        position[1] as f32,
-                        position[2] as f32 + 0.5,
-                    );
-                    self.player_physics.velocity = Vec3::ZERO;
-                    self.camera.position = self.player_physics.position + Vec3::Y * 1.6;
-                    let x = position[0].to_string();
-                    let y = position[1].to_string();
-                    let z = position[2].to_string();
-                    feedback =
-                        Some(self.translation_catalog.format_lookup(
-                            "command.teleported",
-                            &[("x", &x), ("y", &y), ("z", &z)],
-                        ));
-                } else {
-                    feedback = Some(self.translate("command.teleport_outside"));
-                }
-            }
-            Command::Give {
-                target,
-                item,
-                count,
-            } => {
-                if !target_is_single_local(&target) {
-                    feedback = Some(self.translate("command.only_local_player"));
-                } else {
-                    let remainder = self.inventory.add_stack(ItemStack::new(item, count));
-                    let received = remainder
-                        .as_ref()
-                        .map_or(count, |remaining| count - remaining.count);
-                    let received = received.to_string();
-                    let item = self.localized_item_name(item);
-                    feedback =
-                        Some(self.translation_catalog.format_lookup(
-                            "command.gave",
-                            &[("count", &received), ("item", &item)],
-                        ));
-                }
-            }
-            Command::Kill(target) => {
-                if !target_is_local(target.as_ref()) {
-                    feedback = Some(self.translate("command.only_local_player"));
-                } else {
-                    self.player_state.invulnerable_time = 0.0;
-                    self.take_damage(1.0e9, DamageSource::Void);
-                    feedback = Some(self.translate("command.killed"));
-                }
-            }
-            Command::SpawnPoint { target, position } => {
-                if !target_is_single_local(&target) {
-                    feedback = Some(self.translate("command.only_local_player"));
-                } else {
-                    let position = position.unwrap_or([
-                        self.player_physics.position.x.floor() as i32,
-                        self.player_physics.position.y.floor() as i32,
-                        self.player_physics.position.z.floor() as i32,
-                    ]);
-                    self.player_state.spawn_point = Some(position);
-                    self.player_state.spawn_dimension = Some(self.current_dimension);
-                    let x = position[0].to_string();
-                    let y = position[1].to_string();
-                    let z = position[2].to_string();
-                    feedback = Some(self.translation_catalog.format_lookup(
-                        "command.spawn_point_set",
-                        &[("x", &x), ("y", &y), ("z", &z)],
-                    ));
-                }
-            }
-            Command::SetWorldSpawn(position) => {
-                let position = position.unwrap_or([
-                    self.player_physics.position.x.floor() as i32,
-                    self.player_physics.position.y.floor() as i32,
-                    self.player_physics.position.z.floor() as i32,
-                ]);
-                if crate::dimension::Dimension::Overworld
-                    .height()
-                    .contains_y(position[1])
-                {
-                    self.world_spawn = (position[0], position[1], position[2]);
-                    let x = position[0].to_string();
-                    let y = position[1].to_string();
-                    let z = position[2].to_string();
-                    feedback = Some(self.translation_catalog.format_lookup(
-                        "command.world_spawn_set",
-                        &[("x", &x), ("y", &y), ("z", &z)],
-                    ));
-                } else {
-                    feedback = Some(self.translate("command.world_spawn_outside"));
-                }
-            }
-            Command::Locate(structure) => {
-                let structure_id = match structure.as_str() {
-                    "dungeon" => Some(crate::structure::StructureId::Dungeon),
-                    "mineshaft" => Some(crate::structure::StructureId::Mineshaft),
-                    "village" => Some(crate::structure::StructureId::Village),
-                    "stronghold" => Some(crate::structure::StructureId::Stronghold),
-                    "fortress" | "nether_fortress" => {
-                        Some(crate::structure::StructureId::NetherFortress)
-                    }
-                    "endcity" | "end_city" => Some(crate::structure::StructureId::EndCity),
-                    _ => None,
-                };
-                feedback = match structure_id {
-                    Some(id) => {
-                        let current = [
-                            self.player_physics.position.x.floor() as i32,
-                            self.player_physics.position.y.floor() as i32,
-                            self.player_physics.position.z.floor() as i32,
-                        ];
-                        match crate::structure::locate_structure(
-                            id,
-                            (current[0], current[1], current[2]),
-                            self.world_seed,
-                            self.current_dimension,
-                        ) {
-                            Some((x, y, z)) => {
-                                let x = x.to_string();
-                                let y = y.to_string();
-                                let z = z.to_string();
-                                Some(self.translation_catalog.format_lookup(
-                                    "command.nearest_structure",
-                                    &[("structure", &structure), ("x", &x), ("y", &y), ("z", &z)],
-                                ))
-                            }
-                            None => Some(self.translation_catalog.format_lookup(
-                                "command.no_structure",
-                                &[("structure", &structure)],
-                            )),
-                        }
-                    }
-                    None => {
-                        Some(self.translation_catalog.format_lookup(
-                            "command.unknown_structure",
-                            &[("structure", &structure)],
-                        ))
-                    }
-                };
-            }
-            Command::Seed => {
-                let seed = self.world_seed.to_string();
-                feedback = Some(
-                    self.translation_catalog
-                        .format_lookup("command.seed", &[("seed", &seed)]),
-                )
-            }
-            Command::SaveAll => match self.save_synchronously() {
-                Ok(()) => feedback = Some(self.translate("command.saved")),
-                Err(error) => {
-                    let reason = error.to_string();
-                    feedback = Some(
-                        self.translation_catalog
-                            .format_lookup("command.save_failed", &[("reason", &reason)]),
-                    )
-                }
-            },
-        }
 
         if let Some(feedback) = feedback {
             let command_label = self.translate("command.feedback");
@@ -10997,7 +2829,7 @@ impl State {
         self.audio_manager
             .play_sound(crate::audio::SoundId::UiClick);
         self.shutdown_network();
-        if self.is_authoritative() {
+        if !self.presentation_topology().is_join_client() {
             if let Err(error) = self.save_synchronously() {
                 self.is_saving = false;
                 self.save_error = Some(error.to_string());
@@ -11041,190 +2873,22 @@ impl State {
         }
     }
 
-    fn enqueue_chunk_save(
-        &self,
-        snapshot: crate::save::UncompressedChunkSnapshot,
-        tracker: crate::save::DirtyChunkSet,
-        revision: u64,
-    ) -> crate::save::SaveResult<()> {
-        let cx = snapshot.chunk_x;
-        let cz = snapshot.chunk_z;
-        if !tracker.begin_save(cx, cz, revision) {
-            return Ok(());
-        }
-        if let Err(error) = self.save_tx.send(crate::save::SaveCommand::SaveChunk {
-            snapshot,
-            revision,
-            tracker: tracker.clone(),
-        }) {
-            tracker.acknowledge_failed(cx, cz, revision);
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    pub fn trigger_background_save(&self) -> crate::save::SaveResult<()> {
-        if !self.is_authoritative() {
-            return Ok(());
-        }
-        if self.has_in_process_runtime() {
-            // ServerRuntime owns authoritative chunk/entity/player persistence
-            // and performs bounded autosaves from its fixed tick. State's
-            // renderer cache must never be serialized as a second authority.
-            return Ok(());
-        }
-        let world_dir = self.save_manager.lock().unwrap().world_dir.clone();
-        crate::menu::update_world_metadata(
-            &world_dir,
-            self.world_seed,
-            self.game_mode,
-            self.difficulty,
-        )
-        .map_err(|error| crate::save::SaveError::Io {
-            operation: "update world metadata",
-            path: world_dir.join("world.meta"),
-            message: error.to_string(),
-        })?;
-        let level = crate::save::LevelData {
-            seed: self.world_seed,
-            time: self.world_time.ticks,
-            spawn_x: self.world_spawn.0,
-            spawn_y: self.world_spawn.1,
-            spawn_z: self.world_spawn.2,
-            spawn_dimension: crate::dimension::Dimension::Overworld,
-            spawn_yaw: 0.0,
-            version: 3,
-            rules: self.world_rules,
-            world_type: self.world_type,
-            generate_structures: self.generate_structures,
-            bonus_chest: self.bonus_chest,
-            cheats_enabled: self.cheats_enabled,
-            hardcore: self.world_rules.hardcore,
-        };
-        let player = crate::save::PlayerData::from_state(
-            self.player_physics.position,
-            self.player_physics.persistent_velocity(),
-            self.camera.yaw,
-            self.camera.pitch,
-            &self.player_state,
-            self.game_mode,
-            &self.inventory,
-            self.advancement_manager.progress.clone(),
-        );
-        self.save_tx
-            .send(crate::save::SaveCommand::SaveLevelAndPlayer(level, player))?;
-
-        let tracker = self.chunk_manager.dirty_chunks.clone();
-        for ((cx, cz), revision) in tracker.dirty_revisions() {
-            if let Some(chunk) = self.chunk_manager.chunks.get(&(cx, cz)) {
-                let redstone_metadata =
-                    self.redstone
-                        .collect_chunk_metadata(&self.chunk_manager, cx, cz);
-                let snapshot = crate::save::UncompressedChunkSnapshot::from_chunk_with_redstone(
-                    self.current_dimension,
-                    chunk,
-                    redstone_metadata,
-                )
-                .with_mutation_revision(self.mutation_revisions.latest(
-                    self.current_dimension,
-                    cx,
-                    cz,
-                ));
-                self.enqueue_chunk_save(snapshot, tracker.clone(), revision)?;
-            }
-        }
-        self.save_manager
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .save_current_dimension(self.current_dimension)
-            .map_err(|error| crate::save::SaveError::Io {
-                operation: "save current dimension",
-                path: world_dir.join("dimension.dat"),
-                message: error.to_string(),
-            })?;
-        self.save_manager
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .save_mutation_revision_index(&self.mutation_revisions)
-            .map_err(|error| crate::save::SaveError::Io {
-                operation: "save mutation revision index",
-                path: world_dir.join("mutation_revisions.bin"),
-                message: error.to_string(),
-            })?;
-        self.save_current_dimension_entities()?;
-        Ok(())
-    }
-
     pub fn save_synchronously(&mut self) -> crate::save::SaveResult<()> {
-        if !self.is_authoritative() {
+        if self.presentation_topology().is_join_client() {
             return Ok(());
         }
         if let Some(runtime) = self.embedded_runtime.as_mut() {
+            let world_dir = runtime.runtime.properties.world_dir.clone();
             runtime
                 .save_all()
                 .map_err(|error| crate::save::SaveError::Io {
                     operation: "embedded runtime save",
-                    path: self
-                        .save_manager
-                        .lock()
-                        .map(|manager| manager.world_dir.clone())
-                        .unwrap_or_else(|_| std::path::PathBuf::from("world")),
+                    path: world_dir,
                     message: error.to_string(),
                 })?;
             return Ok(());
         }
-        // Mark all currently loaded chunks dirty for complete save and quit flush
-        for &coord in self.chunk_manager.chunks.keys() {
-            self.chunk_manager.dirty_chunks.mark_dirty(coord.0, coord.1);
-        }
-        self.trigger_background_save()?;
-
-        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
-        self.save_tx.send(crate::save::SaveCommand::Flush(ack_tx))?;
-        ack_rx
-            .recv()
-            .map_err(|_| crate::save::SaveError::QueueClosed)??;
-        println!("[Save] Synchronously saved world state.");
         Ok(())
-    }
-
-    pub fn save_current_dimension_entities(&self) -> crate::save::SaveResult<()> {
-        let save_manager = match self.save_manager.lock() {
-            Ok(mgr) => mgr,
-            Err(error) => error.into_inner(),
-        };
-        let persistent_entities: Vec<crate::save::EntitySaveData> = self
-            .entity_manager
-            .entities
-            .iter()
-            .map(crate::save::EntitySaveData::from)
-            .filter(|data| data.should_persist())
-            .collect();
-
-        let path = save_manager.entities_file_path(self.current_dimension);
-        save_manager
-            .save_entities_in(self.current_dimension, &persistent_entities)
-            .map_err(|error| crate::save::SaveError::Io {
-                operation: "save entities",
-                path,
-                message: error.to_string(),
-            })
-    }
-
-    pub fn load_current_dimension_entities(&mut self) {
-        let save_manager = match self.save_manager.lock() {
-            Ok(mgr) => mgr,
-            Err(_) => return,
-        };
-        let saved_entities = save_manager.load_entities_in(self.current_dimension);
-        if saved_entities.is_empty() {
-            return;
-        }
-
-        self.entity_manager.entities.clear();
-        for data in &saved_entities {
-            self.entity_manager.add_restored_entity(data);
-        }
     }
 
     pub fn trigger_advancement(&mut self, trigger: crate::advancements::AdvancementTrigger) {
@@ -11351,23 +3015,31 @@ impl State {
             region.active_chunks += 1;
         }
 
-        if let Some(levels) = &existing_section.levels {
-            for level in levels {
-                if let Some(h) = &level.opaque.handle {
-                    if let Err(error) = region.deallocate_handle(h) {
-                        eprintln!("[RenderRegion] deallocate failed: {error:?}");
-                    }
-                }
-                if let Some(h) = &level.transparent.handle {
-                    if let Err(error) = region.deallocate_handle(h) {
-                        eprintln!("[RenderRegion] deallocate failed: {error:?}");
-                    }
+        let full_rebuild = existing_section.needs_rebuild();
+        let mask = bundle.built_lods;
+
+        let mut levels = if full_rebuild {
+            if let Some(old) = existing_section.levels.take() {
+                for level in &old {
+                    Self::deallocate_gpu_mesh_level(region, level);
                 }
             }
-        }
+            std::array::from_fn(|_| GpuMeshLevel::empty())
+        } else {
+            existing_section
+                .levels
+                .take()
+                .unwrap_or_else(|| std::array::from_fn(|_| GpuMeshLevel::empty()))
+        };
 
         let mut metrics = UploadMetrics::default();
-        let levels = std::array::from_fn(|index| {
+        for index in 0..3 {
+            if mask & (1 << index) == 0 {
+                continue;
+            }
+            if !full_rebuild {
+                Self::deallocate_gpu_mesh_level(region, &levels[index]);
+            }
             let data = &bundle.levels[index];
             let owner_opaque = crate::chunk_render::allocation_owner(
                 terrain_generation,
@@ -11388,13 +3060,31 @@ impl State {
             let (transparent, transparent_metrics) =
                 region.upload_mesh_layer(device, queue, &data.transparent, owner_transparent);
             metrics = metrics.add(opaque_metrics).add(transparent_metrics);
-            GpuMeshLevel {
+            levels[index] = GpuMeshLevel {
                 opaque,
                 transparent,
                 bounds: data.bounds(),
-            }
-        });
+            };
+        }
+        existing_section.built_lods = if full_rebuild {
+            mask
+        } else {
+            existing_section.built_lods | mask
+        };
         (levels, metrics)
+    }
+
+    fn deallocate_gpu_mesh_level(region: &mut RenderRegion, level: &GpuMeshLevel) {
+        if let Some(h) = &level.opaque.handle {
+            if let Err(error) = region.deallocate_handle(h) {
+                eprintln!("[RenderRegion] deallocate failed: {error:?}");
+            }
+        }
+        if let Some(h) = &level.transparent.handle {
+            if let Err(error) = region.deallocate_handle(h) {
+                eprintln!("[RenderRegion] deallocate failed: {error:?}");
+            }
+        }
     }
 
     fn next_chunk_lifetime(&mut self) -> u64 {
@@ -11427,7 +3117,6 @@ impl State {
             return false;
         };
         section.invalidate();
-        self.los_world_revision = self.los_world_revision.wrapping_add(1);
         let identity = SectionIdentity::new(key, section.revision, lifetime);
         let player_chunk = (
             (self.player_physics.position.x / CHUNK_WIDTH as f32).floor() as i32,
@@ -11464,30 +3153,6 @@ impl State {
 
     /// Applies the same one-voxel halo dependency used by `MeshSnapshot`.
     /// Cardinal and diagonal dependents are tagged as derived AO work.
-    fn invalidate_block_mesh_dependencies(
-        &mut self,
-        wx: i32,
-        wy: i32,
-        wz: i32,
-        reason: DependencyReason,
-    ) {
-        let owner = SectionKey::new(
-            wx.div_euclid(CHUNK_WIDTH as i32),
-            crate::world::world_y_to_section_y(wy),
-            wz.div_euclid(CHUNK_DEPTH as i32),
-        );
-        let mut dependencies = std::collections::HashSet::new();
-        mark_section_mesh_dependencies(&mut dependencies, wx, wy, wz);
-        for key in dependencies {
-            let dependency_reason = if key == owner {
-                reason
-            } else {
-                DependencyReason::Ao
-            };
-            self.invalidate_section_mesh(key, dependency_reason);
-        }
-    }
-
     fn process_terrain_worker_results(&mut self, player_chunk: (i32, i32)) {
         let integrate_started = Instant::now();
         let mut lighting_elapsed = Duration::ZERO;
@@ -11495,6 +3160,8 @@ impl State {
 
         let mut integrated_meshes = 0;
         let mut integrated_bytes = 0u64;
+        let mut integrated_loads = 0;
+        let mut integrated_load_bytes = 0u64;
 
         loop {
             let result = if let Some(res) = self.pending_worker_results.pop_front() {
@@ -11520,10 +3187,13 @@ impl State {
             match result {
                 TerrainWorkerResult::Loaded(result) => {
                     let expected = self.chunk_load_in_flight.get(&result.coord).copied();
-                    if expected == Some(result.lifetime) {
-                        self.chunk_load_in_flight.remove(&result.coord);
+                    if result.restore_failed {
+                        if expected == Some(result.lifetime) {
+                            self.chunk_load_in_flight.remove(&result.coord);
+                        }
+                        continue;
                     }
-                    let r = self.chunk_manager.render_distance;
+                    let r = self.chunk_manager.view_distance;
                     if !chunk_load_result_is_current(
                         expected,
                         result.lifetime,
@@ -11535,49 +3205,35 @@ impl State {
                         || (result.coord.1 - player_chunk.1).abs() > r
                         || self.chunk_manager.chunks.contains_key(&result.coord)
                     {
+                        if expected == Some(result.lifetime) {
+                            self.chunk_load_in_flight.remove(&result.coord);
+                        }
                         self.perf_counters.stale_results =
                             self.perf_counters.stale_results.saturating_add(1);
                         continue;
                     }
+                    let elapsed = integrate_started.elapsed();
+                    if integrated_loads >= crate::chunk_schedule::MAX_INTEGRATE_LOADS
+                        || integrated_load_bytes >= crate::chunk_schedule::MAX_INTEGRATE_LOAD_BYTES
+                        || elapsed
+                            >= Duration::from_millis(crate::chunk_schedule::MAX_INTEGRATE_TIME_MS)
+                    {
+                        self.pending_worker_results
+                            .push_front(TerrainWorkerResult::Loaded(result));
+                        break;
+                    }
+                    if expected == Some(result.lifetime) {
+                        self.chunk_load_in_flight.remove(&result.coord);
+                    }
 
                     let (cx, cz) = result.coord;
-                    if result.mutated {
-                        match self.mutation_revisions.ensure_at_least(
-                            self.current_dimension,
-                            cx,
-                            cz,
-                            1,
-                        ) {
-                            Ok(true) => {
-                                self.mutation_revision_generation =
-                                    self.mutation_revision_generation.saturating_add(1);
-                                self.mutation_index_dirty = true;
-                            }
-                            Ok(false) => {}
-                            Err(error) => self.report_mutation_revision_error(
-                                error,
-                                "integrating a mutated streamed chunk",
-                            ),
-                        }
-                    }
+                    let load_bytes = result.chunk.memory_usage() as u64;
                     self.chunk_manager.chunks.insert(result.coord, result.chunk);
                     self.chunk_lifetimes.insert(result.coord, result.lifetime);
                     self.chunk_meshes.insert(result.coord, ChunkMesh::pending());
                     self.invalidate_chunk_mesh(result.coord, DependencyReason::ChunkLoad);
-
-                    // Restore persisted redstone component metadata before any
-                    // redstone tick runs, so freshly-rebuilt `ComponentState`
-                    // entries pick up the saved facing/delay/mode/note instead
-                    // of the runtime defaults. The next `RedstoneSystem::tick`
-                    // settles power against the restored facings.
-                    if !result.redstone_metadata.is_empty() {
-                        self.redstone.restore_chunk_metadata(
-                            &self.chunk_manager,
-                            cx,
-                            cz,
-                            &result.redstone_metadata,
-                        );
-                    }
+                    integrated_loads += 1;
+                    integrated_load_bytes = integrated_load_bytes.saturating_add(load_bytes);
 
                     let mut pending_base_revision = 0;
                     if let Some((revision, blocks, block_states, fluid_levels, block_entities)) =
@@ -11617,27 +3273,16 @@ impl State {
                     }
 
                     let mut dirty = std::collections::HashSet::new();
-                    self.check_and_break_unsupported_for_loaded_chunk(cx, cz, &mut dirty);
                     let lighting_started = Instant::now();
-                    for (lighting_cx, lighting_cz) in [
-                        (cx, cz),
-                        (cx - 1, cz),
-                        (cx + 1, cz),
-                        (cx, cz - 1),
-                        (cx, cz + 1),
-                    ] {
-                        if self
-                            .chunk_manager
-                            .chunks
-                            .contains_key(&(lighting_cx, lighting_cz))
-                        {
-                            crate::lighting::propagate_chunk_lighting(
-                                &mut self.chunk_manager,
-                                lighting_cx,
-                                lighting_cz,
-                                &mut dirty,
-                            );
-                        }
+                    // Single call seeds the new column plus shared faces of the
+                    // four cardinal neighbors (no per-neighbor volume scan).
+                    if self.chunk_manager.chunks.contains_key(&(cx, cz)) {
+                        crate::lighting::propagate_chunk_lighting(
+                            &mut self.chunk_manager,
+                            cx,
+                            cz,
+                            &mut dirty,
+                        );
                     }
                     let elapsed = lighting_started.elapsed();
                     lighting_elapsed += elapsed;
@@ -11684,8 +3329,8 @@ impl State {
                         continue;
                     };
                     let (levels, upload_metrics) = Self::upload_section_mesh_bundle(
-                        &self.device,
-                        &self.queue,
+                        self.device.as_ref().unwrap(),
+                        self.queue.as_ref().unwrap(),
                         &self.region_bind_group_layout,
                         &mut self.render_regions,
                         section,
@@ -11726,6 +3371,15 @@ impl State {
         {
             return;
         }
+        if crate::presentation_inventory_policy::schedule_presentation_chunk_load(
+            self.presentation_topology().chunk_load_policy(),
+            || (),
+        )
+        .is_none()
+        {
+            // Join client: only enqueue interest and wait for ChunkData.
+            return;
+        }
         let lifetime = self.next_chunk_lifetime();
         self.chunk_load_in_flight.insert(coord, lifetime);
         let sender = self.terrain_worker_tx.clone();
@@ -11734,10 +3388,8 @@ impl State {
         let world_seed = self.world_seed;
         let world_type = self.world_type;
         let generate_structures = self.generate_structures;
-        let authoritative = self.is_authoritative();
-        let save_manager = self.save_manager.clone();
         rayon::spawn(move || {
-            let mut chunk = crate::dimension::generate_chunk_with_options(
+            let chunk = crate::dimension::generate_chunk_with_options(
                 dimension,
                 coord.0,
                 coord.1,
@@ -11747,28 +3399,13 @@ impl State {
                     generate_structures,
                 },
             );
-            let mut mutated = false;
-            let mut redstone_metadata = Vec::new();
-            if authoritative {
-                if let Some(saved) = save_manager
-                    .lock()
-                    .unwrap()
-                    .load_chunk_in(dimension, coord.0, coord.1)
-                {
-                    let generated_blocks = crate::save::ChunkSaveData::from_chunk(&chunk).blocks;
-                    mutated = saved.blocks != generated_blocks;
-                    redstone_metadata = saved.redstone_metadata();
-                    saved.restore_to_chunk(&mut chunk);
-                }
-            }
             let _ = sender.send(TerrainWorkerResult::Loaded(ChunkLoadResult {
                 coord,
                 dimension,
                 generation,
                 lifetime,
                 chunk,
-                mutated,
-                redstone_metadata,
+                restore_failed: false,
             }));
         });
     }
@@ -11781,28 +3418,34 @@ impl State {
             return false;
         }
         if !self.chunk_manager.chunks.contains_key(&(key.cx, key.cz)) {
-            return false;
+            return true;
         }
         let Some(section) = self
             .chunk_meshes
             .get(&(key.cx, key.cz))
             .and_then(|mesh| mesh.section(key.section_y))
         else {
-            return false;
+            return true;
         };
-        if !section.needs_rebuild() || self.current_section_identity(key) != Some(work.identity) {
-            return false;
+        if self.current_section_identity(key) != Some(work.identity) {
+            return true;
         }
+        let selected = self.section_selected_lod(key);
+        if !section.needs_rebuild() && section.lod_is_built(selected) {
+            return true;
+        }
+        let lod_mask = selected.mask();
         let snapshot = self.chunk_manager.capture_section_halo(key);
         self.section_scheduler.mark_in_flight(work);
         let sender = self.terrain_worker_tx.clone();
         let generation = self.terrain_generation;
         let model_registry = Arc::clone(&self.model_registry);
         rayon::spawn(move || {
-            let bundle = Chunk::generate_section_mesh_bundle_from_halo_with_registry(
+            let bundle = Chunk::generate_section_mesh_bundle_from_halo_with_registry_for_lods(
                 work.identity,
                 &snapshot,
                 &model_registry,
+                lod_mask,
             );
             let _ = sender.send(TerrainWorkerResult::SectionMeshed(SectionMeshResult {
                 generation,
@@ -11810,6 +3453,26 @@ impl State {
             }));
         });
         true
+    }
+
+    fn section_selected_lod(&self, key: SectionKey) -> LodLevel {
+        let render_blocks = self.chunk_manager.view_distance as f32 * CHUNK_WIDTH as f32;
+        let thresholds = LodThresholds::new(render_blocks * 0.5, render_blocks * 0.75);
+        let min = Vec3::new(
+            (key.cx * CHUNK_WIDTH as i32) as f32,
+            key.min_world_y() as f32,
+            (key.cz * CHUNK_DEPTH as i32) as f32,
+        );
+        let max = Vec3::new(
+            (key.cx * CHUNK_WIDTH as i32 + CHUNK_WIDTH as i32) as f32,
+            key.max_world_y() as f32,
+            (key.cz * CHUNK_DEPTH as i32 + CHUNK_DEPTH as i32) as f32,
+        );
+        select_lod_for_bounds(
+            self.player_physics.position,
+            MeshBounds::new(min, max),
+            thresholds,
+        )
     }
 
     pub fn update_chunks(&mut self) {
@@ -11826,7 +3489,7 @@ impl State {
         let player_pos = self.player_physics.position;
         let px = (player_pos.x / 16.0).floor() as i32;
         let pz = (player_pos.z / 16.0).floor() as i32;
-        let r = self.chunk_manager.render_distance;
+        let r = self.chunk_manager.view_distance;
         self.process_terrain_worker_results((px, pz));
         self.process_terrain_compaction();
         // Only empty, previously-grown arenas are staged. Processing is
@@ -11843,43 +3506,17 @@ impl State {
                 self.scheduler.spiral_offsets = crate::chunk_schedule::precompute_spiral_offsets(r);
             }
 
-            let hysteresis_r = (r as i32) + crate::chunk_schedule::UNLOAD_HYSTERESIS;
             let mut to_unload = Vec::new();
-            for &(cx, cz) in self.chunk_manager.chunks.keys() {
-                if (cx - px).abs() > hysteresis_r || (cz - pz).abs() > hysteresis_r {
+            for (cx, cz) in self.chunk_manager.chunks.keys() {
+                if !crate::chunk_schedule::within_unload_hysteresis(cx, cz, px, pz, r) {
                     to_unload.push((cx, cz));
                 }
             }
             for &(cx, cz) in &to_unload {
-                let tracker = self.chunk_manager.dirty_chunks.clone();
-                let revision = tracker.dirty_revision(cx, cz);
-                let redstone_metadata = revision.map(|_| {
-                    self.redstone
-                        .collect_chunk_metadata(&self.chunk_manager, cx, cz)
-                });
-                if let Some(chunk) = self.chunk_manager.chunks.remove(&(cx, cz)) {
-                    if self.is_authoritative() && !self.has_in_process_runtime() {
-                        if let (Some(revision), Some(redstone_metadata)) =
-                            (revision, redstone_metadata)
-                        {
-                            let snapshot =
-                                crate::save::UncompressedChunkSnapshot::from_chunk_with_redstone(
-                                    self.current_dimension,
-                                    &chunk,
-                                    redstone_metadata,
-                                )
-                                .with_mutation_revision(
-                                    self.mutation_revisions
-                                        .latest(self.current_dimension, cx, cz),
-                                );
-                            if let Err(error) = self.enqueue_chunk_save(snapshot, tracker, revision)
-                            {
-                                eprintln!("[Save] Could not queue unloaded chunk: {error}");
-                            }
-                        }
-                    }
-                }
+                let _ = self.chunk_manager.chunks.remove(&(cx, cz));
             }
+            // Slide the dense window with the same center/hysteresis as unload.
+            self.chunk_manager.recenter(px, pz);
             for &(cx, cz) in &to_unload {
                 for neighbor in surrounding_chunk_coords(cx, cz) {
                     if self.chunk_manager.chunks.contains_key(&neighbor) {
@@ -11888,11 +3525,10 @@ impl State {
                 }
                 self.chunk_lifetimes.remove(&(cx, cz));
                 self.section_scheduler.remove_chunk(cx, cz);
-                self.scheduler.remove_dirty(&(cx, cz));
             }
             let mut removed_mesh_keys = Vec::new();
             for &(cx, cz) in self.chunk_meshes.keys() {
-                if (cx - px).abs() > hysteresis_r || (cz - pz).abs() > hysteresis_r {
+                if !crate::chunk_schedule::within_unload_hysteresis(cx, cz, px, pz, r) {
                     removed_mesh_keys.push((cx, cz));
                 }
             }
@@ -11902,7 +3538,7 @@ impl State {
                 }
             }
             self.chunk_load_in_flight.retain(|&(cx, cz), _| {
-                (cx - px).abs() <= hysteresis_r && (cz - pz).abs() <= hysteresis_r
+                crate::chunk_schedule::within_unload_hysteresis(cx, cz, px, pz, r)
             });
 
             // Rebuild pending_load_queue in spiral order
@@ -11920,7 +3556,6 @@ impl State {
             self.scheduler.last_player_chunk = Some((px, pz));
             self.scheduler.last_render_distance = r;
             self.scheduler.last_dimension = Some(self.current_dimension);
-            self.scheduler.reprioritize_dirty((px, pz));
             self.section_scheduler.reprioritize((px, pz));
         }
 
@@ -11953,24 +3588,15 @@ impl State {
                     break;
                 };
                 let key = work.identity.key;
-                let Some(section) = self
-                    .chunk_meshes
-                    .get(&(key.cx, key.cz))
-                    .and_then(|mesh| mesh.section(key.section_y))
-                else {
-                    continue;
-                };
-                if !section.needs_rebuild()
-                    || self.current_section_identity(key) != Some(work.identity)
-                {
-                    continue;
-                }
                 if self.section_scheduler.is_in_flight(key) {
                     deferred.push(work);
                     continue;
                 }
+                let in_flight_before = self.section_scheduler.in_flight.len();
                 if self.schedule_section_mesh(work) {
-                    dispatched += 1;
+                    if self.section_scheduler.in_flight.len() > in_flight_before {
+                        dispatched += 1;
+                    }
                 } else {
                     deferred.push(work);
                 }
@@ -11983,7 +3609,6 @@ impl State {
 
     pub fn set_paused(&mut self, paused: bool) {
         self.is_paused = paused;
-        println!("[Debug] set_paused called with: {}", paused);
         if paused {
             self.clear_movement_input();
         }
@@ -12023,13 +3648,14 @@ impl State {
                 self.camera_uniform.update_view_proj(
                     &self.camera,
                     self.config.width as f32 / self.config.height as f32,
-                    self.chunk_manager.render_distance as u32,
+                    self.chunk_manager.view_distance as u32,
+                    self.chunk_manager.dimension.height().height(),
                     &self.world_time,
                     self.total_time,
                     is_underwater,
                 );
                 let upload_started = Instant::now();
-                self.queue.write_buffer(
+                self.queue.as_ref().unwrap().write_buffer(
                     &self.camera_buffer,
                     0,
                     bytemuck::cast_slice(&[self.camera_uniform]),
@@ -12060,11 +3686,11 @@ impl State {
                 self.audio_manager
                     .play_sound(crate::audio::SoundId::UiClick);
                 if x < 0.0 {
-                    self.chunk_manager.render_distance =
-                        (self.chunk_manager.render_distance - 1).max(2);
+                    self.chunk_manager.view_distance =
+                        (self.chunk_manager.view_distance - 1).max(2);
                 } else {
-                    self.chunk_manager.render_distance =
-                        (self.chunk_manager.render_distance + 1).min(16);
+                    self.chunk_manager.view_distance =
+                        (self.chunk_manager.view_distance + 1).min(16);
                 }
                 self.save_settings();
             }
@@ -12110,13 +3736,11 @@ impl State {
         self.prev_player_position = self.player_physics.position;
         let world_tick_started = Instant::now();
         // Singleplayer and listen-host worlds advance exclusively in the
-        // headless AuthorityCore.  The renderer-side simulation remains only
-        // as a compatibility path for legacy worlds without a boundary.
+        // headless AuthorityCore.
         let has_in_process_runtime = self.has_in_process_runtime();
         if has_in_process_runtime {
             let _ = self.tick_authority_boundary();
         }
-        let authoritative = self.is_authoritative() && !has_in_process_runtime;
 
         // Tick attack cooldown & shield disable ticks
         if self.player_state.attack_cooldown_ticks < self.player_state.attack_cooldown_max_ticks {
@@ -12126,233 +3750,9 @@ impl State {
             self.player_state.shield_disable_ticks -= 1;
         }
 
-        // Tick item usage state machine
-        if has_in_process_runtime || !self.is_authoritative() {
-            self.player_state.using_item = None;
-        } else if self.inventory.is_open
-            || self.is_paused
-            || self.is_chat_open
-            || self.player_state.is_dead
-        {
-            self.player_state.using_item = None;
-        } else if let Some(ref mut using) = self.player_state.using_item {
-            using.ticks_held += 1;
-
-            if using.action == crate::player::ItemUseAction::Eat
-                || using.action == crate::player::ItemUseAction::Drink
-            {
-                if let Some(max_ticks) = using.max_ticks {
-                    if using.ticks_held >= max_ticks {
-                        let item = using.item;
-                        let slot = using.slot;
-                        if using.action == crate::player::ItemUseAction::Eat {
-                            if let Some(food_props) = item.food_properties() {
-                                self.player_state.hunger =
-                                    (self.player_state.hunger + food_props.hunger).min(20.0);
-                                self.player_state.saturation = (self.player_state.saturation
-                                    + food_props.saturation)
-                                    .min(self.player_state.hunger);
-                                self.trigger_advancement(
-                                    crate::advancements::AdvancementTrigger::EatFood(item),
-                                );
-                                if let Some(ret) = food_props.return_item {
-                                    let _ = self.inventory.add_stack(ItemStack::new(ret, 1));
-                                }
-                            }
-                        } else if using.action == crate::player::ItemUseAction::Drink {
-                            if item == Item::MilkBucket {
-                                self.potion_effects.active.clear();
-                                if self.game_mode_policy().hunger_enabled {
-                                    let _ =
-                                        self.inventory.add_stack(ItemStack::new(Item::Bucket, 1));
-                                }
-                            }
-                        }
-
-                        // Consume 1 item from designated slot
-                        match slot {
-                            crate::player::HandSlot::MainHand(_i) => {
-                                self.inventory
-                                    .use_selected_item(self.game_mode == GameMode::Creative);
-                            }
-                            crate::player::HandSlot::OffHand => {
-                                if self.game_mode_policy().hunger_enabled {
-                                    if let Some(ref mut offhand) = self.inventory.offhand {
-                                        if offhand.count > 1 {
-                                            offhand.count -= 1;
-                                        } else {
-                                            self.inventory.offhand = None;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        self.audio_manager
-                            .play_sound(crate::audio::SoundId::UiClick);
-                        self.player_state.using_item = None;
-                    }
-                }
-            }
-        }
-
-        self.autosave_timer += dt;
-        if authoritative && self.autosave_timer >= 300.0 {
-            self.autosave_timer = 0.0;
-            if let Err(error) = self.trigger_background_save() {
-                eprintln!("[Save] Could not enqueue autosave: {error}");
-            }
-        }
-
-        self.water_tick_timer += dt;
-        if authoritative && self.water_tick_timer >= 0.25 {
-            self.water_tick_timer = 0.0;
-            let lighting_started = Instant::now();
-            let (mut dirty, mutations) =
-                crate::fluid::tick_fluids(&mut self.chunk_manager, false, 2048);
-            for mutation in mutations {
-                let (x, y, z) = mutation.position;
-                self.broadcast_block_change_with_raw(x, y, z, mutation.block, mutation.raw_fluid);
-                self.check_and_break_unsupported_above(x, y, z, &mut dirty);
-            }
-            self.invalidate_chunk_meshes(dirty, DependencyReason::Fluid);
-            let lighting_elapsed = lighting_started.elapsed();
-            self.lighting_time_frame += lighting_elapsed;
-            self.lighting_scopes_frame.record(
-                crate::perf::LightingSource::Fluid as usize,
-                lighting_elapsed,
-            );
-        }
-
-        self.lava_tick_timer += dt;
-        if authoritative && self.lava_tick_timer >= 1.5 {
-            self.lava_tick_timer = 0.0;
-            let lighting_started = Instant::now();
-            let (mut dirty, mutations) =
-                crate::fluid::tick_fluids(&mut self.chunk_manager, true, 512);
-            for mutation in mutations {
-                let (x, y, z) = mutation.position;
-                self.broadcast_block_change_with_raw(x, y, z, mutation.block, mutation.raw_fluid);
-                self.check_and_break_unsupported_above(x, y, z, &mut dirty);
-            }
-            self.invalidate_chunk_meshes(dirty, DependencyReason::Fluid);
-            let lighting_elapsed = lighting_started.elapsed();
-            self.lighting_time_frame += lighting_elapsed;
-            self.lighting_scopes_frame.record(
-                crate::perf::LightingSource::Fluid as usize,
-                lighting_elapsed,
-            );
-        }
+        self.player_state.using_item = None;
 
         self.update_portal_travel(dt);
-
-        if authoritative {
-            self.redstone_tick_timer += dt;
-        }
-        let redstone_started = Instant::now();
-        let mut redstone_steps = 0;
-        while authoritative && self.redstone_tick_timer >= 0.05 && redstone_steps < 4 {
-            self.redstone_tick_timer -= 0.05;
-            redstone_steps += 1;
-            let mut occupants = Vec::with_capacity(self.entity_manager.entities.len() + 1);
-            occupants.push((
-                self.player_physics.position.x.floor() as i32,
-                self.player_physics.position.y.floor() as i32,
-                self.player_physics.position.z.floor() as i32,
-            ));
-            occupants.extend(self.entity_manager.entities.iter().map(|entity| {
-                (
-                    entity.position.x.floor() as i32,
-                    entity.position.y.floor() as i32,
-                    entity.position.z.floor() as i32,
-                )
-            }));
-            let update = self.redstone.tick(&mut self.chunk_manager, &occupants);
-            let observer_pulses = update.observer_pulses as u64;
-            self.apply_redstone_update(update);
-            self.perf_counters.observer_pulses = self
-                .perf_counters
-                .observer_pulses
-                .saturating_add(observer_pulses);
-            self.update_hopper_power_states();
-            let hopper_result = crate::world_tick::tick_hoppers_with_entities(
-                &mut self.chunk_manager,
-                Some(&mut self.entity_manager),
-                64,
-            );
-            self.perf_counters.hopper_transfers = self
-                .perf_counters
-                .hopper_transfers
-                .saturating_add(hopper_result.transfers as u64);
-            self.perf_counters.hopper_container_checks = self
-                .perf_counters
-                .hopper_container_checks
-                .saturating_add(hopper_result.container_checks as u64);
-            if hopper_result.budget_exhausted {
-                self.perf_counters.hopper_budget_exhausted =
-                    self.perf_counters.hopper_budget_exhausted.saturating_add(1);
-            }
-            for (x, y, z) in hopper_result.changed_positions {
-                self.redstone
-                    .mark_container_changed(&self.chunk_manager, (x, y, z));
-                let entity = self.chunk_manager.get_block_entity(x, y, z).cloned();
-                self.broadcast_block_entity_delta(x, y, z, entity);
-            }
-        }
-        self.perf_counters.redstone_scheduled_backlog = self.redstone.scheduled_len() as u64;
-        self.perf_counters.observer_pending_pulses = self
-            .chunk_manager
-            .chunks
-            .values()
-            .flat_map(|chunk| chunk.iter_block_entities())
-            .filter(|(_, entity)| {
-                matches!(
-                    entity,
-                    crate::block_entity::BlockEntity::Observer(observer)
-                        if observer.pending_pulse > 0
-                )
-            })
-            .count() as u64;
-        if redstone_steps == 4 {
-            self.redstone_tick_timer = self.redstone_tick_timer.min(0.05);
-        }
-        let redstone_elapsed = redstone_started.elapsed();
-        self.perf_recorder
-            .record(crate::perf::ScopeId::Redstone, redstone_elapsed);
-        self.lighting_time_frame += redstone_elapsed;
-        self.lighting_scopes_frame.record(
-            crate::perf::LightingSource::Redstone as usize,
-            redstone_elapsed,
-        );
-
-        if !has_in_process_runtime {
-            self.brewing.update(dt);
-        }
-        self.update_furnaces(dt);
-        let effect_health = if has_in_process_runtime {
-            0.0
-        } else {
-            self.potion_effects.update(dt)
-        };
-        if authoritative && effect_health > 0.0 {
-            self.player_state.health =
-                (self.player_state.health + effect_health).min(self.player_state.max_health);
-        } else if authoritative && effect_health < 0.0 && self.player_state.health > 1.0 {
-            self.take_damage(
-                (-effect_health).min(self.player_state.health - 1.0),
-                DamageSource::Mob,
-            );
-        }
-        if authoritative && self.wither_effect_timer > 0.0 {
-            self.wither_effect_timer = (self.wither_effect_timer - dt).max(0.0);
-            self.wither_damage_timer += dt;
-            if self.wither_damage_timer >= 1.0 {
-                self.wither_damage_timer -= 1.0;
-                self.take_damage(1.0, DamageSource::Mob);
-            }
-        } else {
-            self.wither_damage_timer = 0.0;
-        }
 
         let can_sprint = sprint_allowed(self.game_mode, self.player_state.hunger);
 
@@ -12413,42 +3813,10 @@ impl State {
             self.is_sprinting = false;
         }
 
-        // Consume more hunger when sprinting
-        let sprint_exhaustion = sprint_exhaustion_amount(
-            self.game_mode,
-            self.is_sprinting,
-            self.keys.w || self.keys.a || self.keys.s || self.keys.d,
-            dt,
-        );
-        if authoritative && sprint_exhaustion > 0.0 {
-            self.player_state.add_exhaustion(sprint_exhaustion);
-        }
-
-        // Update game time
-        let speed_multiplier = if self.keys.f { 60.0 } else { 1.0 };
-        let elapsed_world_ticks = if self.world_rules.do_daylight_cycle {
-            dt * 20.0 * speed_multiplier
-        } else {
-            0.0
-        };
-        if !has_in_process_runtime {
-            self.world_time.tick_accumulator += elapsed_world_ticks;
-            let new_ticks = self.world_time.tick_accumulator.floor() as u64;
-            self.world_time.ticks += new_ticks;
-            self.world_time.tick_accumulator -= new_ticks as f32;
-        }
+        // Weather phase is host TimeSync only — no GPU-thread climate/RNG cycle.
+        // `do_weather_cycle` remains a synced gamerule field for a future authority owner.
         if self.current_dimension == crate::dimension::Dimension::Overworld {
-            let weather_update = if !self.world_rules.do_weather_cycle {
-                crate::weather::WeatherUpdate::default()
-            } else if authoritative {
-                self.weather.update_authoritative(elapsed_world_ticks, dt)
-            } else {
-                self.weather.update_client(elapsed_world_ticks, dt);
-                crate::weather::WeatherUpdate::default()
-            };
-            if weather_update.changed {
-                self.broadcast_time_sync();
-            }
+            self.weather.tick_presentation(dt);
         } else {
             self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
         }
@@ -12485,9 +3853,6 @@ impl State {
 
         // Jump exhaustion check
         let jumped = !was_flying && self.keys.space && self.player_physics.on_ground;
-        if authoritative && jumped && self.game_mode_policy().hunger_enabled {
-            self.player_state.add_exhaustion(0.05);
-        }
         if jumped {
             self.audio_manager.play_sound(crate::audio::SoundId::Jump);
         }
@@ -12502,6 +3867,7 @@ impl State {
             sneak_input && !was_flying,
             self.is_sprinting,
         );
+        let _ = fall_damage; // Authority owns fall damage; local physics still computes it.
         self.perf_recorder.record(
             crate::perf::ScopeId::PlayerPhysics,
             physics_started.elapsed(),
@@ -12524,21 +3890,14 @@ impl State {
         let under_block = self.chunk_manager.get_block(px, py, pz);
 
         if self.player_physics.on_ground && !self.was_on_ground {
-            if under_block == BlockType::Farmland {
-                if self.is_sprinting || old_pos.y - self.player_physics.position.y > 0.5 {
-                    self.apply_block_changes(&[((px, py, pz), BlockType::Dirt)]);
-                }
-            }
             if let Some(mat) = under_block.sound_material() {
                 self.audio_manager
                     .play_sound(crate::audio::SoundId::Land(mat));
             }
         }
 
-        // Apply fall damage
-        if self.game_mode_policy().can_take_damage && fall_damage > 0.0 {
-            self.take_damage(fall_damage, DamageSource::Fall);
-        }
+        // Apply fall damage is authority-owned; presentation never submits
+        // self-damage Combat (rejected) or mutates health locally.
 
         // Movement exhaustion check
         let horizontal_dist = glam::Vec2::new(
@@ -12546,10 +3905,6 @@ impl State {
             self.player_physics.position.z - old_pos.z,
         )
         .length();
-        if authoritative && self.game_mode_policy().hunger_enabled {
-            self.player_state.add_exhaustion(0.02 * horizontal_dist);
-        }
-
         // Footstep sound update
         if self.player_physics.on_ground {
             if horizontal_dist > 0.0001 {
@@ -12590,476 +3945,15 @@ impl State {
             self.footstep_accumulator = 0.0;
         }
 
-        self.was_on_ground = self.player_physics.on_ground;
-
-        self.update_dropped_items_and_orbs(dt);
-
         if self.player_state.is_sleeping {
             self.player_state.sleep_timer += dt;
         }
 
-        if authoritative {
-            let mut total_overworld_players = 0;
-            let mut sleeping_overworld_players = 0;
-
-            if self.current_dimension == crate::dimension::Dimension::Overworld
-                && !self.player_state.is_dead
-            {
-                total_overworld_players += 1;
-                if self.player_state.is_sleeping {
-                    sleeping_overworld_players += 1;
-                }
-            }
-
-            for (_id, remote) in &self.remote_players {
-                if remote.dimension == crate::dimension::Dimension::Overworld && !remote.is_dead {
-                    total_overworld_players += 1;
-                    if remote.is_sleeping {
-                        sleeping_overworld_players += 1;
-                    }
-                }
-            }
-
-            let required_sleepers =
-                ((total_overworld_players * self.world_rules.sleeping_percentage as usize + 99)
-                    / 100)
-                    .max(1);
-            if self.world_rules.do_daylight_cycle
-                && total_overworld_players > 0
-                && sleeping_overworld_players >= required_sleepers
-            {
-                let ready_to_skip = if self.player_state.is_sleeping {
-                    self.player_state.sleep_timer >= 5.0
-                } else {
-                    true
-                };
-                if ready_to_skip {
-                    let current_day = self.world_time.ticks / 24000;
-                    self.world_time.ticks = (current_day + 1) * 24000 + 1000;
-                    self.weather.clear_weather();
-
-                    if self.player_state.is_sleeping {
-                        let bed_pos = self.player_state.bed_pos.unwrap_or([
-                            self.player_physics.position.x as i32,
-                            self.player_physics.position.y as i32,
-                            self.player_physics.position.z as i32,
-                        ]);
-                        let (safe_p, _) = crate::world::find_safe_spawn_position(
-                            &self.chunk_manager,
-                            (bed_pos[0], bed_pos[1], bed_pos[2]),
-                        );
-                        self.player_physics.position = safe_p;
-                        self.player_state.is_sleeping = false;
-                        self.player_state.sleep_timer = 0.0;
-                        self.player_state.bed_pos = None;
-                    }
-
-                    let remote_ids: Vec<u64> = self.remote_players.keys().copied().collect();
-                    for id in remote_ids {
-                        if let Some(remote) = self.remote_players.get_mut(&id) {
-                            if remote.is_sleeping {
-                                remote.is_sleeping = false;
-                                remote.bed_pos = None;
-                                self.network.broadcast_sleep_state_sync(id, false);
-                            }
-                        }
-                    }
-
-                    self.broadcast_time_sync();
-                    println!("[Game] Night skipped! Woke up. Good morning!");
-                }
-            }
-        }
-
-        // Dropped item & XP collection
-        if self.game_mode_policy().can_pickup {
-            let player_pos = self.player_physics.position;
-            let to_collect: Vec<u64> = self
-                .entity_manager
-                .query_radius_types(player_pos, 1.5, &[crate::entity::EntityType::DroppedItem])
-                .filter(|entity| {
-                    entity.pickup_cooldown <= 0.0
-                        && (entity.dropped_stack.is_some() || entity.dropped_item.is_some())
-                })
-                .map(|entity| entity.id)
-                .collect();
-            for id in to_collect {
-                let stack = self.entity_manager.get_by_id(id).and_then(|entity| {
-                    entity.dropped_stack.or_else(|| {
-                        entity
-                            .dropped_item
-                            .map(|item| ItemStack::new(item, entity.dropped_count.max(1)))
-                    })
-                });
-                if let Some(incoming) = stack {
-                    let remainder = self.inventory.add_stack(incoming);
-                    if let Some(rem) = remainder {
-                        if let Some(index) = self.entity_manager.id_to_index.get(&id).copied() {
-                            self.entity_manager.entities[index].dropped_item = Some(rem.item);
-                            self.entity_manager.entities[index].dropped_count = rem.count;
-                            self.entity_manager.entities[index].dropped_stack = Some(rem);
-                        }
-                    } else {
-                        self.entity_manager.remove_by_id(id);
-                    }
-                }
-            }
-
-            let xp_orbs: Vec<(u64, u32)> = self
-                .entity_manager
-                .query_radius_types(player_pos, 1.5, &[crate::entity::EntityType::ExperienceOrb])
-                .filter(|entity| entity.pickup_cooldown <= 0.0 && entity.xp_value > 0)
-                .map(|entity| (entity.id, entity.xp_value))
-                .collect();
-            for (id, xp_val) in xp_orbs {
-                self.player_state.add_experience(xp_val);
-                self.entity_manager.remove_by_id(id);
-            }
-        }
-
-        // Void damage check: player below dimension floor
-        let void_y = self.chunk_manager.dimension.height().min_y as f32;
-        if self.player_physics.position.y < void_y {
-            self.void_damage_timer += dt;
-            if self.void_damage_timer >= 0.5 {
-                self.void_damage_timer = 0.0;
-                self.take_damage(2.0, DamageSource::Void);
-            }
-        } else {
-            self.void_damage_timer = 0.0;
-        }
-
-        // Lava damage check
-        let px = self.player_physics.position.x.floor() as i32;
-        let py = self.player_physics.position.y.floor() as i32;
-        let pz = self.player_physics.position.z.floor() as i32;
-        let block_at_feet = self.chunk_manager.get_block(px, py, pz);
-        let block_at_eyes = self.chunk_manager.get_block(
-            px,
-            (self.player_physics.position.y + 1.62).floor() as i32,
-            pz,
-        );
-        let player_in_lava = block_at_feet == BlockType::Lava || block_at_eyes == BlockType::Lava;
-
-        if player_in_lava && !self.potion_effects.has_fire_resistance() {
-            self.lava_damage_timer += dt;
-            if self.lava_damage_timer >= 0.5 {
-                self.lava_damage_timer = 0.0;
-                self.take_damage(4.0, DamageSource::Mob);
-            }
-        } else {
-            self.lava_damage_timer = 0.0;
-        }
-
-        // Leaf Decay Random Ticks (30 random ticks per 20 Hz sim tick)
-        let chunk_keys: Vec<(i32, i32)> = self.chunk_manager.chunks.keys().cloned().collect();
-        if authoritative && !chunk_keys.is_empty() {
-            let mut rng_seed = (self.total_time * 1000.0) as u32;
-            let mut next_rand = |max: u32| -> u32 {
-                rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
-                ((rng_seed / 65536) % 32768) % max
-            };
-
-            for _ in 0..30 {
-                let chunk_idx = next_rand(chunk_keys.len() as u32) as usize;
-                let (cx, cz) = chunk_keys[chunk_idx];
-
-                let rx = next_rand(16) as i32;
-                let rz = next_rand(16) as i32;
-                let ry = next_rand(120) as i32 + 40;
-
-                let wx = cx * 16 + rx;
-                let wz = cz * 16 + rz;
-
-                let block = self.chunk_manager.get_block(wx, ry, wz);
-                if block == BlockType::OakLeaves
-                    || block == BlockType::BirchLeaves
-                    || block == BlockType::SpruceLeaves
-                {
-                    let mut queue = std::collections::VecDeque::new();
-                    let mut visited = std::collections::HashSet::new();
-                    queue.push_back((wx, ry, wz, 0));
-                    visited.insert((wx, ry, wz));
-
-                    let mut found_log = false;
-                    while let Some((bx, by, bz, dist)) = queue.pop_front() {
-                        let b = self.chunk_manager.get_block(bx, by, bz);
-                        if b == BlockType::OakLog
-                            || b == BlockType::BirchLog
-                            || b == BlockType::SpruceLog
-                        {
-                            found_log = true;
-                            break;
-                        }
-                        if dist < 4 {
-                            for (dx, dy, dz) in &[
-                                (1, 0, 0),
-                                (-1, 0, 0),
-                                (0, 1, 0),
-                                (0, -1, 0),
-                                (0, 0, 1),
-                                (0, 0, -1),
-                            ] {
-                                let nx = bx + dx;
-                                let ny = by + dy;
-                                let nz = bz + dz;
-                                let neighbor_b = self.chunk_manager.get_block(nx, ny, nz);
-                                let is_leaf = neighbor_b == BlockType::OakLeaves
-                                    || neighbor_b == BlockType::BirchLeaves
-                                    || neighbor_b == BlockType::SpruceLeaves;
-                                if (is_leaf
-                                    || neighbor_b == BlockType::OakLog
-                                    || neighbor_b == BlockType::BirchLog
-                                    || neighbor_b == BlockType::SpruceLog)
-                                    && visited.insert((nx, ny, nz))
-                                {
-                                    queue.push_back((nx, ny, nz, dist + 1));
-                                }
-                            }
-                        }
-                    }
-
-                    if !found_log {
-                        self.chunk_manager.set_block(wx, ry, wz, BlockType::Air);
-                        let mut dirty_chunks = std::collections::HashSet::new();
-                        crate::lighting::update_sky_light_after_removed(
-                            &mut self.chunk_manager,
-                            wx,
-                            ry,
-                            wz,
-                            &mut dirty_chunks,
-                        );
-                        mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
-                        self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Mob);
-                        self.broadcast_block_change(wx, ry, wz, BlockType::Air);
-                    }
-                }
-            }
-        }
-
-        // Cactus damage check
-        let player_aabb = self.player_physics.get_aabb();
-        let min_x = player_aabb.min.x.floor() as i32;
-        let max_x = player_aabb.max.x.floor() as i32;
-        let min_y =
-            (player_aabb.min.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
-        let max_y =
-            (player_aabb.max.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
-        let min_z = player_aabb.min.z.floor() as i32;
-        let max_z = player_aabb.max.z.floor() as i32;
-
-        let mut touching_cactus = false;
-        for x in min_x..=max_x {
-            for y in min_y..=max_y {
-                for z in min_z..=max_z {
-                    if self.chunk_manager.get_block(x, y, z) == BlockType::Cactus {
-                        let block_aabb = AABB::new(
-                            Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
-                            Vec3::ONE,
-                        );
-                        if player_aabb.intersects(&block_aabb) {
-                            touching_cactus = true;
-                        }
-                    }
-                }
-            }
-        }
-
-        if touching_cactus {
-            self.cactus_damage_timer += dt;
-            if self.cactus_damage_timer >= 0.5 {
-                self.cactus_damage_timer = 0.0;
-                self.take_damage(1.0, DamageSource::Mob);
-            }
-        } else {
-            self.cactus_damage_timer = 0.0;
-        }
-
-        // Update player state timers & starvation
-        let is_underwater = block_at_eyes == BlockType::Water;
-        let respiration_level: u8 = self
-            .inventory
-            .armor
-            .iter()
-            .flatten()
-            .map(|stack| {
-                stack
-                    .enchantments
-                    .level_of(crate::enchantment::Enchantment::Respiration(1))
-            })
-            .sum();
-        let water_breathing = self.potion_effects.has_water_breathing();
-        let oxygen_rate = 1.0 / (1.0 + respiration_level as f32);
-        if authoritative && self.game_mode_policy().can_take_damage {
-            if let Some((dmg, src)) = self.player_state.update_with_oxygen_rate(
-                dt,
-                is_underwater && !water_breathing,
-                oxygen_rate,
-            ) {
-                self.take_damage(dmg, src);
-            }
-        }
+        // Void / lava / cactus damage scans are authority-owned. Presentation
+        // health comes only from session projection (PlayerHealth / gameplay).
 
         self.total_time += dt;
         self.end_flash_time = (self.end_flash_time - dt.max(0.0)).max(0.0);
-
-        if authoritative {
-            let hostile_mobs_started = Instant::now();
-            if self.difficulty == Difficulty::Peaceful {
-                self.entity_manager
-                    .entities
-                    .retain(|entity| !entity.entity_type.is_hostile());
-            } else if self.world_rules.do_mob_spawning
-                && self.current_dimension == crate::dimension::Dimension::Overworld
-                // Phantom entities are not part of the current entity registry;
-                // until they are added, the insomnia rule gates the night-time
-                // ambient hostile spawn budget (daylight spawns remain intact).
-                && (self.world_rules.do_insomnia || self.world_time.sky_light_level() > 7)
-            {
-                crate::mob::spawn_mobs(
-                    &mut self.entity_manager,
-                    &self.chunk_manager,
-                    self.player_physics.position,
-                    self.world_time.sky_light_level(),
-                    self.total_time,
-                );
-            }
-
-            if self.difficulty != Difficulty::Peaceful
-                && self.world_rules.do_mob_spawning
-                && self.game_mode_policy().can_target_mobs
-            {
-                self.boss_maintenance_timer -= dt;
-                if self.boss_maintenance_timer <= 0.0 {
-                    crate::boss::ensure_dimension_entities(
-                        self.current_dimension,
-                        &mut self.entity_manager,
-                        &self.chunk_manager,
-                        self.player_physics.position,
-                        self.total_time,
-                    );
-                    self.boss_maintenance_timer = 1.0;
-                }
-                let boss_events = crate::boss::update_dimension_entities(
-                    self.current_dimension,
-                    &mut self.entity_manager,
-                    &self.chunk_manager,
-                    self.player_physics.position,
-                    Vec3::new(
-                        self.camera.yaw.cos() * self.camera.pitch.cos(),
-                        self.camera.pitch.sin(),
-                        self.camera.yaw.sin() * self.camera.pitch.cos(),
-                    ),
-                    dt,
-                    self.game_mode,
-                );
-                self.apply_boss_events(boss_events);
-            }
-
-            // Update mobs
-            self.update_player_projectiles(dt);
-            let is_raining = matches!(
-                self.weather.current,
-                crate::weather::Weather::Rain | crate::weather::Weather::Thunder
-            );
-            let mut mob_dirty_meshes = std::collections::HashSet::new();
-            let exploded_blocks = crate::mob::update_mobs(
-                &mut self.entity_manager,
-                &mut self.chunk_manager,
-                &mut mob_dirty_meshes,
-                &mut self.player_physics,
-                &mut self.player_state,
-                self.game_mode,
-                self.world_time.sky_light_level(),
-                is_raining,
-                dt,
-                &mut self.audio_manager,
-                right,
-                self.potion_effects.has_invisibility(),
-                crate::enchantment::protection_multiplier(&self.inventory.armor, false),
-                authoritative,
-                self.world_rules.mob_griefing,
-            );
-            self.invalidate_chunk_meshes(mob_dirty_meshes, DependencyReason::Mob);
-            for (x, y, z) in exploded_blocks {
-                self.broadcast_block_change(x, y, z, BlockType::Air);
-            }
-            self.perf_recorder.record(
-                crate::perf::ScopeId::HostileMobs,
-                hostile_mobs_started.elapsed(),
-            );
-
-            // Update passive mobs
-            let passive_mobs_started = Instant::now();
-            let mut passive_dirty_meshes = std::collections::HashSet::new();
-            let grazed_blocks = crate::passive_mob::update_passive_mobs(
-                &mut self.entity_manager,
-                &mut self.chunk_manager,
-                &mut passive_dirty_meshes,
-                &self.player_physics,
-                &mut self.inventory,
-                self.game_mode,
-                dt,
-                self.total_time,
-                authoritative,
-                self.world_rules.mob_griefing,
-            );
-            self.invalidate_chunk_meshes(passive_dirty_meshes, DependencyReason::Mob);
-            for (x, y, z) in grazed_blocks {
-                self.broadcast_block_change(x, y, z, BlockType::Dirt);
-            }
-
-            // Spawn passive mobs (daytime spawn)
-            if self.world_rules.do_mob_spawning
-                && self.current_dimension == crate::dimension::Dimension::Overworld
-            {
-                crate::passive_mob::spawn_passive_mobs(
-                    &mut self.entity_manager,
-                    &self.chunk_manager,
-                    self.player_physics.position,
-                    self.world_time.sky_light_level(),
-                    self.total_time,
-                );
-            }
-            self.perf_recorder.record(
-                crate::perf::ScopeId::PassiveMobs,
-                passive_mobs_started.elapsed(),
-            );
-            let (mut mutations, _stats) = crate::world_tick::sample_random_ticks(
-                &self.chunk_manager,
-                self.world_seed as u64,
-                self.world_time.ticks,
-                self.current_dimension as u8,
-                512,
-            );
-            if !self.world_rules.do_fire_tick {
-                mutations.retain(|mutation| {
-                    self.chunk_manager
-                        .get_block(mutation.pos.0, mutation.pos.1, mutation.pos.2)
-                        != BlockType::Fire
-                });
-            }
-            if !mutations.is_empty() {
-                if let Ok(outcome) =
-                    crate::world_mutation::apply_batch(&mut self.chunk_manager, mutations)
-                {
-                    for res in &outcome.mutations {
-                        self.broadcast_block_change(res.pos.0, res.pos.1, res.pos.2, res.new_block);
-                        self.chunk_manager.set_block_state(
-                            res.pos.0,
-                            res.pos.1,
-                            res.pos.2,
-                            res.new_state,
-                        );
-                    }
-                }
-            }
-        }
-
-        self.update_village_and_raid_systems(dt);
-        self.update_vehicles_and_fishing(dt);
-
-        self.broadcast_authoritative_replication(dt);
 
         self.perf_recorder.record(
             crate::perf::ScopeId::WorldTick,
@@ -13067,750 +3961,31 @@ impl State {
         );
     }
 
-    pub fn update_village_and_raid_systems(&mut self, dt: f32) {
-        if self.has_in_process_runtime() {
-            return;
-        }
-        if self.player_state.hero_of_the_village_timer > 0.0 {
-            self.player_state.hero_of_the_village_timer =
-                (self.player_state.hero_of_the_village_timer - dt).max(0.0);
-        }
-
-        if !self.is_authoritative() {
-            return;
-        }
-
-        let dim = self.current_dimension;
-        self.poi_manager.update_village_clusters(dim);
-
-        let player_pos = (
-            self.player_physics.position.x.floor() as i32,
-            self.player_physics.position.y.floor() as i32,
-            self.player_physics.position.z.floor() as i32,
-        );
-
-        // Check Bad Omen raid trigger
-        let triggered_village_data = if self.player_state.bad_omen_level > 0 {
-            self.poi_manager
-                .villages
-                .iter()
-                .find(|v| {
-                    v.dimension == dim
-                        && (v.center.0 - player_pos.0).abs() <= 48
-                        && (v.center.2 - player_pos.2).abs() <= 48
-                })
-                .map(|v| (v.id, v.center))
-        } else {
-            None
-        };
-
-        if let Some((v_id, v_center)) = triggered_village_data {
-            let omen_level = self.player_state.bad_omen_level;
-            self.player_state.bad_omen_level = 0;
-            let raid_id = self
-                .raid_manager
-                .trigger_raid(v_id, v_center, dim, omen_level);
-            self.trigger_advancement(crate::advancements::AdvancementTrigger::VoluntaryExile);
-
-            let wave_info = crate::village::raid::RaidWave::for_wave(1);
-            let mut spawned_ids = Vec::new();
-
-            for i in 0..wave_info.pillager_count {
-                let offset_x = i as i32 * 3 - 5;
-                let offset_z = 24;
-                let spawn_pos = Vec3::new(
-                    (v_center.0 + offset_x) as f32,
-                    (v_center.1 + 1) as f32,
-                    (v_center.2 + offset_z) as f32,
-                );
-                let id = self
-                    .entity_manager
-                    .spawn(crate::entity::EntityType::Pillager, spawn_pos);
-                if i == 0 {
-                    if let Some(idx) = self.entity_manager.id_to_index.get(&id).copied() {
-                        self.entity_manager.entities[idx].is_raid_captain = true;
-                    }
-                }
-                spawned_ids.push(id);
-            }
-
-            if let Some(raid) = self.raid_manager.get_raid_mut(raid_id) {
-                raid.spawned_mob_ids = spawned_ids;
-            }
-        }
-
-        // Tick active raids
-        let mut raid_victories = Vec::new();
-        let raid_ids: Vec<u64> = self.raid_manager.active_raids.keys().copied().collect();
-
-        for raid_id in raid_ids {
-            let mut spawn_next_wave = false;
-            let mut wave_to_spawn = 1;
-            let mut raid_center = (0, 0, 0);
-
-            if let Some(raid) = self.raid_manager.get_raid_mut(raid_id) {
-                if raid.is_active() {
-                    raid.spawned_mob_ids.retain(|id| {
-                        self.entity_manager
-                            .id_to_index
-                            .get(id)
-                            .map(|&idx| self.entity_manager.entities[idx].health > 0.0)
-                            .unwrap_or(false)
-                    });
-
-                    if raid.spawned_mob_ids.is_empty() {
-                        if raid.wave_timer > 0.0 {
-                            raid.wave_timer -= dt;
-                        } else if raid.current_wave >= raid.max_waves {
-                            raid.status = crate::village::raid::RaidStatus::Victory;
-                            raid_victories.push(raid.id);
-                        } else {
-                            raid.current_wave += 1;
-                            raid.wave_timer = 5.0;
-                            spawn_next_wave = true;
-                            wave_to_spawn = raid.current_wave;
-                            raid_center = raid.center;
-                        }
-                    }
-                }
-            }
-
-            if spawn_next_wave {
-                let wave_info = crate::village::raid::RaidWave::for_wave(wave_to_spawn);
-                let mut new_mob_ids = Vec::new();
-
-                for i in 0..wave_info.pillager_count {
-                    let offset_x = i as i32 * 3 - 5;
-                    let offset_z = 20 + wave_to_spawn as i32 * 4;
-                    let spawn_pos = Vec3::new(
-                        (raid_center.0 + offset_x) as f32,
-                        (raid_center.1 + 1) as f32,
-                        (raid_center.2 + offset_z) as f32,
-                    );
-                    let id = self
-                        .entity_manager
-                        .spawn(crate::entity::EntityType::Pillager, spawn_pos);
-                    if i == 0 {
-                        if let Some(idx) = self.entity_manager.id_to_index.get(&id).copied() {
-                            self.entity_manager.entities[idx].is_raid_captain = true;
-                        }
-                    }
-                    new_mob_ids.push(id);
-                }
-
-                for i in 0..wave_info.ravager_count {
-                    let spawn_pos = Vec3::new(
-                        (raid_center.0 + i as i32 * 4) as f32,
-                        (raid_center.1 + 1) as f32,
-                        (raid_center.2 + 25) as f32,
-                    );
-                    let id = self
-                        .entity_manager
-                        .spawn(crate::entity::EntityType::Ravager, spawn_pos);
-                    new_mob_ids.push(id);
-                }
-
-                if let Some(raid) = self.raid_manager.get_raid_mut(raid_id) {
-                    raid.spawned_mob_ids = new_mob_ids;
-                }
-            }
-        }
-
-        for _ in raid_victories {
-            self.player_state.hero_of_the_village_timer = 2400.0;
-            self.trigger_advancement(crate::advancements::AdvancementTrigger::HeroOfTheVillage);
-        }
-
-        // Tick Villagers, Iron Golems, Pillagers
-        let mut new_baby_spawns = Vec::new();
-        let mut pillager_attack_positions = Vec::new();
-        let mut golem_attack_positions = Vec::new();
-
-        for entity in self.entity_manager.entities.iter_mut() {
-            if entity.health <= 0.0 {
-                continue;
-            }
-
-            match entity.entity_type {
-                crate::entity::EntityType::Villager => {
-                    if entity.age < 0.0 {
-                        entity.age += dt;
-                    }
-                    if entity.breed_cooldown > 0.0 {
-                        entity.breed_cooldown = (entity.breed_cooldown - dt).max(0.0);
-                    }
-
-                    let vpos = (
-                        entity.position.x.floor() as i32,
-                        entity.position.y.floor() as i32,
-                        entity.position.z.floor() as i32,
-                    );
-
-                    if entity.profession == crate::village::poi::VillagerProfession::Unemployed {
-                        for prof in [
-                            crate::village::poi::VillagerProfession::Farmer,
-                            crate::village::poi::VillagerProfession::Librarian,
-                            crate::village::poi::VillagerProfession::Armorer,
-                            crate::village::poi::VillagerProfession::Cleric,
-                        ] {
-                            if let Some(job_pos) = self.poi_manager.claim_poi(
-                                dim,
-                                crate::village::poi::PoiType::JobSite(prof),
-                                entity.id,
-                                vpos,
-                                32.0,
-                            ) {
-                                entity.profession = prof;
-                                entity.job_poi = Some(job_pos);
-                                entity.offers = crate::village::trade::generate_offers_for_level(
-                                    prof,
-                                    crate::village::trade::VillagerLevel::Novice,
-                                );
-                                break;
-                            }
-                        }
-                    } else if entity.job_poi.is_none() && entity.villager_xp == 0 {
-                        entity.profession = crate::village::poi::VillagerProfession::Unemployed;
-                        entity.offers.clear();
-                    }
-
-                    if let Some(job_pos) = entity.job_poi {
-                        let dist_sq = (vpos.0 - job_pos.0).pow(2)
-                            + (vpos.1 - job_pos.1).pow(2)
-                            + (vpos.2 - job_pos.2).pow(2);
-                        if dist_sq <= 9 && entity.restock_count_today < 2 {
-                            entity.restock_count_today += 1;
-                            for offer in &mut entity.offers {
-                                offer.uses = 0;
-                            }
-                        }
-                    }
-
-                    if entity.home_poi.is_none() {
-                        if let Some(bed_pos) = self.poi_manager.claim_poi(
-                            dim,
-                            crate::village::poi::PoiType::Bed,
-                            entity.id,
-                            vpos,
-                            32.0,
-                        ) {
-                            entity.home_poi = Some(bed_pos);
-                        }
-                    }
-
-                    if entity.age >= 0.0 && entity.food_count >= 3 && entity.breed_cooldown <= 0.0 {
-                        let unclaimed_beds = self
-                            .poi_manager
-                            .get_unclaimed_beds_in_radius(dim, vpos, 32.0);
-                        if unclaimed_beds > 0 {
-                            entity.food_count -= 3;
-                            entity.breed_cooldown = 300.0;
-                            new_baby_spawns.push(entity.position);
-                        }
-                    }
-                }
-                crate::entity::EntityType::Pillager => {
-                    entity.action_cooldown -= dt;
-                    if entity.action_cooldown <= 0.0 {
-                        pillager_attack_positions.push(entity.position);
-                        entity.action_cooldown = 1.5;
-                    }
-                }
-                crate::entity::EntityType::IronGolem => {
-                    entity.action_cooldown -= dt;
-                    if entity.action_cooldown <= 0.0 {
-                        golem_attack_positions.push(entity.position);
-                        entity.action_cooldown = 1.0;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        for pos in pillager_attack_positions {
-            let target_id = self
-                .entity_manager
-                .query_radius_types(pos, 16.0, &[crate::entity::EntityType::Villager])
-                .find(|v| v.health > 0.0)
-                .map(|v| v.id);
-            if let Some(vid) = target_id {
-                if let Some(idx) = self.entity_manager.id_to_index.get(&vid).copied() {
-                    self.entity_manager.entities[idx].health =
-                        (self.entity_manager.entities[idx].health - 4.0).max(0.0);
-                }
-            }
-        }
-
-        for pos in golem_attack_positions {
-            let target_id = self
-                .entity_manager
-                .query_radius_types(
-                    pos,
-                    16.0,
-                    &[
-                        crate::entity::EntityType::Pillager,
-                        crate::entity::EntityType::Zombie,
-                        crate::entity::EntityType::Ravager,
-                    ],
-                )
-                .find(|h| h.health > 0.0)
-                .map(|h| h.id);
-            if let Some(hid) = target_id {
-                if let Some(idx) = self.entity_manager.id_to_index.get(&hid).copied() {
-                    self.entity_manager.entities[idx].health =
-                        (self.entity_manager.entities[idx].health - 12.0).max(0.0);
-                }
-            }
-        }
-
-        for pos in new_baby_spawns {
-            let baby_id = self
-                .entity_manager
-                .spawn(crate::entity::EntityType::Villager, pos);
-            if let Some(idx) = self.entity_manager.id_to_index.get(&baby_id).copied() {
-                self.entity_manager.entities[idx].age = -1200.0;
-            }
-        }
-
-        for village in &self.poi_manager.villages {
-            if village.bed_count >= 3 {
-                let golem_count = self
-                    .entity_manager
-                    .query_radius_types(
-                        Vec3::new(
-                            village.center.0 as f32,
-                            village.center.1 as f32,
-                            village.center.2 as f32,
-                        ),
-                        48.0,
-                        &[crate::entity::EntityType::IronGolem],
-                    )
-                    .count();
-                if golem_count == 0 {
-                    let spawn_pos = Vec3::new(
-                        village.center.0 as f32 + 2.0,
-                        village.center.1 as f32 + 1.0,
-                        village.center.2 as f32 + 2.0,
-                    );
-                    self.entity_manager
-                        .spawn(crate::entity::EntityType::IronGolem, spawn_pos);
-                }
-            }
-        }
-    }
-
-    pub fn update_vehicles_and_fishing(&mut self, dt: f32) {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
-            return;
-        }
-        if self.is_authoritative() {
-            let entity_ids: Vec<(u64, crate::entity::EntityType)> = self
-                .entity_manager
-                .entities
-                .iter()
-                .map(|e| (e.id, e.entity_type))
-                .collect();
-
-            for (id, etype) in entity_ids {
-                match etype {
-                    crate::entity::EntityType::Boat => {
-                        if let Some(idx) = self.entity_manager.id_to_index.get(&id).copied() {
-                            let entity = &mut self.entity_manager.entities[idx];
-                            let mut boat =
-                                crate::vehicle::BoatState::new(entity.position, entity.yaw);
-                            let cm = &self.chunk_manager;
-                            boat.tick(
-                                dt,
-                                |x, y, z| cm.get_block(x, y, z) == BlockType::Water,
-                                |x, y, z| cm.get_block(x, y, z).properties().is_solid,
-                            );
-                            entity.position = boat.pos_vec3();
-                            entity.yaw = boat.yaw;
-                        }
-                    }
-                    crate::entity::EntityType::Minecart => {
-                        if let Some(idx) = self.entity_manager.id_to_index.get(&id).copied() {
-                            let entity = &mut self.entity_manager.entities[idx];
-                            let mut cart = crate::rail::MinecartState::new(entity.position);
-                            cart.set_vel(entity.velocity);
-                            let cm = &self.chunk_manager;
-                            cart.tick(
-                                dt,
-                                |x, y, z| {
-                                    let b = cm.get_block(x, y, z);
-                                    let rtype = match b {
-                                        BlockType::Rail => Some(crate::rail::RailType::Normal),
-                                        BlockType::PoweredRail => {
-                                            Some(crate::rail::RailType::Powered)
-                                        }
-                                        BlockType::DetectorRail => {
-                                            Some(crate::rail::RailType::Detector)
-                                        }
-                                        BlockType::ActivatorRail => {
-                                            Some(crate::rail::RailType::Activator)
-                                        }
-                                        _ => None,
-                                    }?;
-                                    Some((rtype, crate::rail::RailShape::NorthSouth, false))
-                                },
-                                |_x, _y, _z, _p| {},
-                            );
-                            entity.position = cart.pos_vec3();
-                            entity.velocity = cart.vel_vec3();
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            // Synchronize mounted passenger positions
-            let local_player_id = 0u64;
-            if let Some(vehicle_id) = self.mount_manager.get_vehicle(local_player_id) {
-                if let Some(idx) = self.entity_manager.id_to_index.get(&vehicle_id).copied() {
-                    let vehicle = &self.entity_manager.entities[idx];
-                    let passengers = self.mount_manager.get_passengers(vehicle_id);
-                    if let Some(seat_idx) = passengers.iter().position(|&id| id == local_player_id)
-                    {
-                        let offset = match vehicle.entity_type {
-                            crate::entity::EntityType::Boat => {
-                                crate::vehicle::BoatState::seat_offset(seat_idx)
-                            }
-                            _ => crate::vehicle::SeatOffset::new(0.0, 0.75, 0.0),
-                        };
-                        let seat_pos = offset.world_position(vehicle.position, vehicle.yaw);
-                        self.player_physics.position = seat_pos;
-                        self.player_physics.velocity = glam::Vec3::ZERO;
-                    }
-                }
-            }
-        }
-
-        // Fishing manager tick
-        let mut player_positions = std::collections::HashMap::new();
-        player_positions.insert(0u64, self.player_physics.position);
-        for (&id, remote) in &self.remote_players {
-            player_positions.insert(
-                id,
-                remote
-                    .snapshots
-                    .back()
-                    .map(|s| s.position)
-                    .unwrap_or(glam::Vec3::ZERO),
-            );
-        }
-
-        let cm = &self.chunk_manager;
-        self.fishing_manager.tick(
-            dt,
-            &player_positions,
-            |x, y, z| cm.get_block(x, y, z) == BlockType::Water,
-            |_pos| {},
-        );
-    }
-
-    pub fn mount_vehicle_request(&mut self, passenger_id: u64, vehicle_id: u64) -> bool {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
-            let response = self.submit_local_authority_operation(
-                crate::network::protocol::GameplayOperation::Mount {
-                    entity_id: vehicle_id,
-                },
-            );
-            return matches!(
-                response.map(|response| response.outcome),
-                Some(crate::network::protocol::GameplayOutcome::Accepted { .. })
-            );
-        }
-        let capacity = if let Some(idx) = self.entity_manager.id_to_index.get(&vehicle_id).copied()
-        {
-            match self.entity_manager.entities[idx].entity_type {
-                crate::entity::EntityType::Boat => 2,
-                _ => 1,
-            }
-        } else {
-            1
-        };
-        self.mount_manager
-            .mount(vehicle_id, passenger_id, capacity)
-            .is_ok()
-    }
-
-    pub fn dismount_vehicle_request(&mut self, passenger_id: u64) {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
-            let _ = self.submit_local_authority_operation(
-                crate::network::protocol::GameplayOperation::Mount { entity_id: 0 },
-            );
-            return;
-        }
-        let vehicle_pos = if let Some(vid) = self.mount_manager.get_vehicle(passenger_id) {
-            self.entity_manager.get_by_id(vid).map(|e| e.position)
-        } else {
-            None
-        };
-        self.mount_manager.dismount(passenger_id);
-        if let Some(v_pos) = vehicle_pos {
-            let cm = &self.chunk_manager;
-            let safe_pos =
-                crate::vehicle::MountManager::find_dismount_position(v_pos, |x, y, z| {
-                    cm.get_block(x, y, z).properties().is_solid
-                });
-            if passenger_id == 0 {
-                self.player_physics.position = safe_pos;
-            }
-        }
-    }
-
     pub fn use_fishing_rod(&mut self) {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
-            let action = if self.fishing_manager.get_hook(0).is_some() {
-                1
-            } else {
-                0
-            };
-            let look = self.camera.forward();
-            let look_milli = [
-                (look.x * 1000.0)
-                    .round()
-                    .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
-                (look.y * 1000.0)
-                    .round()
-                    .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
-                (look.z * 1000.0)
-                    .round()
-                    .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
-            ];
-            let _ = self.submit_local_authority_operation(
-                crate::network::protocol::GameplayOperation::Fishing {
-                    action,
-                    hand: 0,
-                    look_milli,
-                },
-            );
-            return;
-        }
-        let p_id = 0u64; // local player
-        if self.fishing_manager.get_hook(p_id).is_some() {
-            let mut rng_val = (self.total_time * 1000.0) as u32;
-            let result = self.fishing_manager.reel_in(p_id, || {
-                rng_val = rng_val.wrapping_mul(1103515245).wrapping_add(12345);
-                rng_val
-            });
-            if let Some(crate::fishing::FishingResult::Caught(stack)) = result {
-                self.inventory.add_stack(stack);
-                self.trigger_advancement(crate::advancements::AdvancementTrigger::FishCaught);
-            }
+        let action = if self.presented_fishing_hook_entity.is_some() {
+            1
         } else {
-            let look_dir = self.camera.forward();
-            self.fishing_manager
-                .cast_hook(p_id, self.player_physics.position, look_dir);
-        }
-    }
-
-    pub fn check_claim_furnace_xp(&mut self, slot: SlotType) {
-        if matches!(slot, SlotType::ContainerSlot(2))
-            && (self.has_in_process_runtime() || !self.is_authoritative())
-        {
-            if let Some(pos) = self.container_target {
-                let count = self
-                    .chunk_manager
-                    .chunks
-                    .get(&(pos.0.div_euclid(16), pos.2.div_euclid(16)))
-                    .and_then(|chunk| {
-                        chunk.get_block_entity(
-                            pos.0.rem_euclid(16) as u8,
-                            pos.1 as i16,
-                            pos.2.rem_euclid(16) as u8,
-                        )
-                    })
-                    .and_then(|entity| match entity {
-                        crate::block_entity::BlockEntity::Furnace(furnace) => furnace
-                            .slots
-                            .get(2)
-                            .and_then(|stack| stack.as_ref())
-                            .map(|stack| stack.count as u16),
-                        _ => None,
-                    })
-                    .unwrap_or(1)
-                    .clamp(1, 64);
-                let _ = self.submit_local_authority_operation(
-                    crate::network::protocol::GameplayOperation::FurnaceTakeOutput {
-                        x: pos.0,
-                        y: pos.1,
-                        z: pos.2,
-                        count,
-                    },
-                );
-            }
-            return;
-        }
-        if let SlotType::ContainerSlot(2) = slot {
-            if let Some(pos) = self.container_target {
-                let block = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
-                if matches!(block, BlockType::Furnace | BlockType::FurnaceLit) {
-                    let (cx, cz) = (pos.0.div_euclid(16), pos.2.div_euclid(16));
-                    let (bx, by, bz) = (
-                        pos.0.rem_euclid(16) as u8,
-                        pos.1 as i16,
-                        pos.2.rem_euclid(16) as u8,
-                    );
-                    if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
-                        if let Some(crate::block_entity::BlockEntity::Furnace(ref mut furnace)) =
-                            chunk.get_block_entity_mut(bx, by, bz)
-                        {
-                            let xp = furnace.claim_xp();
-                            if xp > 0.0 {
-                                self.player_state.experience += xp as u32;
-                                self.audio_manager
-                                    .play_sound(crate::audio::SoundId::FurnaceSmelt);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn update_hopper_power_states(&mut self) {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
-            return;
-        }
-        let mut positions = Vec::new();
-        for (&(cx, cz), chunk) in &self.chunk_manager.chunks {
-            for (local, entity) in chunk.iter_block_entities() {
-                if matches!(entity, crate::block_entity::BlockEntity::Hopper(_)) {
-                    positions.push((
-                        cx * CHUNK_WIDTH as i32 + local.0 as i32,
-                        local.1 as i32,
-                        cz * CHUNK_DEPTH as i32 + local.2 as i32,
-                    ));
-                }
-            }
-        }
-        positions.sort_unstable();
-        for (x, y, z) in positions {
-            let powered = self
-                .redstone
-                .block_state_at(&self.chunk_manager, (x, y, z))
-                .power
-                > 0;
-            if let Some(crate::block_entity::BlockEntity::Hopper(hopper)) =
-                self.chunk_manager.get_block_entity_mut(x, y, z)
-            {
-                if hopper.is_powered != powered {
-                    hopper.is_powered = powered;
-                    hopper.revision = hopper.revision.wrapping_add(1);
-                    self.chunk_manager.mark_block_entity_dirty(x, z);
-                    self.redstone
-                        .mark_container_changed(&self.chunk_manager, (x, y, z));
-                    let entity = self.chunk_manager.get_block_entity(x, y, z).cloned();
-                    self.broadcast_block_entity_delta(x, y, z, entity);
-                }
-            }
-        }
-    }
-
-    fn update_furnaces(&mut self, dt: f32) {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
-            return;
-        }
-        self.furnace_tick_timer += dt;
-        while self.furnace_tick_timer >= 0.05 {
-            self.furnace_tick_timer -= 0.05;
-
-            let mut block_changes = Vec::new();
-            let mut entity_changes = Vec::new();
-            for ((cx, cz), chunk) in self.chunk_manager.chunks.iter_mut() {
-                let chunk_x = *cx;
-                let chunk_z = *cz;
-                let local_entities: Vec<((u8, i16, u8), crate::block_entity::BlockEntity)> = chunk
-                    .iter_block_entities()
-                    .map(|(pos, e)| (pos, e.clone()))
-                    .collect();
-
-                for ((bx, by, bz), entity) in local_entities {
-                    if let crate::block_entity::BlockEntity::Furnace(mut furnace) = entity {
-                        let tick_res = furnace.tick(&self.recipe_manager);
-                        if tick_res.slot_changed || tick_res.lit_changed {
-                            furnace.revision = furnace.revision.wrapping_add(1);
-                            let is_lit = furnace.is_lit;
-                            let slots_wire: Vec<_> = furnace
-                                .slots
-                                .iter()
-                                .map(|s| {
-                                    s.as_ref()
-                                        .map(crate::network::protocol::ItemWire::from_stack)
-                                })
-                                .collect();
-
-                            let updated_entity =
-                                crate::block_entity::BlockEntity::Furnace(furnace.clone());
-                            let _ = chunk.insert_block_entity(bx, by, bz, updated_entity.clone());
-                            let world_x = chunk_x * 16 + bx as i32;
-                            let world_y = by as i32;
-                            let world_z = chunk_z * 16 + bz as i32;
-                            entity_changes.push(((world_x, world_y, world_z), updated_entity));
-
-                            if tick_res.lit_changed {
-                                let new_block = if is_lit {
-                                    BlockType::FurnaceLit
-                                } else {
-                                    BlockType::Furnace
-                                };
-                                block_changes.push(((world_x, world_y, world_z), new_block));
-                            }
-
-                            let has_session = self
-                                .container_sessions
-                                .sessions
-                                .iter()
-                                .filter(|session| {
-                                    session.dimension == self.current_dimension as u8
-                                        && session.x == world_x
-                                        && session.y == world_y
-                                        && session.z == world_z
-                                })
-                                .next()
-                                .is_some();
-                            for session in
-                                self.container_sessions
-                                    .sessions
-                                    .iter_mut()
-                                    .filter(|session| {
-                                        session.dimension == self.current_dimension as u8
-                                            && session.x == world_x
-                                            && session.y == world_y
-                                            && session.z == world_z
-                                    })
-                            {
-                                session.revision = furnace.revision;
-                            }
-                            if has_session {
-                                for slot_idx in 0..3 {
-                                    self.network.broadcast_container_slot_update(
-                                        self.current_dimension as u8,
-                                        furnace.revision,
-                                        world_x,
-                                        world_y,
-                                        world_z,
-                                        slot_idx as u16,
-                                        slots_wire.get(slot_idx).cloned().flatten(),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if !block_changes.is_empty() {
-                self.apply_block_changes(&block_changes);
-            }
-            for ((x, y, z), entity) in entity_changes {
-                self.chunk_manager.mark_block_entity_dirty(x, z);
-                self.redstone
-                    .mark_container_changed(&self.chunk_manager, (x, y, z));
-                self.broadcast_block_entity_delta(x, y, z, Some(entity));
-            }
-        }
+            0
+        };
+        let look = self.camera.forward();
+        let look_milli = [
+            (look.x * 1000.0)
+                .round()
+                .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
+            (look.y * 1000.0)
+                .round()
+                .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
+            (look.z * 1000.0)
+                .round()
+                .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
+        ];
+        let _ = self.submit_local_authority_operation(
+            crate::network::protocol::GameplayOperation::Fishing {
+                action,
+                hand: 0,
+                look_milli,
+            },
+        );
     }
 
     pub fn update_frame(&mut self, dt: f32) {
@@ -13819,22 +3994,21 @@ impl State {
             let Some(snap) = remote.sample(target) else {
                 continue;
             };
-            if let Some(entity) = self
-                .entity_manager
-                .entities
-                .iter_mut()
-                .find(|e| e.id == remote.entity_id)
-            {
-                entity.velocity = if dt > f32::EPSILON {
-                    (snap.position - entity.position) / dt
-                } else {
-                    Vec3::ZERO
-                };
-                entity.position = snap.position;
-                entity.yaw = snap.yaw;
-                entity.pitch = snap.pitch;
-                entity.action_cooldown = (entity.action_cooldown - dt).max(0.0);
-            }
+            let Some(&index) = self.entity_manager.id_to_index.get(&remote.entity_id) else {
+                continue;
+            };
+            let Some(entity) = self.entity_manager.entities.get_mut(index) else {
+                continue;
+            };
+            entity.velocity = if dt > f32::EPSILON {
+                (snap.position - entity.position) / dt
+            } else {
+                Vec3::ZERO
+            };
+            entity.position = snap.position;
+            entity.yaw = snap.yaw;
+            entity.pitch = snap.pitch;
+            entity.action_cooldown = (entity.action_cooldown - dt).max(0.0);
         }
         self.update_replicated_entity_interpolation();
         self.update_network_position(dt);
@@ -13853,6 +4027,7 @@ impl State {
             self.debug_frame_time_accumulator = 0.0;
             self.debug_frame_samples = 0;
             self.perf_summaries = self.perf_recorder.snapshot();
+            self.debug_memory_bytes = self.estimated_debug_memory_bytes();
         }
 
         self.advancement_manager.update_toasts(dt);
@@ -13884,25 +4059,37 @@ impl State {
         };
         self.camera.fov = self.camera.fov + (target_fov - self.camera.fov) * dt * 10.0;
 
-        self.update_network_time_sync(dt);
-
-        // Torch smoke presentation updates
+        // Torch smoke: only columns near the camera (not every loaded chunk).
         self.torch_smoke_timer += dt;
         if self.torch_smoke_timer >= 0.4 {
             self.torch_smoke_timer = 0.0;
             let mut rng = self.total_time.to_bits().wrapping_add(0x9E3779B9);
-            for chunk in self.chunk_manager.chunks.values() {
-                for &encoded in chunk.torch_positions() {
-                    let (bx, by, bz) = Chunk::decode_torch_position(encoded);
-                    if by % 2 != 0 {
+            let cam = self.camera.position;
+            let cam_cx = (cam.x / CHUNK_WIDTH as f32).floor() as i32;
+            let cam_cz = (cam.z / CHUNK_DEPTH as f32).floor() as i32;
+            const TORCH_SMOKE_CHUNK_RADIUS: i32 = 2;
+            for dz in -TORCH_SMOKE_CHUNK_RADIUS..=TORCH_SMOKE_CHUNK_RADIUS {
+                for dx in -TORCH_SMOKE_CHUNK_RADIUS..=TORCH_SMOKE_CHUNK_RADIUS {
+                    let Some(chunk) = self.chunk_manager.chunks.get(&(cam_cx + dx, cam_cz + dz))
+                    else {
                         continue;
+                    };
+                    for &encoded in chunk.torch_positions() {
+                        let (bx, by, bz) = Chunk::decode_torch_position(encoded);
+                        if by % 2 != 0 {
+                            continue;
+                        }
+                        let wx = chunk.chunk_x * CHUNK_WIDTH as i32 + bx as i32;
+                        let wz = chunk.chunk_z * CHUNK_DEPTH as i32 + bz as i32;
+                        let torch_pos =
+                            glam::Vec3::new(wx as f32 + 0.5, by as f32 + 0.6, wz as f32 + 0.5);
+                        crate::particles::spawn_torch_smoke(
+                            &mut self.particles,
+                            torch_pos,
+                            &mut rng,
+                        );
+                        rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
                     }
-                    let wx = chunk.chunk_x * CHUNK_WIDTH as i32 + bx as i32;
-                    let wz = chunk.chunk_z * CHUNK_DEPTH as i32 + bz as i32;
-                    let torch_pos =
-                        glam::Vec3::new(wx as f32 + 0.5, by as f32 + 0.6, wz as f32 + 0.5);
-                    crate::particles::spawn_torch_smoke(&mut self.particles, torch_pos, &mut rng);
-                    rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
                 }
             }
         }
@@ -13963,7 +4150,8 @@ impl State {
         self.camera_uniform.update_view_proj(
             &presentation_camera,
             self.config.width as f32 / self.config.height as f32,
-            self.chunk_manager.render_distance as u32,
+            self.chunk_manager.view_distance as u32,
+            self.chunk_manager.dimension.height().height(),
             &self.world_time,
             self.total_time,
             is_underwater,
@@ -13989,7 +4177,7 @@ impl State {
             self.camera_uniform.sun_dir[3] = 1.0;
         }
         let upload_started = Instant::now();
-        self.queue.write_buffer(
+        self.queue.as_ref().unwrap().write_buffer(
             &self.camera_buffer,
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
@@ -14009,7 +4197,6 @@ impl State {
             self.game_mode,
             self.camera_look_allowed(),
         ) {
-            let authority_mining = self.has_in_process_runtime() || !self.is_authoritative();
             let dir = Vec3::new(
                 self.camera.yaw.cos() * self.camera.pitch.cos(),
                 self.camera.pitch.sin(),
@@ -14034,101 +4221,27 @@ impl State {
                     let target_changed = self.mining_target != Some(target);
                     let held_changed = self.mining_held != held;
                     if target_changed || held_changed {
-                        if authority_mining {
-                            if let Some(previous) = self.mining_target {
-                                let _ = self.submit_local_authority_block_action(
-                                    crate::network::protocol::BlockActionKind::CancelBreak,
-                                    previous.x as i32,
-                                    previous.y as i32,
-                                    previous.z as i32,
-                                    [0, 0, 0],
-                                    BlockType::Air,
-                                );
-                            }
-                        }
+                        self.cancel_authority_break();
                         self.mining_target = Some(target);
                         self.mining_progress = 0.0;
                         self.mining_held = held;
-                        if authority_mining {
-                            let _ = self.submit_local_authority_block_action(
-                                crate::network::protocol::BlockActionKind::StartBreak,
-                                target.x as i32,
-                                target.y as i32,
-                                target.z as i32,
-                                [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
-                                BlockType::Air,
-                            );
-                        }
-                    }
-                    if !authority_mining {
-                        let mining_time = self.calculate_mining_time(block);
-                        if mining_time <= 0.0 {
-                            self.break_block(target);
-                            self.mining_target = None;
-                            self.mining_held = None;
-                            self.mining_progress = 0.0;
-                        } else {
-                            self.mining_progress += dt / mining_time;
-                            if self.mining_progress >= 1.0 {
-                                let pos = target;
-                                self.break_block(pos);
-                                self.mining_target = None;
-                                self.mining_held = None;
-                                self.mining_progress = 0.0;
-                            }
-                        }
-                    }
-                } else {
-                    if authority_mining {
-                        if let Some(previous) = self.mining_target {
-                            let _ = self.submit_local_authority_block_action(
-                                crate::network::protocol::BlockActionKind::CancelBreak,
-                                previous.x as i32,
-                                previous.y as i32,
-                                previous.z as i32,
-                                [0, 0, 0],
-                                BlockType::Air,
-                            );
-                        }
-                    }
-                    self.mining_target = None;
-                    self.mining_held = None;
-                    self.mining_progress = 0.0;
-                }
-            } else {
-                if authority_mining {
-                    if let Some(previous) = self.mining_target {
                         let _ = self.submit_local_authority_block_action(
-                            crate::network::protocol::BlockActionKind::CancelBreak,
-                            previous.x as i32,
-                            previous.y as i32,
-                            previous.z as i32,
-                            [0, 0, 0],
+                            crate::network::protocol::BlockActionKind::StartBreak,
+                            target.x as i32,
+                            target.y as i32,
+                            target.z as i32,
+                            [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
                             BlockType::Air,
                         );
                     }
+                } else {
+                    self.cancel_authority_break();
                 }
-                self.mining_target = None;
-                self.mining_held = None;
-                self.mining_progress = 0.0;
+            } else {
+                self.cancel_authority_break();
             }
         } else {
-            let authority_mining = self.has_in_process_runtime() || !self.is_authoritative();
-            if authority_mining {
-                if let Some(previous) = self.mining_target {
-                    let _ = self.submit_local_authority_block_action(
-                        crate::network::protocol::BlockActionKind::CancelBreak,
-                        previous.x as i32,
-                        previous.y as i32,
-                        previous.z as i32,
-                        [0, 0, 0],
-                        BlockType::Air,
-                    );
-                }
-            }
-            self.mining_target = None;
-            self.mining_held = None;
-            self.mining_progress = 0.0;
+            self.cancel_authority_break();
         }
 
         self.perf_recorder
@@ -14151,7 +4264,6 @@ impl State {
         self.network_time += f64::from(dt);
         let network_started = Instant::now();
         self.drain_network_events();
-        self.process_join_catchups();
         self.perf_recorder.record(
             crate::perf::ScopeId::NetworkDrain,
             network_started.elapsed(),
@@ -14183,9 +4295,10 @@ impl State {
         self.process_section_storage_compaction();
     }
 
-    fn update_weather_effects(&mut self, dt: f32, lightning_due: bool) {
+    fn update_weather_effects(&mut self, dt: f32, #[allow(unused_variables)] lightning_due: bool) {
         use crate::weather::Precipitation;
 
+        let world_max_y = self.chunk_manager.dimension.height().max_y_exclusive();
         let player_x = self.player_physics.position.x.floor() as i32;
         let player_z = self.player_physics.position.z.floor() as i32;
         if self.weather.precipitation_at(player_x, player_z) == Precipitation::Rain {
@@ -14211,7 +4324,7 @@ impl State {
             let Some(surface_y) = self.surface_height(wx, wz) else {
                 continue;
             };
-            if surface_y >= CHUNK_HEIGHT as i32 - 2 {
+            if surface_y >= world_max_y - 2 {
                 continue;
             }
 
@@ -14251,38 +4364,6 @@ impl State {
                 Precipitation::None => {}
             }
         }
-
-        let accumulation_steps = if self.is_authoritative() {
-            self.weather.take_snow_accumulation_steps(dt)
-        } else {
-            0
-        };
-        for _ in 0..accumulation_steps * 6 {
-            let wx = player_x + self.weather.authority_random_offset(24);
-            let wz = player_z + self.weather.authority_random_offset(24);
-            if self.weather.precipitation_at(wx, wz) != Precipitation::Snow {
-                continue;
-            }
-            let Some(surface_y) = self.surface_height(wx, wz) else {
-                continue;
-            };
-            let target_y = surface_y + 1;
-            if target_y >= CHUNK_HEIGHT as i32
-                || self.chunk_manager.get_block(wx, target_y, wz) != BlockType::Air
-            {
-                continue;
-            }
-            let support = self.chunk_manager.get_block(wx, surface_y, wz);
-            if support.properties().is_solid
-                && !matches!(support, BlockType::Water | BlockType::Lava | BlockType::Ice)
-            {
-                self.apply_weather_block_change(wx, target_y, wz, BlockType::SnowLayer);
-            }
-        }
-
-        if lightning_due && self.is_authoritative() {
-            self.strike_lightning();
-        }
     }
 
     fn surface_height(&self, wx: i32, wz: i32) -> Option<i32> {
@@ -14293,56 +4374,7 @@ impl State {
             .map(|chunk| chunk.heightmap[bx][bz] as i32)
     }
 
-    fn strike_lightning(&mut self) {
-        use crate::entity::EntityType;
-
-        if !self.is_authoritative() {
-            return;
-        }
-        let player_pos = self.player_physics.position;
-        let living_types = [
-            EntityType::Zombie,
-            EntityType::Skeleton,
-            EntityType::Creeper,
-            EntityType::Pig,
-            EntityType::Cow,
-            EntityType::Sheep,
-            EntityType::Chicken,
-        ];
-        let living_target = self
-            .entity_manager
-            .query_radius_types(player_pos, 32.0, &living_types)
-            .filter(|entity| entity.health > 0.0)
-            .min_by(|a, b| {
-                a.position
-                    .distance_squared(player_pos)
-                    .total_cmp(&b.position.distance_squared(player_pos))
-            })
-            .map(|entity| entity.position);
-
-        let (strike_x, strike_z) = if let Some(target) = living_target {
-            (target.x.floor() as i32, target.z.floor() as i32)
-        } else {
-            (
-                player_pos.x.floor() as i32 + self.weather.authority_random_offset(30),
-                player_pos.z.floor() as i32 + self.weather.authority_random_offset(30),
-            )
-        };
-        let Some(surface_y) = self.surface_height(strike_x, strike_z) else {
-            return;
-        };
-        let strike = crate::network::protocol::LightningStrike {
-            x: strike_x,
-            y: surface_y + 1,
-            z: strike_z,
-            visual_seed: self.weather.authority_random_seed(),
-        };
-        self.network.broadcast_lightning_strike(strike);
-        self.apply_lightning_strike(strike);
-    }
-
     fn apply_lightning_strike(&mut self, strike: crate::network::protocol::LightningStrike) {
-        let player_pos = self.player_physics.position;
         let strike_pos = Vec3::new(
             strike.x as f32 + 0.5,
             strike.y as f32,
@@ -14358,28 +4390,6 @@ impl State {
             self.camera.position,
             listener_right,
         );
-
-        if self.is_authoritative() && !self.has_in_process_runtime() {
-            for entity in &mut self.entity_manager.entities {
-                if entity.entity_type == crate::entity::EntityType::RemotePlayer {
-                    continue;
-                }
-                let horizontal = glam::Vec2::new(
-                    entity.position.x - strike_pos.x,
-                    entity.position.z - strike_pos.z,
-                )
-                .length();
-                if entity.health > 0.0 && horizontal <= 3.5 {
-                    entity.health -= 10.0;
-                    entity.fire_aspect_timer = entity.fire_aspect_timer.max(5.0);
-                }
-            }
-            let player_horizontal =
-                glam::Vec2::new(player_pos.x - strike_pos.x, player_pos.z - strike_pos.z).length();
-            if player_horizontal <= 3.5 {
-                self.take_damage(10.0, DamageSource::Lightning);
-            }
-        }
 
         // A short chain of bright, vertically stretched billboards forms the
         // visible bolt and persists just long enough to accompany the flash.
@@ -14398,86 +4408,6 @@ impl State {
                 12.0,
             );
         }
-
-        let fire_y = strike.y;
-        let support_y = fire_y - 1;
-        let support = self.chunk_manager.get_block(strike.x, support_y, strike.z);
-        if self.is_authoritative()
-            && !self.has_in_process_runtime()
-            && fire_y < CHUNK_HEIGHT as i32
-            && support.properties().is_solid
-            && !matches!(
-                support,
-                BlockType::Water | BlockType::Lava | BlockType::Ice | BlockType::Snow
-            )
-            && self.chunk_manager.get_block(strike.x, fire_y, strike.z) == BlockType::Air
-        {
-            self.apply_weather_block_change(strike.x, fire_y, strike.z, BlockType::Fire);
-        }
-    }
-
-    fn apply_weather_block_change(&mut self, wx: i32, wy: i32, wz: i32, block: BlockType) {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
-            return;
-        }
-        let old = self.chunk_manager.get_block(wx, wy, wz);
-        if old == block {
-            return;
-        }
-        self.chunk_manager.set_block(wx, wy, wz, block);
-        self.redstone.on_block_changed(
-            &self.chunk_manager,
-            (wx, wy, wz),
-            crate::redstone::Direction::North,
-        );
-
-        let old_properties = old.properties();
-        let new_properties = block.properties();
-        let mut dirty_chunks = std::collections::HashSet::new();
-        if old_properties.is_solid != new_properties.is_solid {
-            if new_properties.is_solid {
-                crate::lighting::update_sky_light_after_placed(
-                    &mut self.chunk_manager,
-                    wx,
-                    wy,
-                    wz,
-                    &mut dirty_chunks,
-                );
-            } else {
-                crate::lighting::update_sky_light_after_removed(
-                    &mut self.chunk_manager,
-                    wx,
-                    wy,
-                    wz,
-                    &mut dirty_chunks,
-                );
-            }
-        }
-        if old_properties.light_emission != new_properties.light_emission {
-            crate::lighting::update_block_light_after_removed(
-                &mut self.chunk_manager,
-                wx,
-                wy,
-                wz,
-                old_properties.light_emission,
-                &mut dirty_chunks,
-            );
-            if new_properties.light_emission > 0 {
-                crate::lighting::update_block_light_after_placed(
-                    &mut self.chunk_manager,
-                    wx,
-                    wy,
-                    wz,
-                    new_properties.light_emission,
-                    &mut dirty_chunks,
-                );
-            }
-        }
-        mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
-        self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Weather);
-        self.invalidate_block_mesh_dependencies(wx, wy, wz, DependencyReason::Weather);
-        // Fan weather-driven block placement out to connected clients.
-        self.broadcast_block_change(wx, wy, wz, block);
     }
 
     pub fn update_crack_buffers(
@@ -14599,12 +4529,12 @@ impl State {
         }
 
         let upload_started = Instant::now();
-        self.queue.write_buffer(
+        self.queue.as_ref().unwrap().write_buffer(
             &self.crack_vertex_buffer,
             0,
             bytemuck::cast_slice(&vertices),
         );
-        self.queue
+        self.queue.as_ref().unwrap()
             .write_buffer(&self.crack_index_buffer, 0, bytemuck::cast_slice(&indices));
 
         Some((
@@ -14614,41 +4544,6 @@ impl State {
             (vertices.len() * std::mem::size_of::<Vertex>()
                 + indices.len() * std::mem::size_of::<u32>()) as u64,
         ))
-    }
-
-    pub fn calculate_mining_time(&self, block: BlockType) -> f32 {
-        if self.game_mode == GameMode::Creative {
-            return 0.0;
-        }
-        let hardness = block.properties().hardness;
-        if hardness < 0.0 {
-            return f32::MAX; // Unbreakable (e.g. bedrock)
-        }
-
-        let held_stack = self.inventory.hotbar[self.inventory.selected];
-        let held_item = held_stack.map(|s| s.item).unwrap_or(Item::Air);
-        let preferred = block.preferred_tool();
-
-        let mut speed_multiplier = 1.0;
-        let mut matching_tool = false;
-
-        if let Some(tool_prop) = held_item.tool_properties() {
-            if tool_prop.tool_type == preferred && preferred != ToolType::None {
-                speed_multiplier = tool_prop.mining_speed;
-                matching_tool = true;
-            }
-        }
-
-        let base_time = if matching_tool || preferred == ToolType::None {
-            hardness * 1.5
-        } else {
-            hardness * 5.0
-        };
-
-        let enchantment_multiplier = held_stack
-            .map(|stack| crate::enchantment::mining_speed_multiplier(&stack.enchantments))
-            .unwrap_or(1.0);
-        base_time / (speed_multiplier * enchantment_multiplier)
     }
 
     fn damage_selected_tool(&mut self, salt: u32) {
@@ -14672,511 +4567,6 @@ impl State {
                 self.inventory.hotbar[selected] = None;
             }
         }
-    }
-
-    fn apply_redstone_update(&mut self, update: crate::redstone::RedstoneUpdate) {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
-            return;
-        }
-        let mut dirty_chunks = std::collections::HashSet::new();
-        let mut broadcast: Vec<((i32, i32, i32), BlockType)> = Vec::new();
-        for mutation in update.mutations {
-            let (wx, wy, wz) = mutation.pos;
-            let old_properties = mutation.old_block.properties();
-            let new_properties = mutation.new_block.properties();
-
-            if old_properties.is_solid != new_properties.is_solid {
-                if new_properties.is_solid {
-                    crate::lighting::update_sky_light_after_placed(
-                        &mut self.chunk_manager,
-                        wx,
-                        wy,
-                        wz,
-                        &mut dirty_chunks,
-                    );
-                } else {
-                    crate::lighting::update_sky_light_after_removed(
-                        &mut self.chunk_manager,
-                        wx,
-                        wy,
-                        wz,
-                        &mut dirty_chunks,
-                    );
-                }
-            }
-            if old_properties.light_emission != new_properties.light_emission {
-                crate::lighting::update_block_light_after_removed(
-                    &mut self.chunk_manager,
-                    wx,
-                    wy,
-                    wz,
-                    old_properties.light_emission,
-                    &mut dirty_chunks,
-                );
-                if new_properties.light_emission > 0 {
-                    crate::lighting::update_block_light_after_placed(
-                        &mut self.chunk_manager,
-                        wx,
-                        wy,
-                        wz,
-                        new_properties.light_emission,
-                        &mut dirty_chunks,
-                    );
-                }
-            }
-            mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
-            broadcast.push(((wx, wy, wz), mutation.new_block));
-        }
-
-        self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Redstone);
-
-        // Fan the redstone-driven block mutations out to connected clients.
-        for ((x, y, z), block) in broadcast {
-            self.broadcast_block_change(x, y, z, block);
-        }
-
-        // Observer baseline/pulse revisions are authoritative block-entity
-        // mutations even though the observer block id itself stays unchanged.
-        // Replicate them through the same chunk-revision path as container
-        // updates so reconnecting/joining clients cannot retain stale pulse
-        // state.
-        for ((x, y, z), entity) in update.block_entity_changes {
-            self.chunk_manager.mark_block_entity_dirty(x, z);
-            self.broadcast_block_entity_delta(x, y, z, Some(entity));
-        }
-
-        for action in update.actions {
-            match action {
-                crate::redstone::RedstoneAction::Explode { pos } => {
-                    let center =
-                        Vec3::new(pos.0 as f32 + 0.5, pos.1 as f32 + 0.5, pos.2 as f32 + 0.5);
-                    let mut dirty_meshes = std::collections::HashSet::new();
-                    let removed = crate::mob::explode(
-                        center,
-                        4.0,
-                        &mut self.chunk_manager,
-                        &mut dirty_meshes,
-                        &mut self.player_physics,
-                        &mut self.player_state,
-                        true,
-                        self.game_mode,
-                        1.0,
-                    );
-                    self.invalidate_chunk_meshes(dirty_meshes, DependencyReason::Redstone);
-                    for (x, y, z) in removed {
-                        self.broadcast_block_change(x, y, z, BlockType::Air);
-                    }
-                    self.audio_manager
-                        .play_sound(crate::audio::SoundId::Explosion);
-                }
-                crate::redstone::RedstoneAction::Dispense {
-                    pos,
-                    facing,
-                    dropper,
-                } => {
-                    self.execute_container_dispense_action(pos, facing, dropper);
-                }
-                crate::redstone::RedstoneAction::PlayNote { pos, note } => {
-                    let sound_pos =
-                        Vec3::new(pos.0 as f32 + 0.5, pos.1 as f32 + 0.5, pos.2 as f32 + 0.5);
-                    let listener_right =
-                        Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos())
-                            .normalize_or_zero();
-                    self.audio_manager.play_sound_3d(
-                        crate::audio::SoundId::Note(note),
-                        sound_pos,
-                        self.camera.position,
-                        listener_right,
-                    );
-                }
-            }
-        }
-
-        if update.propagation_overflowed {
-            eprintln!("[Redstone] propagation pass limit reached; continuing next tick");
-        }
-    }
-
-    fn consume_container_slot_one(&mut self, pos: (i32, i32, i32), slot: usize) -> bool {
-        let Some(entity) = self
-            .chunk_manager
-            .get_block_entity(pos.0, pos.1, pos.2)
-            .cloned()
-        else {
-            return false;
-        };
-        let Some(stack) = entity.get_stack(slot).copied() else {
-            return false;
-        };
-        let mut updated = entity;
-        updated.set_stack(
-            slot,
-            (stack.count > 1).then_some(crate::inventory::ItemStack {
-                count: stack.count - 1,
-                ..stack
-            }),
-        );
-        self.chunk_manager
-            .set_block_entity(pos.0, pos.1, pos.2, Some(updated));
-        self.chunk_manager.mark_block_entity_dirty(pos.0, pos.2);
-        true
-    }
-
-    fn replace_container_slot(
-        &mut self,
-        pos: (i32, i32, i32),
-        slot: usize,
-        stack: Option<crate::inventory::ItemStack>,
-    ) -> bool {
-        let Some(mut entity) = self
-            .chunk_manager
-            .get_block_entity(pos.0, pos.1, pos.2)
-            .cloned()
-        else {
-            return false;
-        };
-        entity.set_stack(slot, stack);
-        self.chunk_manager
-            .set_block_entity(pos.0, pos.1, pos.2, Some(entity));
-        self.chunk_manager.mark_block_entity_dirty(pos.0, pos.2);
-        true
-    }
-
-    fn apply_automation_block_change(&mut self, pos: (i32, i32, i32), block: BlockType) {
-        let old = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
-        if old == block {
-            return;
-        }
-        self.chunk_manager.set_block(pos.0, pos.1, pos.2, block);
-        let mut dirty_chunks = std::collections::HashSet::new();
-        if block.properties().is_solid {
-            crate::lighting::update_sky_light_after_placed(
-                &mut self.chunk_manager,
-                pos.0,
-                pos.1,
-                pos.2,
-                &mut dirty_chunks,
-            );
-        } else {
-            crate::lighting::update_sky_light_after_removed(
-                &mut self.chunk_manager,
-                pos.0,
-                pos.1,
-                pos.2,
-                &mut dirty_chunks,
-            );
-        }
-        if block.properties().light_emission > 0 {
-            crate::lighting::update_block_light_after_placed(
-                &mut self.chunk_manager,
-                pos.0,
-                pos.1,
-                pos.2,
-                block.properties().light_emission,
-                &mut dirty_chunks,
-            );
-        }
-        mark_block_mesh_dependencies(&mut dirty_chunks, pos.0, pos.2);
-        self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Redstone);
-        self.redstone
-            .on_block_changed(&self.chunk_manager, pos, crate::redstone::Direction::North);
-        self.broadcast_block_change(pos.0, pos.1, pos.2, block);
-    }
-
-    pub fn execute_container_dispense_action(
-        &mut self,
-        pos: (i32, i32, i32),
-        facing: crate::redstone::Direction,
-        is_dropper: bool,
-    ) {
-        use crate::inventory::{Item, ItemStack};
-
-        if self.has_in_process_runtime() || !self.is_authoritative() {
-            return;
-        }
-
-        let delta = facing.delta();
-        let front_pos = (pos.0 + delta.0, pos.1 + delta.1, pos.2 + delta.2);
-        // A loaded source must not resolve an unloaded destination as Air and
-        // then consume/spawn an item across the streaming boundary.
-        if !self
-            .chunk_manager
-            .is_block_loaded(front_pos.0, front_pos.1, front_pos.2)
-        {
-            return;
-        }
-        let spawn_pos = Vec3::new(
-            pos.0 as f32 + 0.5 + delta.0 as f32 * 0.7,
-            pos.1 as f32 + 0.5 + delta.1 as f32 * 0.7,
-            pos.2 as f32 + 0.5 + delta.2 as f32 * 0.7,
-        );
-
-        let seed = (pos.0 as u64)
-            ^ ((pos.1 as u64) << 16)
-            ^ ((pos.2 as u64) << 32)
-            ^ self.redstone.current_tick();
-
-        let Some(source) = self
-            .chunk_manager
-            .get_block_entity(pos.0, pos.1, pos.2)
-            .cloned()
-        else {
-            return;
-        };
-        let Some(slot_idx) = source.select_random_non_empty_slot(seed) else {
-            return;
-        };
-        let Some(stack) = source.get_stack(slot_idx).copied() else {
-            return;
-        };
-        let one = ItemStack { count: 1, ..stack };
-        let mut changed = false;
-        let mut target_changed = false;
-
-        if is_dropper {
-            // A dropper first attempts a sided, metadata-preserving insertion;
-            // a full/invalid target falls back to dropping the same one-item
-            // stack.  Both outcomes are successful and consume exactly one.
-            let target = self
-                .chunk_manager
-                .get_block_entity(front_pos.0, front_pos.1, front_pos.2)
-                .cloned();
-            if let Some(target) = target {
-                let mut target_after = target;
-                if target_after.try_insert_item(Some(facing.opposite()), one) {
-                    let mut source_after = source.clone();
-                    source_after.set_stack(
-                        slot_idx,
-                        (stack.count > 1).then_some(ItemStack {
-                            count: stack.count - 1,
-                            ..stack
-                        }),
-                    );
-                    self.chunk_manager
-                        .set_block_entity(pos.0, pos.1, pos.2, Some(source_after));
-                    self.chunk_manager.set_block_entity(
-                        front_pos.0,
-                        front_pos.1,
-                        front_pos.2,
-                        Some(target_after),
-                    );
-                    changed = true;
-                    target_changed = true;
-                }
-            }
-            if !changed {
-                self.spawn_dropped_stack(one, spawn_pos);
-                self.consume_container_slot_one(pos, slot_idx);
-                changed = true;
-            }
-        } else {
-            match stack.item {
-                Item::Arrow => {
-                    let id = self
-                        .entity_manager
-                        .spawn(crate::entity::EntityType::Arrow, spawn_pos);
-                    if let Some(arrow) = self.entity_manager.get_by_id_mut(id) {
-                        arrow.velocity =
-                            Vec3::new(delta.0 as f32, delta.1 as f32, delta.2 as f32) * 18.0;
-                        arrow.friendly_projectile = true;
-                        arrow.projectile_damage = 4.0;
-                    }
-                    self.audio_manager
-                        .play_sound(crate::audio::SoundId::ArrowShoot);
-                    self.consume_container_slot_one(pos, slot_idx);
-                    changed = true;
-                }
-                Item::SplashPotion => {
-                    let id = self
-                        .entity_manager
-                        .spawn(crate::entity::EntityType::SplashPotion, spawn_pos);
-                    if let Some(potion) = self.entity_manager.get_by_id_mut(id) {
-                        potion.velocity =
-                            Vec3::new(delta.0 as f32, delta.1 as f32, delta.2 as f32) * 10.0;
-                        potion.potion = stack.potion;
-                    }
-                    self.consume_container_slot_one(pos, slot_idx);
-                    changed = true;
-                }
-                Item::Bucket => {
-                    let filled =
-                        match self
-                            .chunk_manager
-                            .get_block(front_pos.0, front_pos.1, front_pos.2)
-                        {
-                            BlockType::Water => Some(Item::WaterBucket),
-                            BlockType::Lava => Some(Item::LavaBucket),
-                            _ => None,
-                        };
-                    if let Some(filled) = filled {
-                        self.apply_automation_block_change(front_pos, BlockType::Air);
-                        self.replace_container_slot(
-                            pos,
-                            slot_idx,
-                            Some(ItemStack {
-                                item: filled,
-                                ..stack
-                            }),
-                        );
-                        changed = true;
-                    }
-                }
-                Item::WaterBucket | Item::LavaBucket => {
-                    if self
-                        .chunk_manager
-                        .get_block(front_pos.0, front_pos.1, front_pos.2)
-                        == BlockType::Air
-                    {
-                        let place_block = if stack.item == Item::WaterBucket {
-                            BlockType::Water
-                        } else {
-                            BlockType::Lava
-                        };
-                        self.apply_automation_block_change(front_pos, place_block);
-                        self.replace_container_slot(
-                            pos,
-                            slot_idx,
-                            Some(ItemStack {
-                                item: Item::Bucket,
-                                ..stack
-                            }),
-                        );
-                        changed = true;
-                    }
-                }
-                Item::FlintAndSteel => {
-                    let target =
-                        self.chunk_manager
-                            .get_block(front_pos.0, front_pos.1, front_pos.2);
-                    let below =
-                        self.chunk_manager
-                            .get_block(front_pos.0, front_pos.1 - 1, front_pos.2);
-                    if target == BlockType::Air && below.properties().is_solid {
-                        self.apply_automation_block_change(front_pos, BlockType::Fire);
-                        self.consume_container_slot_one(pos, slot_idx);
-                        changed = true;
-                    }
-                }
-                _ => {
-                    // The item is a valid dispenser payload even when this
-                    // simplified runtime has no special entity for it: drop a
-                    // full metadata-bearing stack item and consume one.
-                    self.spawn_dropped_stack(one, spawn_pos);
-                    self.consume_container_slot_one(pos, slot_idx);
-                    changed = true;
-                }
-            }
-        }
-
-        if changed {
-            self.chunk_manager.mark_block_entity_dirty(pos.0, pos.2);
-            self.redstone
-                .mark_container_changed(&self.chunk_manager, pos);
-            let entity = self
-                .chunk_manager
-                .get_block_entity(pos.0, pos.1, pos.2)
-                .cloned();
-            self.broadcast_block_entity_delta(pos.0, pos.1, pos.2, entity);
-            if target_changed {
-                self.chunk_manager
-                    .mark_block_entity_dirty(front_pos.0, front_pos.2);
-                self.redstone
-                    .mark_container_changed(&self.chunk_manager, front_pos);
-                let target_entity = self
-                    .chunk_manager
-                    .get_block_entity(front_pos.0, front_pos.1, front_pos.2)
-                    .cloned();
-                self.broadcast_block_entity_delta(
-                    front_pos.0,
-                    front_pos.1,
-                    front_pos.2,
-                    target_entity,
-                );
-            }
-        }
-    }
-
-    /// Host-side canonical block mutation that also fans the result out to every
-    /// connected client. Used for client-initiated changes (relayed through the
-    /// server) and any host-derived mutation that should be visible to peers.
-    ///
-    /// This performs the full sequence the architecture mandates: `set_block`,
-    /// sky/block light update, mesh-dependency invalidation, and redstone
-    /// component rescan. It deliberately does **not** spawn drops, play sounds,
-    /// grant XP, or trigger advancements - those are local gameplay reactions
-    /// tied to the *player's* action, not to a relayed remote request.
-    pub fn set_block_and_broadcast(
-        &mut self,
-        requester: crate::network::protocol::PlayerId,
-        x: i32,
-        y: i32,
-        z: i32,
-        block_wire: u32,
-        state: u8,
-    ) {
-        let lighting_started = Instant::now();
-        let block = match BlockType::from_wire(block_wire) {
-            Some(b) => b,
-            None => return,
-        };
-        if !validate_remote_block_request(&self.remote_players, requester, (x, y, z))
-            || !self.can_place_block_at(x, y, z, block)
-        {
-            return;
-        }
-        let Some(((cx, cz), _)) = self.chunk_manager.world_to_local(x, y, z) else {
-            return;
-        };
-        if !self.chunk_manager.chunks.contains_key(&(cx, cz)) {
-            return;
-        }
-        if !self
-            .chunk_manager
-            .can_place_block_with_support(block, x, y, z)
-        {
-            return;
-        }
-        let prev = self.chunk_manager.get_block(x, y, z);
-        let prev_state = self.chunk_manager.get_block_state(x, y, z);
-        if prev == block && prev_state == state {
-            // Echo the authoritative value to correct a requesting client's
-            // prediction, but do not mark an unchanged chunk as mutated.
-            let cx = x.div_euclid(CHUNK_WIDTH as i32);
-            let cz = z.div_euclid(CHUNK_DEPTH as i32);
-            let revision = self
-                .mutation_revisions
-                .latest(self.current_dimension, cx, cz);
-            self.network.broadcast_block_change(
-                self.current_dimension,
-                revision,
-                x,
-                y,
-                z,
-                block_wire,
-                state,
-            );
-            return;
-        }
-        self.play_chest_state_edge((x, y, z), prev, prev_state, block, state);
-        let Some(mut dirty_chunks) =
-            apply_synced_block_change(&mut self.chunk_manager, x, y, z, block, state)
-        else {
-            return;
-        };
-        self.redstone.on_block_changed(
-            &self.chunk_manager,
-            (x, y, z),
-            crate::redstone::Direction::North,
-        );
-        self.check_and_break_unsupported_above(x, y, z, &mut dirty_chunks);
-        self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Block);
-        self.broadcast_block_change(x, y, z, block);
-        let lighting_elapsed = lighting_started.elapsed();
-        self.lighting_time_frame += lighting_elapsed;
-        self.lighting_scopes_frame.record(
-            crate::perf::LightingSource::Block as usize,
-            lighting_elapsed,
-        );
     }
 
     /// Client-side application of an authoritative block change received from
@@ -15230,18 +4620,15 @@ impl State {
         let previous_block = self.chunk_manager.get_block(x, y, z);
         let previous_state = self.chunk_manager.get_block_state(x, y, z);
         let previous_raw_fluid = self.chunk_manager.get_fluid_raw(x, y, z);
-        self.play_chest_state_edge((x, y, z), previous_block, previous_state, block, state);
-        let mut dirty_chunks =
-            apply_synced_block_change(&mut self.chunk_manager, x, y, z, block, state)
-                .unwrap_or_default();
-        if previous_raw_fluid != raw_fluid {
-            self.chunk_manager.set_fluid_raw(x, y, z, raw_fluid);
-            crate::chunk_manager::mark_block_mesh_dependencies(&mut dirty_chunks, x, z);
-        }
         if previous_block == block && previous_state == state && previous_raw_fluid == raw_fluid {
             return;
         }
-        self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Network);
+        self.play_chest_state_edge((x, y, z), previous_block, previous_state, block, state);
+        if let Some(dirty_chunks) =
+            apply_synced_block_change(&mut self.chunk_manager, x, y, z, block, state, raw_fluid)
+        {
+            self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Network);
+        }
     }
 
     /// Client-side application of an incremental block entity update from host.
@@ -15284,9 +4671,10 @@ impl State {
     }
 
     /// Client-side application of a full chunk payload sent by the host during
-    /// mid-game join catch-up. The payload uses the same Zlib-compressed layout
-    /// as `save.rs::ChunkSaveData`. If the chunk is not loaded yet, the payload
-    /// is buffered and applied once `update_chunks` loads that coordinate.
+    /// mid-game join catch-up. Live projection sends uncompressed terrain
+    /// streams; restore also accepts the historical zlib `ChunkSaveData` layout.
+    /// Missing columns are inserted from the payload only — join clients never
+    /// generate a stand-in.
     fn apply_remote_chunk_data(
         &mut self,
         dimension_wire: u8,
@@ -15317,7 +4705,26 @@ impl State {
             return;
         }
         self.client_chunk_revisions.insert(revision_key, revision);
-        if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
+        let inserted_new = !self.chunk_manager.chunks.contains_key(&(cx, cz));
+        if inserted_new {
+            if self
+                .chunk_manager
+                .insert_authoritative_chunk_payload(
+                    cx,
+                    cz,
+                    &blocks,
+                    &block_states,
+                    &fluid_levels,
+                    &block_entities,
+                )
+                .is_err()
+            {
+                return;
+            }
+            let lifetime = self.next_chunk_lifetime();
+            self.chunk_lifetimes.insert((cx, cz), lifetime);
+            self.chunk_meshes.insert((cx, cz), ChunkMesh::pending());
+        } else if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
             Self::restore_chunk_payload(
                 chunk,
                 &blocks,
@@ -15325,47 +4732,47 @@ impl State {
                 &fluid_levels,
                 &block_entities,
             );
-            self.invalidate_chunk_mesh((cx, cz), DependencyReason::Network);
-            // Re-seed boundary lighting so neighbors pick up the overwritten
-            // column heights and light values.
-            let mut dirty_chunks = std::collections::HashSet::new();
-            for (lighting_cx, lighting_cz) in [
-                (cx, cz),
-                (cx - 1, cz),
-                (cx + 1, cz),
-                (cx, cz - 1),
-                (cx, cz + 1),
-            ] {
-                if self
-                    .chunk_manager
-                    .chunks
-                    .contains_key(&(lighting_cx, lighting_cz))
-                {
-                    crate::lighting::propagate_chunk_lighting(
-                        &mut self.chunk_manager,
-                        lighting_cx,
-                        lighting_cz,
-                        &mut dirty_chunks,
-                    );
-                    self.invalidate_chunk_mesh((lighting_cx, lighting_cz), DependencyReason::Light);
-                }
-            }
-            self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Light);
         } else {
-            // Chunk not streamed in yet; buffer for deferred application.
-            let should_replace = self
-                .pending_chunk_payloads
-                .get(&(cx, cz))
-                .map_or(true, |(existing_revision, _, _, _, _)| {
-                    revision >= *existing_revision
-                });
-            if should_replace {
-                self.pending_chunk_payloads.insert(
-                    (cx, cz),
-                    (revision, blocks, block_states, fluid_levels, block_entities),
+            return;
+        }
+        self.invalidate_chunk_mesh(
+            (cx, cz),
+            if inserted_new {
+                DependencyReason::ChunkLoad
+            } else {
+                DependencyReason::Network
+            },
+        );
+        if let Some(changes) = self.pending_block_changes.remove(&(cx, cz)) {
+            let mut changes: Vec<_> = changes.into_iter().collect();
+            changes.sort_by_key(|(_, (change_revision, _, _, _))| *change_revision);
+            for ((x, y, z), (change_revision, block, state, raw_fluid)) in changes {
+                self.apply_remote_block_change(
+                    dimension_wire,
+                    change_revision,
+                    x,
+                    y,
+                    z,
+                    block,
+                    state,
+                    raw_fluid,
                 );
             }
         }
+        // Re-seed boundary lighting so neighbors pick up the overwritten
+        // column heights and light values. One call covers the column plus
+        // shared faces of loaded cardinal neighbors.
+        let mut dirty_chunks = std::collections::HashSet::new();
+        if self.chunk_manager.chunks.contains_key(&(cx, cz)) {
+            crate::lighting::propagate_chunk_lighting(
+                &mut self.chunk_manager,
+                cx,
+                cz,
+                &mut dirty_chunks,
+            );
+            self.invalidate_chunk_mesh((cx, cz), DependencyReason::Light);
+        }
+        self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Light);
     }
 
     /// Decode a `ChunkSaveData`-style compressed payload into an existing
@@ -15378,974 +4785,13 @@ impl State {
         fluid_levels: &[u8],
         block_entities: &[u8],
     ) {
-        let save_data = crate::save::ChunkSaveData {
-            chunk_x: chunk.chunk_x,
-            chunk_z: chunk.chunk_z,
-            blocks: blocks.to_vec(),
-            sky_light: Vec::new(),
-            block_light: Vec::new(),
-            fluid_levels: fluid_levels.to_vec(),
-            redstone_metadata: Vec::new(),
-            block_states: block_states.to_vec(),
-            mutation_revision: 0,
-            block_entities: block_entities.to_vec(),
-            data_version: 1,
-        };
-        save_data.restore_to_chunk(chunk);
-    }
-
-    pub fn break_block(&mut self, pos: glam::Vec3) {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
-            let _ = self.submit_local_authority_block_action(
-                crate::network::protocol::BlockActionKind::StartBreak,
-                pos.x as i32,
-                pos.y as i32,
-                pos.z as i32,
-                [0, 0, 0],
-                BlockType::Air,
-            );
-            return;
-        }
-        let lighting_started = Instant::now();
-        let wx = pos.x as i32;
-        let wy = pos.y as i32;
-        let wz = pos.z as i32;
-        let old_block = self.chunk_manager.get_block(wx, wy, wz);
-        if old_block == BlockType::Air {
-            return;
-        }
-        let old_state_raw = self.chunk_manager.get_block_state(wx, wy, wz);
-        let old_state = crate::world::BlockState::decode(old_state_raw);
-        let chest_partner = if old_block == crate::world::BlockType::Chest
-            && old_state.chest_type != crate::world::ChestType::Single
-        {
-            self.double_chest_partner((wx, wy, wz), old_state.chest_type)
-        } else {
-            None
-        };
-
-        // Chest-specific: extract inventory before the block is destroyed,
-        // and handle double-chest partner revert.
-        let _chest_inventory_dropped = false;
-        if old_block == crate::world::BlockType::Chest {
-            let _ = self.drop_chest_inventory((wx, wy, wz));
-            self.close_legacy_container_sessions_at((wx, wy, wz));
-            if let Some(partner) = chest_partner {
-                self.close_legacy_container_sessions_at(partner);
-            }
-            // If this was part of a double chest, revert the partner to single.
-            if let Some(partner) = chest_partner {
-                let partner_raw = self
-                    .chunk_manager
-                    .get_block_state(partner.0, partner.1, partner.2);
-                let mut partner_state = crate::world::BlockState::decode(partner_raw);
-                partner_state.chest_type = crate::world::ChestType::Single;
-                self.chunk_manager.set_block_state(
-                    partner.0,
-                    partner.1,
-                    partner.2,
-                    partner_state.encode(),
-                );
-            }
-        }
-
-        self.chunk_manager.set_block(wx, wy, wz, BlockType::Air);
-        self.redstone.on_block_changed(
-            &self.chunk_manager,
-            (wx, wy, wz),
-            crate::redstone::Direction::North,
+        let _ = crate::save::ChunkSaveData::restore_network_payload(
+            chunk,
+            blocks,
+            block_states,
+            fluid_levels,
+            block_entities,
         );
-        println!("[Debug] Block mined at ({}, {}, {})", wx, wy, wz);
-
-        let sound_pos = glam::Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
-        let listener_right =
-            glam::Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos()).normalize_or_zero();
-        if let Some(mat) = old_block.sound_material() {
-            self.audio_manager.play_sound_3d(
-                crate::audio::SoundId::BlockBreak(mat),
-                sound_pos,
-                self.camera.position,
-                listener_right,
-            );
-        }
-
-        // Spawn block-break debris particles (15-25 small quads textured from
-        // the broken block's atlas tile).
-        {
-            let mut rng = (wx as u32)
-                .wrapping_mul(2654435761)
-                .wrapping_add(wy as u32)
-                .wrapping_mul(40503)
-                .wrapping_add(wz as u32)
-                .wrapping_add(self.total_time.to_bits());
-            let count = 15 + (rng % 11) as usize;
-            crate::particles::spawn_block_debris(
-                &mut self.particles,
-                sound_pos,
-                old_block,
-                count,
-                &mut rng,
-            );
-        }
-
-        let held_stack = self.inventory.hotbar[self.inventory.selected];
-        let rewards = calculate_block_break_rewards(
-            old_block,
-            old_state_raw,
-            (wx, wy, wz),
-            held_stack.as_ref(),
-            self.game_mode,
-        );
-
-        for drop in rewards.drops {
-            self.spawn_dropped_item(drop.item, sound_pos);
-        }
-        if rewards.xp > 0 {
-            self.player_state.add_experience(rewards.xp);
-        }
-        if rewards.exhaustion > 0.0 {
-            self.player_state.add_exhaustion(rewards.exhaustion);
-        }
-        if rewards.tool_damaged {
-            self.damage_selected_tool(
-                (wx as u32) ^ (wy as u32).rotate_left(11) ^ (wz as u32).rotate_left(22),
-            );
-        }
-
-        // recalculate lighting and redraw chunk
-        let mut dirty_chunks = std::collections::HashSet::new();
-        crate::lighting::update_sky_light_after_removed(
-            &mut self.chunk_manager,
-            wx,
-            wy,
-            wz,
-            &mut dirty_chunks,
-        );
-        crate::lighting::update_block_light_after_removed(
-            &mut self.chunk_manager,
-            wx,
-            wy,
-            wz,
-            old_block.properties().light_emission,
-            &mut dirty_chunks,
-        );
-
-        mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
-
-        if old_block == BlockType::OakDoor {
-            let other_y = if old_state.is_top { wy - 1 } else { wy + 1 };
-            if self.chunk_manager.get_block(wx, other_y, wz) == BlockType::OakDoor {
-                self.chunk_manager
-                    .set_block(wx, other_y, wz, BlockType::Air);
-                crate::lighting::update_sky_light_after_removed(
-                    &mut self.chunk_manager,
-                    wx,
-                    other_y,
-                    wz,
-                    &mut dirty_chunks,
-                );
-                mark_block_mesh_dependencies(&mut dirty_chunks, wx, other_y);
-                self.broadcast_block_change(wx, other_y, wz, BlockType::Air);
-            }
-        }
-
-        self.check_and_break_unsupported_above(wx, wy, wz, &mut dirty_chunks);
-
-        self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::BreakPlace);
-
-        // Fan the authoritative break out to connected clients.
-        self.broadcast_block_change(wx, wy, wz, BlockType::Air);
-        let lighting_elapsed = lighting_started.elapsed();
-        self.lighting_time_frame += lighting_elapsed;
-        self.lighting_scopes_frame.record(
-            crate::perf::LightingSource::Block as usize,
-            lighting_elapsed,
-        );
-    }
-
-    pub fn handle_client_block_action(
-        &mut self,
-        requester_id: crate::network::protocol::PlayerId,
-        action: crate::network::protocol::Action,
-        x: i32,
-        y: i32,
-        z: i32,
-        block_wire: u32,
-        held_item_wire: Option<crate::network::protocol::ItemWire>,
-    ) {
-        if !validate_remote_block_request(&self.remote_players, requester_id, (x, y, z)) {
-            self.send_block_action_result(requester_id, x, y, z, false, false, vec![]);
-            return;
-        }
-
-        let Some(((cx, cz), _)) = self.chunk_manager.world_to_local(x, y, z) else {
-            self.send_block_action_result(requester_id, x, y, z, false, false, vec![]);
-            return;
-        };
-        if !self.chunk_manager.chunks.contains_key(&(cx, cz)) {
-            self.send_block_action_result(requester_id, x, y, z, false, false, vec![]);
-            return;
-        }
-
-        match action {
-            crate::network::protocol::Action::Break => {
-                let old_block = self.chunk_manager.get_block(x, y, z);
-                let old_state_raw = self.chunk_manager.get_block_state(x, y, z);
-                if old_block == BlockType::Air || old_block == BlockType::Bedrock {
-                    self.send_block_action_result(requester_id, x, y, z, false, false, vec![]);
-                    return;
-                }
-
-                if matches!(
-                    old_block,
-                    BlockType::Chest
-                        | BlockType::EndCityChest
-                        | BlockType::Furnace
-                        | BlockType::FurnaceLit
-                        | BlockType::Hopper
-                        | BlockType::Dispenser
-                        | BlockType::Dropper
-                ) {
-                    self.drop_block_entity_inventory((x, y, z));
-                }
-                // Double chest topology is independent of the inventory drain.
-                if old_block == crate::world::BlockType::Chest {
-                    let old_state_raw = self.chunk_manager.get_block_state(x, y, z);
-                    let old_state = crate::world::BlockState::decode(old_state_raw);
-                    if old_state.chest_type != crate::world::ChestType::Single {
-                        if let Some(partner) =
-                            self.double_chest_partner((x, y, z), old_state.chest_type)
-                        {
-                            let partner_raw = self
-                                .chunk_manager
-                                .get_block_state(partner.0, partner.1, partner.2);
-                            let mut partner_state = crate::world::BlockState::decode(partner_raw);
-                            partner_state.chest_type = crate::world::ChestType::Single;
-                            self.chunk_manager.set_block_state(
-                                partner.0,
-                                partner.1,
-                                partner.2,
-                                partner_state.encode(),
-                            );
-                        }
-                    }
-                }
-
-                let mut dirty_chunks = std::collections::HashSet::new();
-                self.chunk_manager.set_block(x, y, z, BlockType::Air);
-                self.redstone.on_block_changed(
-                    &self.chunk_manager,
-                    (x, y, z),
-                    crate::redstone::Direction::North,
-                );
-                crate::lighting::update_sky_light_after_removed(
-                    &mut self.chunk_manager,
-                    x,
-                    y,
-                    z,
-                    &mut dirty_chunks,
-                );
-                crate::lighting::update_block_light_after_removed(
-                    &mut self.chunk_manager,
-                    x,
-                    y,
-                    z,
-                    old_block.properties().light_emission,
-                    &mut dirty_chunks,
-                );
-                mark_block_mesh_dependencies(&mut dirty_chunks, x, z);
-                self.check_and_break_unsupported_above(x, y, z, &mut dirty_chunks);
-                self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::BreakPlace);
-
-                self.broadcast_block_change(x, y, z, BlockType::Air);
-
-                let held_stack = held_item_wire.and_then(|w| w.to_stack());
-                let rewards = calculate_block_break_rewards(
-                    old_block,
-                    old_state_raw,
-                    (x, y, z),
-                    held_stack.as_ref(),
-                    self.game_mode,
-                );
-
-                let sound_pos = glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
-                for drop in &rewards.drops {
-                    self.spawn_dropped_item(drop.item, sound_pos);
-                }
-
-                let drops_wire = rewards
-                    .drops
-                    .iter()
-                    .map(crate::network::protocol::ItemWire::from_stack)
-                    .collect();
-                self.send_block_action_result(requester_id, x, y, z, true, false, drops_wire);
-            }
-            crate::network::protocol::Action::Place => {
-                let block = BlockType::from_u8(block_wire as u8);
-                if block == BlockType::Air {
-                    self.send_block_action_result(requester_id, x, y, z, false, false, vec![]);
-                    return;
-                }
-
-                if !self.can_place_block_at(x, y, z, block)
-                    || !self
-                        .chunk_manager
-                        .can_place_block_with_support(block, x, y, z)
-                {
-                    self.send_block_action_result(requester_id, x, y, z, false, false, vec![]);
-                    return;
-                }
-
-                let mut dirty_chunks = std::collections::HashSet::new();
-                self.chunk_manager.set_block(x, y, z, block);
-                let facing = crate::redstone::Direction::North;
-                if matches!(
-                    block,
-                    BlockType::Hopper
-                        | BlockType::Observer
-                        | BlockType::Dispenser
-                        | BlockType::Dropper
-                ) {
-                    let mut state = crate::world::BlockState::decode(
-                        self.chunk_manager.get_block_state(x, y, z),
-                    );
-                    state.facing = facing;
-                    self.chunk_manager.set_block_state(x, y, z, state.encode());
-                }
-                if let Some(block_entity) = crate::block_entity::default_stub_for_block(block) {
-                    self.chunk_manager
-                        .set_block_entity(x, y, z, Some(block_entity.clone()));
-                    self.broadcast_block_entity_delta(x, y, z, Some(block_entity));
-                }
-                self.redstone
-                    .on_block_changed(&self.chunk_manager, (x, y, z), facing);
-                let properties = block.properties();
-                if properties.is_solid {
-                    crate::lighting::update_sky_light_after_placed(
-                        &mut self.chunk_manager,
-                        x,
-                        y,
-                        z,
-                        &mut dirty_chunks,
-                    );
-                }
-                if properties.light_emission > 0 {
-                    crate::lighting::update_block_light_after_placed(
-                        &mut self.chunk_manager,
-                        x,
-                        y,
-                        z,
-                        properties.light_emission,
-                        &mut dirty_chunks,
-                    );
-                }
-                mark_block_mesh_dependencies(&mut dirty_chunks, x, z);
-                self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::BreakPlace);
-
-                self.broadcast_block_change(x, y, z, block);
-
-                let consumed = self.game_mode == GameMode::Survival;
-                self.send_block_action_result(requester_id, x, y, z, true, consumed, vec![]);
-            }
-            _ => {
-                self.send_block_action_result(requester_id, x, y, z, false, false, vec![]);
-            }
-        }
-    }
-
-    fn send_block_action_result(
-        &self,
-        to: crate::network::protocol::PlayerId,
-        x: i32,
-        y: i32,
-        z: i32,
-        success: bool,
-        consumed_item: bool,
-        drops: Vec<crate::network::protocol::ItemWire>,
-    ) {
-        if let NetworkHandle::Host { host_to_server, .. } = &self.network {
-            let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::SendBlockActionResult {
-                    to,
-                    x,
-                    y,
-                    z,
-                    success,
-                    consumed_item,
-                    drops,
-                },
-            );
-        }
-    }
-
-    /// Spawn a `DroppedItem` entity in the world carrying the given `Item`.
-    /// The item is launched with a small random upward velocity and given a
-    /// brief pickup cooldown so it can't be instantly re-collected.
-    pub fn spawn_dropped_item(&mut self, item: crate::inventory::Item, pos: glam::Vec3) {
-        self.spawn_dropped_stack(crate::inventory::ItemStack::new(item, 1), pos);
-    }
-
-    pub fn spawn_dropped_stack(&mut self, stack: crate::inventory::ItemStack, pos: glam::Vec3) {
-        if stack.item == Item::Air || stack.count == 0 {
-            return;
-        }
-        let id = self
-            .entity_manager
-            .spawn(crate::entity::EntityType::DroppedItem, pos);
-        if let Some(entity) = self.entity_manager.entities.last_mut() {
-            entity.dropped_item = Some(stack.item);
-            entity.dropped_count = stack.count;
-            entity.dropped_stack = Some(stack);
-            let mut rng = self
-                .total_time
-                .to_bits()
-                .wrapping_add(id.wrapping_mul(2_654_435_761) as u32);
-            rng = rng.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-            let vx = ((rng / 65_536) as f32 / 32_768.0 - 0.5) * 1.5;
-            rng = rng.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-            let vz = ((rng / 65_536) as f32 / 32_768.0 - 0.5) * 1.5;
-            let vy = 2.0 + ((rng / 65_536) as f32 / 32_768.0);
-            entity.velocity = Vec3::new(vx, vy, vz);
-            entity.pickup_cooldown = 0.5;
-        }
-    }
-
-    pub fn throw_dropped_stack(&mut self, stack: crate::inventory::ItemStack) {
-        if stack.item == Item::Air || stack.count == 0 {
-            return;
-        }
-        let dir = Vec3::new(
-            self.camera.yaw.cos() * self.camera.pitch.cos(),
-            self.camera.pitch.sin(),
-            self.camera.yaw.sin() * self.camera.pitch.cos(),
-        )
-        .normalize_or_zero();
-        let spawn_pos = self.player_physics.position + Vec3::new(0.0, 1.5, 0.0) + dir * 0.5;
-        self.entity_manager
-            .spawn(crate::entity::EntityType::DroppedItem, spawn_pos);
-        if let Some(entity) = self.entity_manager.entities.last_mut() {
-            entity.dropped_item = Some(stack.item);
-            entity.dropped_count = stack.count;
-            entity.dropped_stack = Some(stack);
-            entity.velocity = dir * 4.0 + Vec3::new(0.0, 1.5, 0.0);
-            entity.pickup_cooldown = 1.0;
-        }
-    }
-
-    pub fn spawn_xp_orb(&mut self, xp_value: u32, pos: glam::Vec3) {
-        if xp_value == 0 {
-            return;
-        }
-        let id = self
-            .entity_manager
-            .spawn(crate::entity::EntityType::ExperienceOrb, pos);
-        if let Some(entity) = self.entity_manager.entities.last_mut() {
-            entity.xp_value = xp_value;
-            let rng = self
-                .total_time
-                .to_bits()
-                .wrapping_add(id.wrapping_mul(2_654_435_761) as u32);
-            let vx = ((rng / 65_536) as f32 / 32_768.0 - 0.5) * 1.5;
-            let vy = 2.0;
-            let vz = ((rng / 65_536) as f32 / 32_768.0 - 0.5) * 1.5;
-            entity.velocity = Vec3::new(vx, vy, vz);
-            entity.pickup_cooldown = 0.5;
-        }
-    }
-
-    fn update_dropped_items_and_orbs(&mut self, dt: f32) {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
-            return;
-        }
-        let mut remove_ids = Vec::new();
-        let mut merges = Vec::new();
-
-        for entity in &mut self.entity_manager.entities {
-            if matches!(
-                entity.entity_type,
-                crate::entity::EntityType::DroppedItem | crate::entity::EntityType::ExperienceOrb
-            ) {
-                entity.item_age += dt;
-                entity.update_physics(dt, &self.chunk_manager);
-
-                let pos = entity.position;
-                let block = self.chunk_manager.get_block(
-                    pos.x.floor() as i32,
-                    pos.y.floor() as i32,
-                    pos.z.floor() as i32,
-                );
-                if matches!(
-                    block,
-                    crate::world::BlockType::Lava
-                        | crate::world::BlockType::Fire
-                        | crate::world::BlockType::Cactus
-                ) || entity.item_age >= 300.0
-                {
-                    remove_ids.push(entity.id);
-                }
-            }
-        }
-
-        let dropped_ids: Vec<u64> = self
-            .entity_manager
-            .get_entities_by_type(crate::entity::EntityType::DroppedItem)
-            .map(|e| e.id)
-            .collect();
-        for i in 0..dropped_ids.len() {
-            let id_a = dropped_ids[i];
-            if remove_ids.contains(&id_a) {
-                continue;
-            }
-            for j in (i + 1)..dropped_ids.len() {
-                let id_b = dropped_ids[j];
-                if remove_ids.contains(&id_b) {
-                    continue;
-                }
-                let (Some(ent_a), Some(ent_b)) = (
-                    self.entity_manager.get_by_id(id_a),
-                    self.entity_manager.get_by_id(id_b),
-                ) else {
-                    continue;
-                };
-                if ent_a.position.distance(ent_b.position) <= 1.25 {
-                    if let (Some(stack_a), Some(stack_b)) =
-                        (ent_a.dropped_stack, ent_b.dropped_stack)
-                    {
-                        if stack_a.can_merge_with(&stack_b) {
-                            let max_stack = stack_a.item.properties().max_stack;
-                            if stack_a.count < max_stack {
-                                merges.push((id_a, id_b, max_stack));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        for (id_a, id_b, max_stack) in merges {
-            if remove_ids.contains(&id_a) || remove_ids.contains(&id_b) {
-                continue;
-            }
-            let count_b = self
-                .entity_manager
-                .get_by_id(id_b)
-                .map(|e| e.dropped_count)
-                .unwrap_or(0);
-            if let Some(ent_a) = self.entity_manager.get_by_id_mut(id_a) {
-                let transfer = max_stack.saturating_sub(ent_a.dropped_count).min(count_b);
-                ent_a.dropped_count += transfer;
-                if let Some(ref mut stack_a) = ent_a.dropped_stack {
-                    stack_a.count = ent_a.dropped_count;
-                }
-                if transfer >= count_b {
-                    remove_ids.push(id_b);
-                } else if let Some(ent_b) = self.entity_manager.get_by_id_mut(id_b) {
-                    ent_b.dropped_count -= transfer;
-                    if let Some(ref mut stack_b) = ent_b.dropped_stack {
-                        stack_b.count = ent_b.dropped_count;
-                    }
-                }
-            }
-        }
-
-        for id in remove_ids {
-            self.entity_manager.remove_by_id(id);
-        }
-    }
-
-    fn store_or_drop_generated_item(&mut self, item: Item, position: Vec3) {
-        let _ = store_or_drop_generated_item(
-            &mut self.inventory,
-            &mut self.entity_manager,
-            item,
-            position,
-            self.total_time.to_bits(),
-        );
-    }
-
-    fn settle_standard_player_kill(&mut self, kill: PlayerKill, looting: u8) {
-        if matches!(self.game_mode, GameMode::Creative | GameMode::Spectator) {
-            return;
-        }
-
-        let rewards = standard_player_kill_rewards(kill, looting);
-        for item in rewards.items {
-            self.store_or_drop_generated_item(item, kill.position);
-        }
-        self.player_state.add_experience(rewards.experience);
-    }
-
-    fn throw_dropped_item(&mut self, item: Item, count: u32) {
-        self.throw_dropped_stack(crate::inventory::ItemStack::new(item, count));
-    }
-
-    /// Q pressed in the world: throw the selected hotbar item. One item is
-    /// thrown, or the whole stack when `whole_stack` (Shift) is held.
-    pub fn drop_held_item(&mut self, whole_stack: bool) {
-        let selected = self.inventory.selected;
-        let Some(stack) = self.inventory.hotbar[selected] else {
-            return;
-        };
-        let count = if whole_stack { stack.count } else { 1 };
-        self.throw_dropped_item(stack.item, count);
-        if stack.count > count {
-            self.inventory.hotbar[selected] = Some(ItemStack {
-                count: stack.count - count,
-                ..stack
-            });
-        } else {
-            self.inventory.hotbar[selected] = None;
-        }
-    }
-
-    /// Q pressed while the inventory is open: throw the item under the mouse
-    /// cursor (or the stack being dragged with the cursor). One item is
-    /// thrown, or the whole stack when `whole_stack` (Shift) is held.
-    pub fn drop_hovered_item(&mut self, whole_stack: bool) {
-        // A stack dragged with the cursor takes precedence, matching the
-        // vanilla behaviour of throwing what is held in the hand.
-        if let Some(dragged) = self.inventory.dragged {
-            let count = if whole_stack { dragged.count } else { 1 };
-            self.throw_dropped_item(dragged.item, count);
-            if dragged.count > count {
-                self.inventory.dragged = Some(ItemStack {
-                    count: dragged.count - count,
-                    ..dragged
-                });
-            } else {
-                self.inventory.dragged = None;
-            }
-            return;
-        }
-
-        let mouse_x = self.mouse_ndc[0];
-        let mouse_y = self.mouse_ndc[1];
-        let hovered_slot = self
-            .get_inventory_slots()
-            .into_iter()
-            .find(|&(_, x0, x1, y0, y1)| {
-                mouse_x >= x0 && mouse_x <= x1 && mouse_y >= y0 && mouse_y <= y1
-            });
-        let Some((slot_type, _, _, _, _)) = hovered_slot else {
-            return;
-        };
-        match slot_type {
-            // The Creative catalog is a virtual infinite supply, and output
-            // slots are take-out-only: none of them can be thrown from.
-            SlotType::Creative(_) | SlotType::CraftOutput | SlotType::AnvilOutput => return,
-            _ => {}
-        }
-        let Some(stack) = self.get_item_at_slot(slot_type) else {
-            return;
-        };
-        let count = if whole_stack { stack.count } else { 1 };
-        self.throw_dropped_item(stack.item, count);
-        if stack.count > count {
-            self.set_item_at_slot(
-                slot_type,
-                Some(ItemStack {
-                    count: stack.count - count,
-                    ..stack
-                }),
-            );
-        } else {
-            self.set_item_at_slot(slot_type, None);
-        }
-
-        // Keep derived state consistent when throwing out of an input slot.
-        if let SlotType::CraftInput(_) = slot_type {
-            let grid_size = if self.inventory.is_table_open { 3 } else { 2 };
-            self.inventory.craft_output = self
-                .recipe_manager
-                .match_recipe(&self.inventory.craft_input, grid_size);
-        }
-        self.refresh_workstations();
-    }
-
-    fn update_player_projectiles(&mut self, dt: f32) {
-        let mut player_kills = Vec::new();
-        let mut splashes = Vec::new();
-        for projectile in &mut self.entity_manager.entities {
-            if projectile.entity_type != crate::entity::EntityType::SplashPotion {
-                continue;
-            }
-            projectile.update_physics(dt, &self.chunk_manager);
-            projectile.life_time -= dt;
-            let pos = projectile.position;
-            let hit_block = self
-                .chunk_manager
-                .get_block(
-                    pos.x.floor() as i32,
-                    pos.y.floor() as i32,
-                    pos.z.floor() as i32,
-                )
-                .properties()
-                .is_solid;
-            if hit_block || projectile.life_time <= 0.0 {
-                if let Some(potion) = projectile.potion {
-                    splashes.push((pos, potion));
-                }
-                projectile.health = -1.0;
-            }
-        }
-
-        for (position, potion) in splashes {
-            if position.distance(self.player_physics.position) <= 4.0 {
-                let healing = self.potion_effects.apply(potion);
-                self.player_state.health =
-                    (self.player_state.health + healing).min(self.player_state.max_health);
-            }
-            let ids: Vec<u64> = self
-                .entity_manager
-                .query_radius(position, 4.0)
-                .map(|e| e.id)
-                .collect();
-            for id in ids {
-                let Some(entity) = self.entity_manager.get_by_id_mut(id) else {
-                    continue;
-                };
-                if let Some(kill) = apply_player_splash_effect(entity, potion) {
-                    player_kills.push(kill);
-                }
-            }
-        }
-
-        let mut hits = Vec::new();
-        let projectile_ids: Vec<u64> = self
-            .entity_manager
-            .get_entities_by_type(crate::entity::EntityType::Arrow)
-            .filter(|p| p.friendly_projectile)
-            .map(|p| p.id)
-            .collect();
-        for projectile_id in projectile_ids {
-            let Some(projectile) = self.entity_manager.get_by_id(projectile_id) else {
-                continue;
-            };
-            let target_ids: Vec<u64> = self
-                .entity_manager
-                .query_radius(projectile.position, 2.0)
-                .map(|t| t.id)
-                .collect();
-            for target_id in target_ids {
-                let Some(target) = self.entity_manager.get_by_id(target_id) else {
-                    continue;
-                };
-                if target.id != projectile.id
-                    && target.is_player_projectile_target()
-                    && projectile.get_aabb().intersects(&target.get_aabb())
-                {
-                    hits.push((projectile.id, target.id, projectile.projectile_damage));
-                    break;
-                }
-            }
-        }
-        for (projectile_id, target_id, damage) in hits {
-            if let Some(target) = self.entity_manager.get_by_id_mut(target_id) {
-                if let Some(kill) = apply_player_projectile_damage(target, damage) {
-                    player_kills.push(kill);
-                }
-            }
-            if let Some(projectile) = self.entity_manager.get_by_id_mut(projectile_id) {
-                projectile.health = -1.0;
-            }
-        }
-        for kill in player_kills {
-            self.settle_standard_player_kill(kill, 0);
-        }
-        self.entity_manager.retain(|entity| {
-            entity.health >= 0.0
-                || matches!(
-                    entity.entity_type,
-                    crate::entity::EntityType::Blaze
-                        | crate::entity::EntityType::Piglin
-                        | crate::entity::EntityType::Husk
-                        | crate::entity::EntityType::Shulker
-                        | crate::entity::EntityType::EnderDragon
-                        | crate::entity::EntityType::Wither
-                        | crate::entity::EntityType::EndCrystal
-                        | crate::entity::EntityType::RemotePlayer
-                )
-        });
-    }
-
-    pub fn take_damage(&mut self, amount: f32, source: DamageSource) {
-        self.take_damage_with_attacker(amount, source, None, None);
-    }
-
-    pub fn take_damage_with_attacker(
-        &mut self,
-        amount: f32,
-        source: DamageSource,
-        attacker_pos: Option<[f32; 3]>,
-        attacker_item: Option<Item>,
-    ) {
-        if self.has_in_process_runtime() {
-            // Encode a bounded tenth-heart damage amount in the typed Combat
-            // envelope.  The authority owns health/death; this root only
-            // projects the accepted session update and never drops items or
-            // mutates health locally.
-            let quantized = (amount.clamp(0.1, 12.7) * 10.0).round() as u8;
-            let _ = self.submit_local_authority_operation(
-                crate::network::protocol::GameplayOperation::Combat {
-                    target: 0,
-                    action: 0x80 | quantized.min(0x7f),
-                },
-            );
-            return;
-        }
-        if !self.is_authoritative() || !self.game_mode_policy().can_take_damage {
-            return;
-        }
-
-        let can_damage = !self.player_state.is_dead && self.player_state.invulnerable_time <= 0.0;
-        if !can_damage {
-            return;
-        }
-
-        // Check shield blocking
-        let is_blocking = self
-            .player_state
-            .using_item
-            .as_ref()
-            .map_or(false, |u| u.action == crate::player::ItemUseAction::Block);
-        let yaw = self.camera.yaw;
-        let pos = [
-            self.player_physics.position.x,
-            self.player_physics.position.y,
-            self.player_physics.position.z,
-        ];
-        if is_blocking && crate::player::can_shield_block(yaw, pos, attacker_pos, source) {
-            self.audio_manager
-                .play_sound(crate::audio::SoundId::ShieldBlock);
-
-            // Reduce shield durability in holding slot
-            if let Some(ref using) = self.player_state.using_item {
-                let slot = using.slot;
-                let mut shield_stack = match slot {
-                    crate::player::HandSlot::MainHand(i) => {
-                        self.inventory.hotbar.get(i).copied().flatten()
-                    }
-                    crate::player::HandSlot::OffHand => self.inventory.offhand,
-                };
-                if let Some(ref mut stack) = shield_stack {
-                    if stack.durability > 0 {
-                        let dur_loss = if amount > 3.0 {
-                            (amount.floor() as u32) + 1
-                        } else {
-                            1
-                        };
-                        if stack.durability <= dur_loss {
-                            match slot {
-                                crate::player::HandSlot::MainHand(i) => {
-                                    self.inventory.hotbar[i] = None
-                                }
-                                crate::player::HandSlot::OffHand => self.inventory.offhand = None,
-                            }
-                            self.audio_manager
-                                .play_sound(crate::audio::SoundId::ShieldBreak);
-                            self.player_state.using_item = None;
-                        } else {
-                            stack.durability -= dur_loss;
-                            match slot {
-                                crate::player::HandSlot::MainHand(i) => {
-                                    self.inventory.hotbar[i] = Some(*stack)
-                                }
-                                crate::player::HandSlot::OffHand => {
-                                    self.inventory.offhand = Some(*stack)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Check if attacker used an Axe -> disable shield!
-            if let Some(att_item) = attacker_item {
-                if att_item
-                    .tool_properties()
-                    .map_or(false, |t| t.tool_type == ToolType::Axe)
-                {
-                    self.player_state.shield_disable_ticks = 100;
-                    self.player_state.using_item = None;
-                    self.audio_manager
-                        .play_sound(crate::audio::SoundId::ShieldBreak);
-                }
-            }
-
-            return; // No damage taken when shield blocked!
-        }
-
-        let mut total_armor = 0.0f32;
-        let mut total_toughness = 0.0f32;
-        for armor_slot in self.inventory.armor.iter().flatten() {
-            if let Some(props) = armor_slot.item.armor_properties() {
-                total_armor += props.armor_points;
-                total_toughness += props.toughness;
-            }
-        }
-        let total_epf =
-            crate::enchantment::epf_sum(&self.inventory.armor, source == DamageSource::Fall);
-
-        let final_damage = crate::player::calculate_damage_reduction(
-            amount,
-            source,
-            total_armor,
-            total_toughness,
-            total_epf,
-        );
-
-        let died = self.player_state.take_damage(final_damage, source);
-
-        if died {
-            self.player_physics.set_flying(false);
-            self.jump_taps.reset();
-            self.audio_manager
-                .play_sound(crate::audio::SoundId::PlayerDeath);
-            println!("[Debug] Player died due to: {:?}", source);
-
-            let pos = self.player_physics.position + Vec3::new(0.0, 1.0, 0.0);
-            let mut to_drop = Vec::new();
-            for slot in self
-                .inventory
-                .hotbar
-                .iter()
-                .chain(self.inventory.main.iter())
-                .chain(self.inventory.armor.iter())
-            {
-                if let Some(stack) = slot {
-                    to_drop.push(*stack);
-                }
-            }
-            if let Some(offhand) = self.inventory.offhand {
-                to_drop.push(offhand);
-            }
-            if let Some(dragged) = self.inventory.dragged {
-                to_drop.push(dragged);
-            }
-            for craft_slot in &self.inventory.craft_input {
-                if let Some(stack) = craft_slot {
-                    to_drop.push(*stack);
-                }
-            }
-
-            if !self.world_rules.keep_inventory {
-                for stack in to_drop {
-                    self.spawn_dropped_stack(stack, pos);
-                }
-            }
-
-            let xp_drop = self.player_state.death_experience_drop();
-            if xp_drop > 0 {
-                self.spawn_xp_orb(xp_drop, pos);
-            }
-
-            if !self.world_rules.keep_inventory {
-                self.inventory.clear();
-            }
-        } else {
-            self.audio_manager
-                .play_sound(crate::audio::SoundId::PlayerHurt);
-        }
     }
 
     pub fn respawn(&mut self) {
@@ -16353,99 +4799,10 @@ impl State {
             let _ = self.submit_local_authority_command("/respawn");
             return;
         }
-        if !self.is_authoritative() {
+        if self.presentation_topology().is_join_client() {
             self.network.send_respawn_request();
             return;
         }
-        if self.world_rules.hardcore && self.player_state.is_dead {
-            // Hardcore worlds never respawn a dead player into Survival.  The
-            // permitted recovery path is a read-only Spectator observer.
-            self.player_state.is_dead = false;
-            self.player_state.health = self.player_state.max_health;
-            self.set_game_mode(GameMode::Spectator);
-            self.sync_cursor_mode();
-            return;
-        }
-        self.player_physics.set_flying(false);
-        self.jump_taps.reset();
-
-        let mut spawn_pos = None;
-        let mut spawn_dim = crate::dimension::Dimension::Overworld;
-
-        if let (Some(bed_p), Some(dim)) = (
-            self.player_state.spawn_point,
-            self.player_state.spawn_dimension,
-        ) {
-            let chunk_pos = (bed_p[0], bed_p[1], bed_p[2]);
-            if self
-                .chunk_manager
-                .get_block(chunk_pos.0, chunk_pos.1, chunk_pos.2)
-                == crate::world::BlockType::Bed
-            {
-                let (safe_p, safe) =
-                    crate::world::find_safe_spawn_position(&self.chunk_manager, chunk_pos);
-                if safe {
-                    spawn_pos = Some(safe_p);
-                    spawn_dim = dim;
-                }
-            }
-            if spawn_pos.is_none() {
-                self.player_state.spawn_point = None;
-                self.player_state.spawn_dimension = None;
-                println!("[Debug] Your home bed was missing or obstructed");
-            }
-        }
-
-        if spawn_pos.is_none() {
-            spawn_dim = crate::dimension::Dimension::Overworld;
-            let target_p = (self.world_spawn.0, self.world_spawn.1, self.world_spawn.2);
-            let (safe_p, safe) =
-                crate::world::find_safe_spawn_position(&self.chunk_manager, target_p);
-            if safe {
-                spawn_pos = Some(safe_p);
-            } else {
-                self.chunk_manager.set_block(
-                    target_p.0,
-                    target_p.1 - 1,
-                    target_p.2,
-                    crate::world::BlockType::Cobblestone,
-                );
-                self.chunk_manager.set_block(
-                    target_p.0,
-                    target_p.1,
-                    target_p.2,
-                    crate::world::BlockType::Air,
-                );
-                self.chunk_manager.set_block(
-                    target_p.0,
-                    target_p.1 + 1,
-                    target_p.2,
-                    crate::world::BlockType::Air,
-                );
-                spawn_pos = Some(Vec3::new(
-                    target_p.0 as f32 + 0.5,
-                    target_p.1 as f32,
-                    target_p.2 as f32 + 0.5,
-                ));
-            }
-        }
-
-        if self.current_dimension != spawn_dim {
-            self.switch_dimension(spawn_dim);
-        }
-
-        let target_vec = spawn_pos.unwrap_or_else(|| Vec3::new(8.0, 80.0, 8.0));
-        self.player_physics.position = target_vec;
-        self.player_physics.velocity = glam::Vec3::ZERO;
-        self.player_physics.on_ground = false;
-        self.player_physics.highest_y = target_vec.y;
-
-        self.player_state.reset_for_respawn();
-        self.void_damage_timer = 0.0;
-
-        self.sync_cursor_mode();
-
-        println!("[Debug] Player respawned at spawn point");
     }
 
     pub fn handle_death_click(&mut self) {
@@ -16465,11 +4822,7 @@ impl State {
     pub fn handle_primary_press(&mut self) -> bool {
         self.hand_swing_started_at = self.total_time;
         self.hand_swing_until = self.total_time + 0.25;
-        let melee_consumed = if self.has_in_process_runtime() || !self.is_authoritative() {
-            self.submit_local_authority_combat()
-        } else {
-            self.is_authoritative() && self.try_melee_attack()
-        };
+        let melee_consumed = self.submit_local_authority_combat();
         let decision = primary_press_decision(self.game_mode, melee_consumed);
         if decision.instant_break {
             self.handle_click(true);
@@ -16504,121 +4857,6 @@ impl State {
         true
     }
 
-    fn try_melee_attack(&mut self) -> bool {
-        if !self.is_authoritative() || self.has_in_process_runtime() {
-            return false;
-        }
-
-        let direction = Vec3::new(
-            self.camera.yaw.cos() * self.camera.pitch.cos(),
-            self.camera.pitch.sin(),
-            self.camera.yaw.sin() * self.camera.pitch.cos(),
-        )
-        .normalize_or_zero();
-        let Some(entity_id) = closest_melee_target(
-            &self.entity_manager,
-            self.camera.position,
-            direction,
-            MELEE_REACH,
-        ) else {
-            return false;
-        };
-
-        if self
-            .entity_manager
-            .get_by_id(entity_id)
-            .is_some_and(|entity| {
-                entity.entity_type == crate::entity::EntityType::RemotePlayer
-                    && !self.game_mode_policy().can_attack_players
-            })
-        {
-            return false;
-        }
-
-        let held_stack = self.inventory.hotbar[self.inventory.selected];
-        let held_item = held_stack
-            .map(|stack| stack.item)
-            .unwrap_or(crate::inventory::Item::Air);
-        let enchantments = held_stack
-            .map(|stack| stack.enchantments)
-            .unwrap_or_default();
-        let base_damage = held_item
-            .tool_properties()
-            .map(|tool| tool.damage)
-            .unwrap_or(1.0)
-            + crate::enchantment::attack_damage_bonus(&enchantments)
-            + self.potion_effects.strength_bonus();
-
-        let (damage, knockback_mult, is_full_charge) = crate::player::calculate_attack_damage(
-            base_damage,
-            self.player_state.attack_cooldown_ticks,
-            self.player_state.attack_cooldown_max_ticks,
-        );
-
-        self.player_state.attack_cooldown_ticks = 0;
-        self.player_state.attack_cooldown_max_ticks = held_item.attack_cooldown_ticks();
-
-        let knockback = (8.0
-            + enchantments.level_of(crate::enchantment::Enchantment::Knockback(1)) as f32 * 3.0)
-            * knockback_mult;
-        let fire_level = enchantments.level_of(crate::enchantment::Enchantment::FireAspect(1));
-
-        let (entity_type, remaining_health, killed, kill) = {
-            let Some(entity) = self.entity_manager.get_by_id_mut(entity_id) else {
-                return false;
-            };
-            let MeleeImpact::Damaged { killed } =
-                apply_melee_impact(entity, direction, damage, knockback, fire_level)
-            else {
-                return true;
-            };
-            let kill = if killed {
-                claim_standard_player_kill(entity)
-            } else {
-                None
-            };
-            (entity.entity_type, entity.health, killed, kill)
-        };
-
-        println!(
-            "[Debug] Hit {:?}, health={:.1}",
-            entity_type, remaining_health
-        );
-
-        if killed {
-            println!("[Debug] Killed {:?}", entity_type);
-            if let Some(kill) = kill {
-                let looting = enchantments.level_of(crate::enchantment::Enchantment::Looting(1));
-                self.settle_standard_player_kill(kill, looting);
-            }
-        }
-
-        // Sweep attack if full charge and holding a sword
-        let is_sword = held_item
-            .tool_properties()
-            .map_or(false, |t| t.tool_type == ToolType::Sword);
-        if is_full_charge && is_sword {
-            if let Some(target_entity) = self.entity_manager.get_by_id(entity_id) {
-                let target_pos = target_entity.position;
-                let sweep_damage = 1.0 + crate::enchantment::attack_damage_bonus(&enchantments);
-                let nearby_ids: Vec<_> = self
-                    .entity_manager
-                    .query_radius(target_pos, 1.0)
-                    .filter(|e| e.id != entity_id && e.entity_type.is_hostile() && e.health > 0.0)
-                    .map(|e| e.id)
-                    .collect();
-                for nearby_id in nearby_ids {
-                    if let Some(nearby) = self.entity_manager.get_by_id_mut(nearby_id) {
-                        nearby.health = (nearby.health - sweep_damage).max(0.0);
-                    }
-                }
-            }
-        }
-
-        self.damage_selected_tool(entity_id as u32 ^ self.total_time.to_bits());
-        true
-    }
-
     pub fn handle_secondary_press(&mut self) {
         if self.is_paused
             || self.inventory.is_open
@@ -16638,10 +4876,7 @@ impl State {
             return;
         }
 
-        if (self.has_in_process_runtime() || !self.is_authoritative())
-            && main_item != Item::Air
-            && !main_item.properties().is_block
-        {
+        if main_item != Item::Air && !main_item.properties().is_block {
             let _ = self.submit_local_authority_operation(
                 crate::network::protocol::GameplayOperation::ItemUse {
                     item: main_item as u32,
@@ -16651,7 +4886,7 @@ impl State {
             return;
         }
 
-        if !self.is_authoritative() && main_item == Item::Shield {
+        if self.presentation_topology().is_join_client() && main_item == Item::Shield {
             let _ = self.submit_local_authority_operation(
                 crate::network::protocol::GameplayOperation::UseState {
                     hand: 0,
@@ -16743,10 +4978,7 @@ impl State {
 
         // If mainhand didn't start an item use action, check Offhand item
         if self.player_state.using_item.is_none() {
-            if (self.has_in_process_runtime() || !self.is_authoritative())
-                && offhand_item != Item::Air
-                && !offhand_item.properties().is_block
-            {
+            if offhand_item != Item::Air && !offhand_item.properties().is_block {
                 let _ = self.submit_local_authority_operation(
                     crate::network::protocol::GameplayOperation::ItemUse {
                         item: offhand_item as u32,
@@ -16755,7 +4987,7 @@ impl State {
                 );
                 return;
             }
-            if !self.is_authoritative() && offhand_item == Item::Shield {
+            if self.presentation_topology().is_join_client() && offhand_item == Item::Shield {
                 let _ = self.submit_local_authority_operation(
                     crate::network::protocol::GameplayOperation::UseState {
                         hand: 1,
@@ -16821,7 +5053,7 @@ impl State {
             self.player_state.using_item = None;
             return;
         }
-        if !self.is_authoritative() {
+        if self.presentation_topology().is_join_client() {
             let hand = if self
                 .player_state
                 .using_item
@@ -16840,1330 +5072,24 @@ impl State {
             self.player_state.using_item = None;
             return;
         }
-        let Some(using) = self.player_state.using_item.take() else {
-            return;
-        };
-
-        if using.action == crate::player::ItemUseAction::Bow {
-            if let Some((speed, damage, is_critical)) =
-                crate::player::calculate_bow_shot(using.ticks_held)
-            {
-                let held_stack = match using.slot {
-                    crate::player::HandSlot::MainHand(i) => {
-                        self.inventory.hotbar.get(i).copied().flatten()
-                    }
-                    crate::player::HandSlot::OffHand => self.inventory.offhand,
-                };
-                let infinity = held_stack
-                    .map(|s| {
-                        s.enchantments
-                            .level_of(crate::enchantment::Enchantment::Infinity)
-                            > 0
-                    })
-                    .unwrap_or(false);
-
-                let has_arrow = self
-                    .inventory
-                    .offhand
-                    .map(|s| s.item == Item::Arrow)
-                    .unwrap_or(false)
-                    || self.inventory.find_item(Item::Arrow).is_some();
-
-                if self.game_mode == GameMode::Creative || has_arrow {
-                    if self.game_mode != GameMode::Creative && !infinity {
-                        if self
-                            .inventory
-                            .offhand
-                            .map(|s| s.item == Item::Arrow)
-                            .unwrap_or(false)
-                        {
-                            if let Some(ref mut offhand) = self.inventory.offhand {
-                                if offhand.count > 1 {
-                                    offhand.count -= 1;
-                                } else {
-                                    self.inventory.offhand = None;
-                                }
-                            }
-                        } else {
-                            self.inventory.remove_one(Item::Arrow);
-                        }
-                    }
-
-                    if self.is_authoritative() && !self.has_in_process_runtime() {
-                        let dir = Vec3::new(
-                            self.camera.yaw.cos() * self.camera.pitch.cos(),
-                            self.camera.pitch.sin(),
-                            self.camera.yaw.sin() * self.camera.pitch.cos(),
-                        )
-                        .normalize_or_zero();
-                        let id = self.entity_manager.spawn(
-                            crate::entity::EntityType::Arrow,
-                            self.camera.position + dir * 0.6,
-                        );
-                        if let Some(arrow) = self.entity_manager.get_by_id_mut(id) {
-                            arrow.velocity = dir * speed;
-                            arrow.friendly_projectile = true;
-                            arrow.projectile_damage = damage;
-                            if is_critical {
-                                arrow.projectile_damage += 1.0;
-                            }
-                        }
-                    }
-                    self.audio_manager
-                        .play_sound(crate::audio::SoundId::ArrowShoot);
-                }
-            }
-        }
+        self.player_state.using_item = None;
     }
 
     pub fn handle_click(&mut self, is_left_click: bool) {
-        if !self.is_authoritative() {
-            let direction = Vec3::new(
-                self.camera.yaw.cos() * self.camera.pitch.cos(),
-                self.camera.pitch.sin(),
-                self.camera.yaw.sin() * self.camera.pitch.cos(),
-            )
-            .normalize_or_zero();
-            let target_policy = if is_left_click {
-                RaycastTargetPolicy::Break
-            } else {
-                RaycastTargetPolicy::Place
-            };
-            if let Some(hit) = raycast(
-                self.camera.position,
-                direction,
-                5.0,
-                &self.chunk_manager,
-                target_policy,
-            ) {
-                if !is_left_click {
-                    let clicked = (
-                        hit.block_pos.x as i32,
-                        hit.block_pos.y as i32,
-                        hit.block_pos.z as i32,
-                    );
-                    let clicked_block = self
-                        .chunk_manager
-                        .get_block(clicked.0, clicked.1, clicked.2);
-                    let held_item = self.inventory.hotbar[self.inventory.selected]
-                        .map(|stack| stack.item)
-                        .unwrap_or(Item::Air);
-                    if clicked_block == BlockType::Obsidian && held_item == Item::FlintAndSteel {
-                        let target = hit.block_pos + hit.normal;
-                        let _ = self.submit_local_authority_block_action(
-                            crate::network::protocol::BlockActionKind::IgnitePortal,
-                            target.x as i32,
-                            target.y as i32,
-                            target.z as i32,
-                            [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
-                            BlockType::Fire,
-                        );
-                        return;
-                    }
-                    if clicked_block == BlockType::EndPortalFrame && held_item == Item::EyeOfEnder {
-                        let _ = self.submit_local_authority_block_action(
-                            crate::network::protocol::BlockActionKind::InsertEnderEye,
-                            clicked.0,
-                            clicked.1,
-                            clicked.2,
-                            [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
-                            BlockType::EndPortalFrameFilled,
-                        );
-                        return;
-                    }
-                    if clicked_block == BlockType::Bed {
-                        let _ = self.submit_local_authority_operation(
-                            crate::network::protocol::GameplayOperation::Sleep {
-                                x: clicked.0,
-                                y: clicked.1,
-                                z: clicked.2,
-                            },
-                        );
-                        return;
-                    }
-                    if matches!(
-                        clicked_block,
-                        BlockType::Chest
-                            | BlockType::EndCityChest
-                            | BlockType::Furnace
-                            | BlockType::FurnaceLit
-                            | BlockType::Hopper
-                            | BlockType::Dispenser
-                            | BlockType::Dropper
-                            | BlockType::CraftingTable
-                            | BlockType::EnchantingTable
-                            | BlockType::BrewingStand
-                            | BlockType::Anvil
-                    ) {
-                        // `open_chest` emits the typed Container::Open
-                        // envelope for Join Clients and never opens a local
-                        // inventory before an authority result arrives.
-                        self.open_chest(clicked);
-                        return;
-                    }
-                }
-                if is_left_click {
-                    let _ = self.submit_local_authority_block_action(
-                        crate::network::protocol::BlockActionKind::StartBreak,
-                        hit.block_pos.x as i32,
-                        hit.block_pos.y as i32,
-                        hit.block_pos.z as i32,
-                        [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
-                        BlockType::Air,
-                    );
-                    self.mining_target = Some(hit.block_pos);
-                    self.mining_progress = 0.0;
-                    self.mining_held = self.selected_mining_held();
-                } else if let Some(block) = self.inventory.get_selected_block() {
-                    let target = hit.block_pos + hit.normal;
-                    let (x, y, z) = (target.x as i32, target.y as i32, target.z as i32);
-                    if !self.can_place_block_at(x, y, z, block) {
-                        return;
-                    }
-                    let _ = self.submit_local_authority_block_action(
-                        crate::network::protocol::BlockActionKind::Place,
-                        x,
-                        y,
-                        z,
-                        [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
-                        block,
-                    );
-                }
-            }
-            return;
-        }
-
-        if self.has_in_process_runtime() {
-            self.handle_authority_click(is_left_click);
-            return;
-        }
-
-        if !is_left_click {
-            let held_stack = self.inventory.hotbar[self.inventory.selected];
-            let held_item = held_stack
-                .map(|s| s.item)
-                .unwrap_or(crate::inventory::Item::Air);
-            if let Some(potion) = held_stack.and_then(|stack| stack.potion) {
-                if potion.splash || held_item == Item::SplashPotion {
-                    let dir = Vec3::new(
-                        self.camera.yaw.cos() * self.camera.pitch.cos(),
-                        self.camera.pitch.sin(),
-                        self.camera.yaw.sin() * self.camera.pitch.cos(),
-                    )
-                    .normalize_or_zero();
-                    let id = self.entity_manager.spawn(
-                        crate::entity::EntityType::SplashPotion,
-                        self.camera.position + dir * 0.5,
-                    );
-                    if let Some(projectile) = self.entity_manager.get_by_id_mut(id) {
-                        projectile.velocity = dir * 12.0;
-                        projectile.potion = Some(potion);
-                        projectile.life_time = 3.0;
-                    }
-                } else {
-                    let healing = self.potion_effects.apply(potion);
-                    self.player_state.health =
-                        (self.player_state.health + healing).min(self.player_state.max_health);
-                }
-                self.inventory
-                    .use_selected_item(self.game_mode == GameMode::Creative);
-                return;
-            }
-            if held_item == Item::MilkBucket {
-                self.potion_effects.active.clear();
-                if self.game_mode_policy().hunger_enabled {
-                    self.inventory.replace_selected_item(Item::Bucket);
-                }
-                return;
-            }
-            if held_item == Item::Bow {
-                let enchantments = held_stack
-                    .map(|stack| stack.enchantments)
-                    .unwrap_or_default();
-                let infinity = enchantments.level_of(crate::enchantment::Enchantment::Infinity) > 0;
-                if self.game_mode == GameMode::Creative
-                    || infinity
-                    || self.inventory.remove_one(Item::Arrow)
-                {
-                    let dir = Vec3::new(
-                        self.camera.yaw.cos() * self.camera.pitch.cos(),
-                        self.camera.pitch.sin(),
-                        self.camera.yaw.sin() * self.camera.pitch.cos(),
-                    )
-                    .normalize_or_zero();
-                    let id = self.entity_manager.spawn(
-                        crate::entity::EntityType::Arrow,
-                        self.camera.position + dir * 0.6,
-                    );
-                    if let Some(arrow) = self.entity_manager.get_by_id_mut(id) {
-                        arrow.velocity = dir * 22.0;
-                        arrow.friendly_projectile = true;
-                        arrow.projectile_damage = 4.0
-                            + enchantments.level_of(crate::enchantment::Enchantment::Power(1))
-                                as f32
-                                * 1.25;
-                    }
-                }
-                return;
-            }
-            if let Some(food_props) = held_item.food_properties() {
-                if self.player_state.hunger < 20.0
-                    || food_props.always_edible
-                    || self.game_mode == GameMode::Creative
-                {
-                    if let Some(ref mut eating) = self.player_state.eating_state {
-                        if eating.item == held_item && eating.slot == self.inventory.selected {
-                            eating.ticks_remaining = eating.ticks_remaining.saturating_sub(1);
-                            if eating.ticks_remaining == 0 {
-                                self.player_state.hunger =
-                                    (self.player_state.hunger + food_props.hunger).min(20.0);
-                                self.player_state.saturation = (self.player_state.saturation
-                                    + food_props.saturation)
-                                    .min(self.player_state.hunger);
-                                let is_creative = self.game_mode == GameMode::Creative;
-                                self.inventory.use_selected_item(is_creative);
-                                if let Some(ret) = food_props.return_item {
-                                    let _ = self
-                                        .inventory
-                                        .add_stack(crate::inventory::ItemStack::new(ret, 1));
-                                }
-                                self.trigger_advancement(
-                                    crate::advancements::AdvancementTrigger::EatFood(held_item),
-                                );
-                                self.player_state.eating_state = None;
-                            }
-                            return;
-                        }
-                    } else {
-                        self.player_state.eating_state = Some(crate::player::ActiveEatingState {
-                            item: held_item,
-                            slot: self.inventory.selected,
-                            ticks_remaining: food_props.use_duration_ticks,
-                            total_duration: food_props.use_duration_ticks,
-                        });
-                        return;
-                    }
-                }
-            }
-        }
-
-        let dir = Vec3::new(
-            self.camera.yaw.cos() * self.camera.pitch.cos(),
-            self.camera.pitch.sin(),
-            self.camera.yaw.sin() * self.camera.pitch.cos(),
-        )
-        .normalize_or_zero();
-
-        if !is_left_click {
-            let mut closest_entity: Option<(u64, f32)> = None;
-            for entity in self.entity_manager.query_radius(self.camera.position, 4.0) {
-                if entity.entity_type == crate::entity::EntityType::Arrow
-                    || entity.entity_type == crate::entity::EntityType::HeartParticle
-                {
-                    continue;
-                }
-                let aabb = entity.get_aabb();
-                if let Some(dist) =
-                    crate::entity::ray_intersects_aabb(self.camera.position, dir, &aabb)
-                {
-                    if dist <= 4.0 {
-                        if let Some((_, closest_dist)) = closest_entity {
-                            if dist < closest_dist {
-                                closest_entity = Some((entity.id, dist));
-                            }
-                        } else {
-                            closest_entity = Some((entity.id, dist));
-                        }
-                    }
-                }
-            }
-
-            if let Some((entity_id, _)) = closest_entity {
-                if let Some(entity) = self.entity_manager.get_by_id_mut(entity_id) {
-                    let held_stack = self.inventory.hotbar[self.inventory.selected].clone();
-                    let held_item = held_stack
-                        .map(|s| s.item)
-                        .unwrap_or(crate::inventory::Item::Air);
-
-                    match entity.entity_type {
-                        crate::entity::EntityType::Pig => {
-                            if held_item == crate::inventory::Item::Carrot
-                                && entity.age >= 0.0
-                                && entity.breeding_timer <= 0.0
-                                && entity.breed_cooldown <= 0.0
-                            {
-                                entity.breeding_timer = 20.0;
-                                self.inventory.remove_selected_item(1);
-                                println!("[Debug] Pig entered love mode!");
-                                return;
-                            }
-                        }
-                        crate::entity::EntityType::Cow => {
-                            if held_item == crate::inventory::Item::Wheat
-                                && entity.age >= 0.0
-                                && entity.breeding_timer <= 0.0
-                                && entity.breed_cooldown <= 0.0
-                            {
-                                entity.breeding_timer = 20.0;
-                                self.inventory.remove_selected_item(1);
-                                println!("[Debug] Cow entered love mode!");
-                                return;
-                            }
-                            if held_item == crate::inventory::Item::Bucket {
-                                self.inventory
-                                    .replace_selected_item(crate::inventory::Item::MilkBucket);
-                                println!("[Debug] Milked a Cow!");
-                                return;
-                            }
-                        }
-                        crate::entity::EntityType::Sheep => {
-                            if held_item == crate::inventory::Item::Wheat
-                                && entity.age >= 0.0
-                                && entity.breeding_timer <= 0.0
-                                && entity.breed_cooldown <= 0.0
-                            {
-                                entity.breeding_timer = 20.0;
-                                self.inventory.remove_selected_item(1);
-                                println!("[Debug] Sheep entered love mode!");
-                                return;
-                            }
-                            if held_item == crate::inventory::Item::Shears && entity.has_wool {
-                                let wool_position = entity.position;
-                                entity.has_wool = false;
-                                self.store_or_drop_generated_item(
-                                    crate::inventory::Item::Wool,
-                                    wool_position,
-                                );
-                                println!("[Debug] Sheared a Sheep!");
-                                if let Some(stack) =
-                                    &mut self.inventory.hotbar[self.inventory.selected]
-                                {
-                                    if stack.durability > 1 {
-                                        stack.durability -= 1;
-                                    } else {
-                                        self.inventory.hotbar[self.inventory.selected] = None;
-                                    }
-                                }
-                                return;
-                            }
-                        }
-                        crate::entity::EntityType::Chicken => {
-                            if held_item == crate::inventory::Item::Seeds
-                                && entity.age >= 0.0
-                                && entity.breeding_timer <= 0.0
-                                && entity.breed_cooldown <= 0.0
-                            {
-                                entity.breeding_timer = 20.0;
-                                self.inventory.remove_selected_item(1);
-                                println!("[Debug] Chicken entered love mode!");
-                                return;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        let target_policy = if is_left_click {
-            RaycastTargetPolicy::Break
-        } else {
-            RaycastTargetPolicy::Place
-        };
-        if let Some(hit) = raycast(
-            self.camera.position,
-            dir,
-            5.0,
-            &self.chunk_manager,
-            target_policy,
-        ) {
-            let target = if is_left_click {
-                hit.block_pos
-            } else {
-                let clicked_block = self.chunk_manager.get_block(
-                    hit.block_pos.x as i32,
-                    hit.block_pos.y as i32,
-                    hit.block_pos.z as i32,
-                );
-                let held = self.inventory.hotbar[self.inventory.selected];
-                let clicked_pos = (
-                    hit.block_pos.x as i32,
-                    hit.block_pos.y as i32,
-                    hit.block_pos.z as i32,
-                );
-                let held_item = held.map(|stack| stack.item).unwrap_or(Item::Air);
-                // Hoe tilling
-                if matches!(clicked_block, BlockType::Grass | BlockType::Dirt)
-                    && held_item.tool_properties().map(|t| t.tool_type)
-                        == Some(crate::inventory::ToolType::Hoe)
-                {
-                    let block_above = self.chunk_manager.get_block(
-                        clicked_pos.0,
-                        clicked_pos.1 + 1,
-                        clicked_pos.2,
-                    );
-                    if !block_above.properties().is_solid {
-                        self.apply_block_changes(&[(clicked_pos, BlockType::Farmland)]);
-                        self.chunk_manager.set_block_state(
-                            clicked_pos.0,
-                            clicked_pos.1,
-                            clicked_pos.2,
-                            0,
-                        );
-                        if let Some(stack) = &mut self.inventory.hotbar[self.inventory.selected] {
-                            if stack.durability > 1 {
-                                stack.durability -= 1;
-                            } else {
-                                self.inventory.hotbar[self.inventory.selected] = None;
-                            }
-                        }
-                        return;
-                    }
-                }
-
-                // Bone Meal usage on crops
-                if held_item == Item::BoneMeal
-                    && matches!(
-                        clicked_block,
-                        BlockType::WheatCrop | BlockType::CarrotCrop | BlockType::PotatoCrop
-                    )
-                {
-                    let cur_state = self.chunk_manager.get_block_state(
-                        clicked_pos.0,
-                        clicked_pos.1,
-                        clicked_pos.2,
-                    );
-                    let age = cur_state & 0b111;
-                    if age < 7 {
-                        let new_age = (age + 3).min(7);
-                        self.chunk_manager.set_block_state(
-                            clicked_pos.0,
-                            clicked_pos.1,
-                            clicked_pos.2,
-                            new_age,
-                        );
-                        self.broadcast_block_change(
-                            clicked_pos.0,
-                            clicked_pos.1,
-                            clicked_pos.2,
-                            clicked_block,
-                        );
-                        self.inventory
-                            .use_selected_item(self.game_mode == GameMode::Creative);
-                        return;
-                    }
-                }
-
-                // Planting seeds / crops on Farmland
-                if clicked_block == BlockType::Farmland
-                    && matches!(held_item, Item::Seeds | Item::Carrot | Item::Potato)
-                {
-                    let plant_pos = (clicked_pos.0, clicked_pos.1 + 1, clicked_pos.2);
-                    if self
-                        .chunk_manager
-                        .get_block(plant_pos.0, plant_pos.1, plant_pos.2)
-                        == BlockType::Air
-                    {
-                        let crop_block = match held_item {
-                            Item::Seeds => BlockType::WheatCrop,
-                            Item::Carrot => BlockType::CarrotCrop,
-                            _ => BlockType::PotatoCrop,
-                        };
-                        self.apply_block_changes(&[(plant_pos, crop_block)]);
-                        self.chunk_manager.set_block_state(
-                            plant_pos.0,
-                            plant_pos.1,
-                            plant_pos.2,
-                            0,
-                        );
-                        self.inventory
-                            .use_selected_item(self.game_mode == GameMode::Creative);
-                        return;
-                    }
-                }
-                if clicked_block == BlockType::Obsidian && held_item == Item::FlintAndSteel {
-                    if let Some(interior) =
-                        crate::dimension::detect_nether_frame(clicked_pos, |x, y, z| {
-                            self.chunk_manager.get_block(x, y, z)
-                        })
-                    {
-                        let changes: Vec<_> = interior
-                            .into_iter()
-                            .map(|position| (position, BlockType::NetherPortal))
-                            .collect();
-                        self.apply_block_changes(&changes);
-                        self.inventory
-                            .use_selected_item(self.game_mode == GameMode::Creative);
-                        return;
-                    }
-                }
-                if clicked_block == BlockType::EndPortalFrame && held_item == Item::EyeOfEnder {
-                    self.apply_block_changes(&[(clicked_pos, BlockType::EndPortalFrameFilled)]);
-                    self.inventory
-                        .use_selected_item(self.game_mode == GameMode::Creative);
-                    if let Some(interior) =
-                        crate::dimension::detect_completed_end_portal(clicked_pos, |x, y, z| {
-                            self.chunk_manager.get_block(x, y, z)
-                        })
-                    {
-                        let changes: Vec<_> = interior
-                            .into_iter()
-                            .map(|position| (position, BlockType::EndPortal))
-                            .collect();
-                        self.apply_block_changes(&changes);
-                    }
-                    return;
-                }
-                if matches!(clicked_block, BlockType::Obsidian | BlockType::Bedrock)
-                    && held_item == Item::EndCrystal
-                {
-                    self.entity_manager.spawn(
-                        crate::entity::EntityType::EndCrystal,
-                        Vec3::new(
-                            clicked_pos.0 as f32 + 0.5,
-                            clicked_pos.1 as f32 + 1.0,
-                            clicked_pos.2 as f32 + 0.5,
-                        ),
-                    );
-                    self.inventory
-                        .use_selected_item(self.game_mode == GameMode::Creative);
-                    return;
-                }
-                if clicked_block == BlockType::RespawnAnchor {
-                    if held_item == Item::Glowstone || held_item == Item::GlowstoneDust {
-                        self.inventory
-                            .use_selected_item(self.game_mode == GameMode::Creative);
-                        println!("[Respawn Anchor] Charged with Glowstone!");
-                        return;
-                    }
-                    if self.current_dimension == crate::dimension::Dimension::Nether {
-                        self.player_state.spawn_point =
-                            Some([clicked_pos.0, clicked_pos.1 + 1, clicked_pos.2]);
-                        self.player_state.spawn_dimension =
-                            Some(crate::dimension::Dimension::Nether);
-                        println!(
-                            "[Respawn Anchor] Nether spawn point set to ({}, {}, {})",
-                            clicked_pos.0,
-                            clicked_pos.1 + 1,
-                            clicked_pos.2
-                        );
-                    } else {
-                        self.apply_block_changes(&[(clicked_pos, BlockType::Air)]);
-                        self.take_damage(50.0, DamageSource::Mob);
-                        println!("[Respawn Anchor] Exploded in non-Nether dimension!");
-                    }
-                    return;
-                }
-                if held_item == Item::EyeOfEnder && clicked_block != BlockType::EndPortalFrame {
-                    if let Some((sx, sy, sz)) = crate::structure::locate_structure(
-                        crate::structure::StructureId::Stronghold,
-                        (
-                            self.camera.position.x as i32,
-                            self.camera.position.y as i32,
-                            self.camera.position.z as i32,
-                        ),
-                        self.world_seed,
-                        self.current_dimension,
-                    ) {
-                        println!(
-                            "[Eye of Ender] Stronghold located at ({}, {}, {})",
-                            sx, sy, sz
-                        );
-                    }
-                    return;
-                }
-                if clicked_block == BlockType::Bed {
-                    if matches!(&self.network, NetworkHandle::Client { .. }) {
-                        self.network.send_sleep_request(
-                            clicked_pos.0,
-                            clicked_pos.1,
-                            clicked_pos.2,
-                        );
-                        return;
-                    }
-                    let bed_pos = clicked_pos;
-                    if self.current_dimension != crate::dimension::Dimension::Overworld {
-                        self.apply_block_changes(&[(bed_pos, BlockType::Air)]);
-                        self.take_damage(50.0, DamageSource::Mob);
-                        println!("[Debug] Bed exploded in non-Overworld dimension!");
-                    } else {
-                        let bstate = crate::world::BlockState::decode(
-                            self.chunk_manager
-                                .get_block_state(bed_pos.0, bed_pos.1, bed_pos.2),
-                        );
-                        let head_pos = if bstate.is_top {
-                            bed_pos
-                        } else {
-                            (
-                                bed_pos.0 + bstate.facing.dx(),
-                                bed_pos.1,
-                                bed_pos.2 + bstate.facing.dz(),
-                            )
-                        };
-                        self.player_state.spawn_point = Some([head_pos.0, head_pos.1, head_pos.2]);
-                        self.player_state.spawn_dimension =
-                            Some(crate::dimension::Dimension::Overworld);
-
-                        let time_of_day = self.world_time.ticks % 24000;
-                        let is_night = time_of_day >= 12541 && time_of_day <= 23458;
-                        let is_storm = self.weather.is_thundering();
-
-                        if !is_night && !is_storm {
-                            println!(
-                                "[Game] Respawn point set. You can only sleep at night or during thunderstorms."
-                            );
-                        } else {
-                            let pos_vec = Vec3::new(
-                                bed_pos.0 as f32 + 0.5,
-                                bed_pos.1 as f32 + 0.5,
-                                bed_pos.2 as f32 + 0.5,
-                            );
-                            let nearby_hostiles = self
-                                .entity_manager
-                                .query_radius(pos_vec, 8.0)
-                                .any(|e| e.entity_type.is_hostile() && e.health > 0.0);
-                            if nearby_hostiles {
-                                println!("[Game] You may not rest now, there are monsters nearby.");
-                            } else {
-                                self.player_state.is_sleeping = true;
-                                self.player_state.sleep_timer = 0.0;
-                                self.player_state.bed_pos = Some([bed_pos.0, bed_pos.1, bed_pos.2]);
-                                println!("[Game] Sleeping...");
-                            }
-                        }
-                    }
-                    return;
-                }
-                if clicked_block == BlockType::Water
-                    && held.is_some_and(|stack| stack.item == Item::GlassBottle)
-                {
-                    let selected = self.inventory.selected;
-                    let original_selected = self.inventory.hotbar[selected];
-                    self.inventory
-                        .use_selected_item(self.game_mode == GameMode::Creative);
-                    let mut water_bottle = ItemStack::new(Item::Potion, 1);
-                    water_bottle.potion = Some(crate::brewing::PotionData::water());
-                    if self.inventory.add_stack(water_bottle).is_some() {
-                        self.inventory.hotbar[selected] = original_selected;
-                    }
-                    return;
-                }
-                if matches!(
-                    clicked_block,
-                    BlockType::Chest
-                        | BlockType::EndCityChest
-                        | BlockType::Furnace
-                        | BlockType::FurnaceLit
-                        | BlockType::Hopper
-                        | BlockType::Dispenser
-                        | BlockType::Dropper
-                ) {
-                    let pos = (
-                        hit.block_pos.x as i32,
-                        hit.block_pos.y as i32,
-                        hit.block_pos.z as i32,
-                    );
-                    self.open_chest(pos);
-                    return;
-                }
-                if clicked_block == BlockType::CraftingTable {
-                    self.inventory.is_table_open = true;
-                    self.inventory.craft_input = vec![None; 9];
-                    self.open_inventory();
-                    return;
-                }
-                if matches!(
-                    clicked_block,
-                    BlockType::EnchantingTable | BlockType::BrewingStand | BlockType::Anvil
-                ) {
-                    let kind = match clicked_block {
-                        BlockType::EnchantingTable => StationKind::Enchanting,
-                        BlockType::BrewingStand => StationKind::Brewing,
-                        _ => StationKind::Anvil,
-                    };
-                    self.open_station(kind, hit.block_pos);
-                    return;
-                }
-                if matches!(
-                    clicked_block,
-                    BlockType::OakDoor
-                        | BlockType::OakDoorOpen
-                        | BlockType::OakTrapdoor
-                        | BlockType::OakTrapdoorOpen
-                ) {
-                    let pos = (
-                        hit.block_pos.x as i32,
-                        hit.block_pos.y as i32,
-                        hit.block_pos.z as i32,
-                    );
-                    let (target_block, sound) = match clicked_block {
-                        BlockType::OakDoor => {
-                            (BlockType::OakDoorOpen, crate::audio::SoundId::UiClick)
-                        }
-                        BlockType::OakDoorOpen => {
-                            (BlockType::OakDoor, crate::audio::SoundId::UiClick)
-                        }
-                        BlockType::OakTrapdoor => {
-                            (BlockType::OakTrapdoorOpen, crate::audio::SoundId::UiClick)
-                        }
-                        BlockType::OakTrapdoorOpen => {
-                            (BlockType::OakTrapdoor, crate::audio::SoundId::UiClick)
-                        }
-                        _ => unreachable!(),
-                    };
-                    let cur_raw = self.chunk_manager.get_block_state(pos.0, pos.1, pos.2);
-                    let mut bstate = crate::world::BlockState::decode(cur_raw);
-                    bstate.is_open = !bstate.is_open;
-                    let new_state_raw = bstate.encode();
-
-                    self.chunk_manager
-                        .set_block(pos.0, pos.1, pos.2, target_block);
-                    self.chunk_manager
-                        .set_block_state(pos.0, pos.1, pos.2, new_state_raw);
-                    self.broadcast_block_change(pos.0, pos.1, pos.2, target_block);
-
-                    if matches!(clicked_block, BlockType::OakDoor | BlockType::OakDoorOpen) {
-                        let other_y = if bstate.is_top { pos.1 - 1 } else { pos.1 + 1 };
-                        let other_block = self.chunk_manager.get_block(pos.0, other_y, pos.2);
-                        if matches!(other_block, BlockType::OakDoor | BlockType::OakDoorOpen) {
-                            let other_raw =
-                                self.chunk_manager.get_block_state(pos.0, other_y, pos.2);
-                            let mut other_bstate = crate::world::BlockState::decode(other_raw);
-                            other_bstate.is_open = bstate.is_open;
-                            let other_target = if bstate.is_open {
-                                BlockType::OakDoorOpen
-                            } else {
-                                BlockType::OakDoor
-                            };
-                            self.chunk_manager
-                                .set_block(pos.0, other_y, pos.2, other_target);
-                            self.chunk_manager.set_block_state(
-                                pos.0,
-                                other_y,
-                                pos.2,
-                                other_bstate.encode(),
-                            );
-                            self.broadcast_block_change(pos.0, other_y, pos.2, other_target);
-                        }
-                    }
-
-                    let mut dirty_chunks = std::collections::HashSet::new();
-                    mark_block_mesh_dependencies(&mut dirty_chunks, pos.0, pos.2);
-                    self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Redstone);
-                    self.audio_manager.play_sound(sound);
-                    return;
-                }
-                if matches!(
-                    clicked_block,
-                    BlockType::Lever
-                        | BlockType::LeverOn
-                        | BlockType::StoneButton
-                        | BlockType::StoneButtonPressed
-                        | BlockType::Repeater
-                        | BlockType::RepeaterPowered
-                        | BlockType::Comparator
-                        | BlockType::ComparatorPowered
-                        | BlockType::NoteBlock
-                ) {
-                    let pos = (
-                        hit.block_pos.x as i32,
-                        hit.block_pos.y as i32,
-                        hit.block_pos.z as i32,
-                    );
-                    let update = self.redstone.interact(&mut self.chunk_manager, pos);
-                    self.apply_redstone_update(update);
-                    self.audio_manager
-                        .play_sound(crate::audio::SoundId::UiClick);
-                    return;
-                }
-                hit.block_pos + hit.normal
-            };
-
-            let wx = target.x as i32;
-            let wy = target.y as i32;
-            let wz = target.z as i32;
-
-            let mut dirty_chunks = std::collections::HashSet::new();
-            // Resulting block at (wx, wy, wz) after this click, used to fan the
-            // authoritative mutation out to connected clients. `None` means the
-            // click did not mutate the world (e.g. broke nothing).
-            let mut result_block: Option<BlockType> = None;
-            if is_left_click {
-                let old_block = self.chunk_manager.get_block(wx, wy, wz);
-                if old_block != BlockType::Air {
-                    if !self.can_break_current_block(old_block) {
-                        return;
-                    }
-                    let chest_partner = if old_block == BlockType::Chest {
-                        let old_state = crate::world::BlockState::decode(
-                            self.chunk_manager.get_block_state(wx, wy, wz),
-                        );
-                        if old_state.chest_type != crate::world::ChestType::Single {
-                            self.double_chest_partner((wx, wy, wz), old_state.chest_type)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
-                    // Inventory-bearing entities are authoritative state and
-                    // must be drained before the block is removed.  The same
-                    // path is used for every automation container.
-                    if matches!(
-                        old_block,
-                        BlockType::Chest
-                            | BlockType::EndCityChest
-                            | BlockType::Furnace
-                            | BlockType::FurnaceLit
-                            | BlockType::Hopper
-                            | BlockType::Dispenser
-                            | BlockType::Dropper
-                    ) {
-                        self.drop_block_entity_inventory((wx, wy, wz));
-                        self.close_legacy_container_sessions_at((wx, wy, wz));
-                        if let Some(partner) = chest_partner {
-                            self.close_legacy_container_sessions_at(partner);
-                        }
-                    }
-                    if old_block == crate::world::BlockType::Chest {
-                        // If part of a double chest, revert partner to single.
-                        if let Some(partner) = chest_partner {
-                            let partner_raw = self
-                                .chunk_manager
-                                .get_block_state(partner.0, partner.1, partner.2);
-                            let mut partner_state = crate::world::BlockState::decode(partner_raw);
-                            partner_state.chest_type = crate::world::ChestType::Single;
-                            self.chunk_manager.set_block_state(
-                                partner.0,
-                                partner.1,
-                                partner.2,
-                                partner_state.encode(),
-                            );
-                        }
-                    }
-                    self.chunk_manager.set_block(wx, wy, wz, BlockType::Air);
-                    self.network
-                        .send_action(crate::network::protocol::Action::Break);
-                    self.trigger_advancement(crate::advancements::AdvancementTrigger::MineBlock(
-                        old_block,
-                    ));
-                    self.redstone.on_block_changed(
-                        &self.chunk_manager,
-                        (wx, wy, wz),
-                        crate::redstone::Direction::North,
-                    );
-
-                    let sound_pos =
-                        glam::Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
-                    let listener_right =
-                        glam::Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos())
-                            .normalize_or_zero();
-                    if let Some(mat) = old_block.sound_material() {
-                        self.audio_manager.play_sound_3d(
-                            crate::audio::SoundId::BlockBreak(mat),
-                            sound_pos,
-                            self.camera.position,
-                            listener_right,
-                        );
-                    }
-
-                    if self.game_mode == GameMode::Survival {
-                        self.store_or_drop_generated_item(
-                            crate::inventory::Item::from_block(old_block),
-                            sound_pos,
-                        );
-
-                        if old_block == BlockType::Grass {
-                            let rng = (wx as u32).wrapping_mul(31).wrapping_add(wz as u32);
-                            if rng % 20 == 0 {
-                                let drop = match rng % 3 {
-                                    0 => crate::inventory::Item::Seeds,
-                                    1 => crate::inventory::Item::Wheat,
-                                    _ => crate::inventory::Item::Carrot,
-                                };
-                                self.store_or_drop_generated_item(drop, sound_pos);
-                            }
-                        }
-                        if old_block == BlockType::Bed {
-                            let bstate = crate::world::BlockState::decode(
-                                self.chunk_manager.get_block_state(wx, wy, wz),
-                            );
-                            let (ox, oz) = if bstate.is_top {
-                                (wx - bstate.facing.dx(), wz - bstate.facing.dz())
-                            } else {
-                                (wx + bstate.facing.dx(), wz + bstate.facing.dz())
-                            };
-                            if self.chunk_manager.get_block(ox, wy, oz) == BlockType::Bed {
-                                self.chunk_manager.set_block(ox, wy, oz, BlockType::Air);
-                                self.broadcast_block_change(ox, wy, oz, BlockType::Air);
-                            }
-                        }
-                    }
-
-                    // Update lighting for removal
-                    crate::lighting::update_sky_light_after_removed(
-                        &mut self.chunk_manager,
-                        wx,
-                        wy,
-                        wz,
-                        &mut dirty_chunks,
-                    );
-                    crate::lighting::update_block_light_after_removed(
-                        &mut self.chunk_manager,
-                        wx,
-                        wy,
-                        wz,
-                        old_block.properties().light_emission,
-                        &mut dirty_chunks,
-                    );
-                    self.check_and_break_unsupported_above(wx, wy, wz, &mut dirty_chunks);
-                    result_block = Some(BlockType::Air);
-                }
-            } else {
-                if let Some(placed_block) = self.inventory.get_selected_block() {
-                    if placed_block == BlockType::Bed {
-                        let facing = crate::redstone::Direction::from_yaw(self.camera.yaw);
-                        let hx = wx + facing.dx();
-                        let hz = wz + facing.dz();
-                        if !self.can_place_block_at(wx, wy, wz, BlockType::Bed)
-                            || !self.can_place_block_at(hx, wy, hz, BlockType::Bed)
-                        {
-                            return;
-                        }
-                        if !self.chunk_manager.can_place_block_with_support(
-                            BlockType::Bed,
-                            wx,
-                            wy,
-                            wz,
-                        ) || !self.chunk_manager.can_place_block_with_support(
-                            BlockType::Bed,
-                            hx,
-                            wy,
-                            hz,
-                        ) {
-                            return;
-                        }
-                        let foot_state = crate::world::BlockState {
-                            facing,
-                            is_top: false,
-                            is_right_hinge: false,
-                            is_open: false,
-                            chest_type: crate::world::ChestType::Single,
-                        };
-                        let head_state = crate::world::BlockState {
-                            facing,
-                            is_top: true,
-                            is_right_hinge: false,
-                            is_open: false,
-                            chest_type: crate::world::ChestType::Single,
-                        };
-                        self.chunk_manager.set_block(wx, wy, wz, BlockType::Bed);
-                        self.chunk_manager
-                            .set_block_state(wx, wy, wz, foot_state.encode());
-                        self.chunk_manager.set_block(hx, wy, hz, BlockType::Bed);
-                        self.chunk_manager
-                            .set_block_state(hx, wy, hz, head_state.encode());
-                        self.broadcast_block_change(wx, wy, wz, BlockType::Bed);
-                        self.broadcast_block_change(hx, wy, hz, BlockType::Bed);
-
-                        let sound_pos =
-                            Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
-                        let listener_right =
-                            Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos())
-                                .normalize_or_zero();
-                        if let Some(mat) = BlockType::Bed.sound_material() {
-                            self.audio_manager.play_sound_3d(
-                                crate::audio::SoundId::BlockPlace(mat),
-                                sound_pos,
-                                self.camera.position,
-                                listener_right,
-                            );
-                        }
-                        let is_creative = self.game_mode == GameMode::Creative;
-                        self.inventory.use_selected_item(is_creative);
-                        return;
-                    }
-                    if placed_block == BlockType::OakDoor {
-                        if wy + 1 >= crate::world::CHUNK_HEIGHT as i32 {
-                            return;
-                        }
-                        if !self.can_place_block_at(wx, wy, wz, BlockType::OakDoor)
-                            || !self.can_place_block_at(wx, wy + 1, wz, BlockType::OakDoor)
-                        {
-                            return;
-                        }
-                        if !self.chunk_manager.can_place_block_with_support(
-                            BlockType::OakDoor,
-                            wx,
-                            wy,
-                            wz,
-                        ) {
-                            return;
-                        }
-                        let (bottom_state, top_state) =
-                            crate::world::BlockState::for_door_placement(
-                                &self.chunk_manager,
-                                wx,
-                                wy,
-                                wz,
-                                self.camera.yaw,
-                            );
-
-                        self.chunk_manager.set_block(wx, wy, wz, BlockType::OakDoor);
-                        self.chunk_manager
-                            .set_block_state(wx, wy, wz, bottom_state.encode());
-                        self.chunk_manager
-                            .set_block(wx, wy + 1, wz, BlockType::OakDoor);
-                        self.chunk_manager
-                            .set_block_state(wx, wy + 1, wz, top_state.encode());
-
-                        self.network
-                            .send_action(crate::network::protocol::Action::Place);
-                        self.redstone.on_block_changed(
-                            &self.chunk_manager,
-                            (wx, wy, wz),
-                            bottom_state.facing,
-                        );
-
-                        let sound_pos =
-                            glam::Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
-                        let listener_right =
-                            glam::Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos())
-                                .normalize_or_zero();
-                        if let Some(mat) = BlockType::OakDoor.sound_material() {
-                            self.audio_manager.play_sound_3d(
-                                crate::audio::SoundId::BlockPlace(mat),
-                                sound_pos,
-                                self.camera.position,
-                                listener_right,
-                            );
-                        }
-
-                        let is_creative = self.game_mode == GameMode::Creative;
-                        self.inventory.use_selected_item(is_creative);
-
-                        crate::lighting::update_sky_light_after_placed(
-                            &mut self.chunk_manager,
-                            wx,
-                            wy,
-                            wz,
-                            &mut dirty_chunks,
-                        );
-                        crate::lighting::update_sky_light_after_placed(
-                            &mut self.chunk_manager,
-                            wx,
-                            wy + 1,
-                            wz,
-                            &mut dirty_chunks,
-                        );
-                        mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
-                        mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz + 1);
-
-                        self.broadcast_block_change(wx, wy, wz, BlockType::OakDoor);
-                        self.broadcast_block_change(wx, wy + 1, wz, BlockType::OakDoor);
-                        result_block = Some(BlockType::OakDoor);
-                    } else if placed_block == BlockType::OakTrapdoor {
-                        if !self.chunk_manager.can_place_block_with_support(
-                            placed_block,
-                            wx,
-                            wy,
-                            wz,
-                        ) || !self.can_place_block_at(wx, wy, wz, placed_block)
-                        {
-                            return;
-                        }
-                        let state =
-                            crate::world::BlockState::for_trapdoor_placement(self.camera.yaw);
-
-                        self.chunk_manager
-                            .set_block(wx, wy, wz, BlockType::OakTrapdoor);
-                        self.chunk_manager
-                            .set_block_state(wx, wy, wz, state.encode());
-
-                        self.network
-                            .send_action(crate::network::protocol::Action::Place);
-                        self.redstone.on_block_changed(
-                            &self.chunk_manager,
-                            (wx, wy, wz),
-                            state.facing,
-                        );
-
-                        let sound_pos =
-                            glam::Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
-                        let listener_right =
-                            glam::Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos())
-                                .normalize_or_zero();
-                        if let Some(mat) = BlockType::OakTrapdoor.sound_material() {
-                            self.audio_manager.play_sound_3d(
-                                crate::audio::SoundId::BlockPlace(mat),
-                                sound_pos,
-                                self.camera.position,
-                                listener_right,
-                            );
-                        }
-
-                        let is_creative = self.game_mode == GameMode::Creative;
-                        self.inventory.use_selected_item(is_creative);
-
-                        crate::lighting::update_sky_light_after_placed(
-                            &mut self.chunk_manager,
-                            wx,
-                            wy,
-                            wz,
-                            &mut dirty_chunks,
-                        );
-                        mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
-
-                        self.broadcast_block_change(wx, wy, wz, BlockType::OakTrapdoor);
-                        result_block = Some(BlockType::OakTrapdoor);
-                    } else {
-                        if !self.chunk_manager.can_place_block_with_support(
-                            placed_block,
-                            wx,
-                            wy,
-                            wz,
-                        ) {
-                            return;
-                        }
-                        if !self.can_place_block_at(wx, wy, wz, placed_block) {
-                            return;
-                        }
-
-                        let placement_facing =
-                            crate::redstone::Direction::from_yaw(self.camera.yaw);
-                        self.chunk_manager.set_block(wx, wy, wz, placed_block);
-                        if matches!(
-                            placed_block,
-                            BlockType::Hopper
-                                | BlockType::Observer
-                                | BlockType::Dispenser
-                                | BlockType::Dropper
-                        ) {
-                            let mut state = crate::world::BlockState::decode(
-                                self.chunk_manager.get_block_state(wx, wy, wz),
-                            );
-                            state.facing = placement_facing;
-                            self.chunk_manager
-                                .set_block_state(wx, wy, wz, state.encode());
-                        }
-                        if let Some(mut block_entity) =
-                            crate::block_entity::default_stub_for_block(placed_block)
-                        {
-                            match &mut block_entity {
-                                crate::block_entity::BlockEntity::Hopper(hopper) => {
-                                    hopper.facing = placement_facing;
-                                }
-                                crate::block_entity::BlockEntity::Observer(observer) => {
-                                    observer.facing = placement_facing;
-                                }
-                                _ => {}
-                            }
-                            self.chunk_manager.set_block_entity(
-                                wx,
-                                wy,
-                                wz,
-                                Some(block_entity.clone()),
-                            );
-                            self.broadcast_block_entity_delta(wx, wy, wz, Some(block_entity));
-                        }
-                        self.network
-                            .send_action(crate::network::protocol::Action::Place);
-                        self.redstone.on_block_changed(
-                            &self.chunk_manager,
-                            (wx, wy, wz),
-                            placement_facing,
-                        );
-
-                        let sound_pos =
-                            glam::Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
-                        let listener_right =
-                            glam::Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos())
-                                .normalize_or_zero();
-                        if let Some(mat) = placed_block.sound_material() {
-                            self.audio_manager.play_sound_3d(
-                                crate::audio::SoundId::BlockPlace(mat),
-                                sound_pos,
-                                self.camera.position,
-                                listener_right,
-                            );
-                        }
-
-                        let is_creative = self.game_mode == GameMode::Creative;
-                        self.inventory.use_selected_item(is_creative);
-
-                        // Update lighting for placement
-                        crate::lighting::update_sky_light_after_placed(
-                            &mut self.chunk_manager,
-                            wx,
-                            wy,
-                            wz,
-                            &mut dirty_chunks,
-                        );
-                        crate::lighting::update_block_light_after_placed(
-                            &mut self.chunk_manager,
-                            wx,
-                            wy,
-                            wz,
-                            placed_block.properties().light_emission,
-                            &mut dirty_chunks,
-                        );
-
-                        self.check_and_break_unsupported_above(wx, wy, wz, &mut dirty_chunks);
-                        result_block = Some(placed_block);
-                    }
-
-                    if matches!(
-                        placed_block,
-                        BlockType::SoulSand | BlockType::WitherSkeletonSkull
-                    ) {
-                        if let Some(pattern) =
-                            crate::boss::detect_wither_pattern((wx, wy, wz), |position| {
-                                self.chunk_manager
-                                    .get_block(position.0, position.1, position.2)
-                            })
-                        {
-                            let spawn_pos = pattern.iter().fold(Vec3::ZERO, |sum, &(x, y, z)| {
-                                sum + Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5)
-                            }) / pattern.len() as f32;
-                            let removals: Vec<_> = pattern
-                                .into_iter()
-                                .map(|position| (position, BlockType::Air))
-                                .collect();
-                            self.apply_block_changes(&removals);
-                            // The wither ritual consumes the placed block too;
-                            // broadcast that final state before spawning.
-                            self.broadcast_block_change(wx, wy, wz, BlockType::Air);
-                            self.entity_manager
-                                .spawn(crate::entity::EntityType::Wither, spawn_pos);
-                            return;
-                        }
-                    }
-                } else {
-                    return; // No block selected to place
-                }
-            }
-
-            mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
-
-            self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::BreakPlace);
-
-            // Fan the authoritative player-driven mutation out to clients.
-            if let Some(block) = result_block {
-                self.broadcast_block_change(wx, wy, wz, block);
-            }
-        }
+        self.handle_live_world_click(is_left_click);
     }
 
-    /// Translate local presentation input into the transport-independent
-    /// gameplay envelope.  Unsupported interactions are deliberately rejected
-    /// by the core; they never fall back to mutating renderer chunks.
-    fn handle_authority_click(&mut self, is_left_click: bool) {
-        let direction = Vec3::new(
+    fn look_direction(&self) -> Vec3 {
+        Vec3::new(
             self.camera.yaw.cos() * self.camera.pitch.cos(),
             self.camera.pitch.sin(),
             self.camera.yaw.sin() * self.camera.pitch.cos(),
         )
-        .normalize_or_zero();
+        .normalize_or_zero()
+    }
+
+    fn prepare_world_click(&self, is_left_click: bool) -> (WorldClickIntent, Option<Vec3>) {
+        let direction = self.look_direction();
         let target_policy = if is_left_click {
             RaycastTargetPolicy::Break
         } else {
@@ -18176,1058 +5102,174 @@ impl State {
             &self.chunk_manager,
             target_policy,
         ) else {
-            return;
+            return (WorldClickIntent::Miss, None);
         };
-        let clicked = (
+        let clicked = [
             hit.block_pos.x as i32,
             hit.block_pos.y as i32,
             hit.block_pos.z as i32,
-        );
-        if is_left_click {
-            if !self.can_break_current_block(
-                self.chunk_manager
-                    .get_block(clicked.0, clicked.1, clicked.2),
-            ) {
-                return;
-            }
-            let _ = self.submit_local_authority_block_action(
-                crate::network::protocol::BlockActionKind::StartBreak,
-                clicked.0,
-                clicked.1,
-                clicked.2,
-                [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
-                BlockType::Air,
-            );
-            self.mining_target = Some(hit.block_pos);
-            self.mining_progress = 0.0;
-            self.mining_held = self.selected_mining_held();
-            self.network
-                .send_action(crate::network::protocol::Action::Break);
-            return;
-        }
-
+        ];
+        let place_pos = hit.block_pos + hit.normal;
+        let place = [place_pos.x as i32, place_pos.y as i32, place_pos.z as i32];
         let clicked_block = self
             .chunk_manager
-            .get_block(clicked.0, clicked.1, clicked.2);
+            .get_block(clicked[0], clicked[1], clicked[2]);
         let held_item = self.inventory.hotbar[self.inventory.selected]
             .map(|stack| stack.item)
             .unwrap_or(Item::Air);
-        if clicked_block == BlockType::Obsidian && held_item == Item::FlintAndSteel {
-            let target = hit.block_pos + hit.normal;
-            let _ = self.submit_local_authority_block_action(
-                crate::network::protocol::BlockActionKind::IgnitePortal,
-                target.x as i32,
-                target.y as i32,
-                target.z as i32,
-                [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
-                BlockType::Fire,
-            );
-            return;
-        }
-        if clicked_block == BlockType::EndPortalFrame && held_item == Item::EyeOfEnder {
-            let _ = self.submit_local_authority_block_action(
-                crate::network::protocol::BlockActionKind::InsertEnderEye,
-                clicked.0,
-                clicked.1,
-                clicked.2,
-                [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
-                BlockType::EndPortalFrameFilled,
-            );
-            return;
-        }
-        if matches!(
-            clicked_block,
-            BlockType::Chest
-                | BlockType::EndCityChest
-                | BlockType::Furnace
-                | BlockType::FurnaceLit
-                | BlockType::Hopper
-                | BlockType::Dispenser
-                | BlockType::Dropper
-        ) {
-            let response =
-                self.submit_authority_request(crate::network::protocol::GameplayRequest {
-                    request_id: 0,
-                    client_sequence: 0,
-                    session_id: 0,
-                    dimension: self.current_dimension as u8,
-                    client_revision: self
-                        .embedded_runtime
-                        .as_ref()
-                        .map(|runtime| runtime.revision_for_dimension(self.current_dimension))
-                        .unwrap_or_default(),
-                    operation: crate::network::protocol::GameplayOperation::Container {
-                        action: crate::network::protocol::ContainerAction::Open.to_wire(),
-                        x: clicked.0,
-                        y: clicked.1,
-                        z: clicked.2,
-                        slot: 0,
-                    },
-                });
-            if matches!(
-                response.as_ref().map(|response| &response.outcome),
-                Some(crate::network::protocol::GameplayOutcome::Accepted { .. })
-            ) {
-                let _ = self.project_authority_container(clicked);
-            }
-            return;
-        }
-        if clicked_block == BlockType::Bed {
-            let _ = self.submit_authority_request(crate::network::protocol::GameplayRequest {
-                request_id: 0,
-                client_sequence: 0,
-                session_id: 0,
-                dimension: self.current_dimension as u8,
-                client_revision: self
-                    .embedded_runtime
-                    .as_ref()
-                    .map(|runtime| runtime.revision_for_dimension(self.current_dimension))
-                    .unwrap_or_default(),
-                operation: crate::network::protocol::GameplayOperation::Sleep {
-                    x: clicked.0,
-                    y: clicked.1,
-                    z: clicked.2,
-                },
-            });
-            return;
-        }
+        let selected_block = self.inventory.get_selected_block();
+        let can_break = self.can_break_current_block(clicked_block);
+        let can_place = selected_block
+            .map(|block| self.can_place_block_at(place[0], place[1], place[2], block))
+            .unwrap_or(true);
+        let intent = resolve_world_click(
+            self.presentation_topology(),
+            is_left_click,
+            Some(WorldClickHit {
+                clicked,
+                place,
+                face: [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
+                clicked_block,
+            }),
+            held_item,
+            selected_block,
+            can_break,
+            can_place,
+        );
+        (intent, Some(hit.block_pos))
+    }
 
-        let target = hit.block_pos + hit.normal;
-        let (x, y, z) = (target.x as i32, target.y as i32, target.z as i32);
-        let Some(block) = self.inventory.get_selected_block() else {
-            // Keep the ingress typed even when no placeable stack is held. The
-            // authority rejects this bounded request without touching the
-            // world; legacy BlockUse is not a mutation fallback.
-            let _ = self.submit_local_authority_block_action(
-                crate::network::protocol::BlockActionKind::Place,
+    fn handle_live_world_click(&mut self, is_left_click: bool) {
+        let (intent, hit_pos) = self.prepare_world_click(is_left_click);
+        match intent {
+            WorldClickIntent::Miss | WorldClickIntent::Rejected => {}
+            WorldClickIntent::StartBreak { x, y, z, face } => {
+                let _ = self.submit_local_authority_block_action(
+                    crate::network::protocol::BlockActionKind::StartBreak,
+                    x,
+                    y,
+                    z,
+                    face,
+                    BlockType::Air,
+                );
+                self.mining_target = hit_pos;
+                self.mining_progress = 0.0;
+                self.mining_held = self.selected_mining_held();
+                if self.presentation_topology().is_embedded() {
+                    self.network
+                        .send_action(crate::network::protocol::Action::Break);
+                }
+            }
+            WorldClickIntent::IgnitePortal { x, y, z, face } => {
+                let _ = self.submit_local_authority_block_action(
+                    crate::network::protocol::BlockActionKind::IgnitePortal,
+                    x,
+                    y,
+                    z,
+                    face,
+                    BlockType::Fire,
+                );
+            }
+            WorldClickIntent::InsertEnderEye { x, y, z, face } => {
+                let _ = self.submit_local_authority_block_action(
+                    crate::network::protocol::BlockActionKind::InsertEnderEye,
+                    x,
+                    y,
+                    z,
+                    face,
+                    BlockType::EndPortalFrame,
+                );
+            }
+            WorldClickIntent::Sleep { x, y, z } => {
+                let _ = self.submit_local_authority_operation(
+                    crate::network::protocol::GameplayOperation::Sleep { x, y, z },
+                );
+            }
+            WorldClickIntent::OpenContainer { x, y, z, .. } => {
+                if self.presentation_topology().is_join_client() {
+                    self.submit_join_container_open((x, y, z));
+                } else {
+                    let _ = self.submit_local_authority_operation(
+                        crate::network::protocol::GameplayOperation::Container {
+                            action: crate::network::protocol::ContainerAction::Open,
+                            x,
+                            y,
+                            z,
+                            slot: 0,
+                        },
+                    );
+                }
+            }
+            WorldClickIntent::Place {
                 x,
                 y,
                 z,
-                [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
-                BlockType::Air,
+                face,
+                block,
+            } => {
+                let _ = self.submit_local_authority_block_action(
+                    crate::network::protocol::BlockActionKind::Place,
+                    x,
+                    y,
+                    z,
+                    face,
+                    block,
+                );
+                if self.presentation_topology().is_embedded() && block != BlockType::Air {
+                    self.network
+                        .send_action(crate::network::protocol::Action::Place);
+                }
+            }
+        }
+    }
+
+
+    fn submit_inventory_container_click(&mut self, slot: usize, is_left: bool) {
+        if let Some(position) = self.container_target {
+            let _ = self.submit_local_authority_operation(
+                crate::network::protocol::GameplayOperation::ContainerClick {
+                    x: position.0,
+                    y: position.1,
+                    z: position.2,
+                    slot: slot as u16,
+                    is_left,
+                    dragged: self
+                        .inventory
+                        .dragged
+                        .as_ref()
+                        .map(crate::network::protocol::ItemWire::from_stack),
+                },
             );
-            return;
-        };
-        if !self.can_place_block_at(x, y, z, block) {
-            return;
         }
-        let _ = self.submit_local_authority_block_action(
-            crate::network::protocol::BlockActionKind::Place,
-            x,
-            y,
-            z,
-            [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
-            block,
-        );
-        self.network
-            .send_action(crate::network::protocol::Action::Place);
-    }
-
-    pub fn is_creative_catalog_open(&self) -> bool {
-        self.inventory.is_open
-            && inventory_layout_kind(
-                self.game_mode,
-                self.active_station.is_some(),
-                self.inventory.is_table_open,
-            ) == InventoryLayoutKind::CreativeCatalog
-    }
-
-    pub fn get_inventory_slots(&self) -> Vec<(SlotType, f32, f32, f32, f32)> {
-        let aspect = self.size.width as f32 / self.size.height as f32;
-        if inventory_layout_kind(
-            self.game_mode,
-            self.active_station.is_some(),
-            self.inventory.is_table_open,
-        ) == InventoryLayoutKind::CreativeCatalog
-        {
-            let mut slots = Vec::with_capacity(CREATIVE_VISIBLE_SLOTS + 9);
-            for (index, item) in self
-                .inventory
-                .creative_visible_items()
-                .into_iter()
-                .enumerate()
-            {
-                let rect = creative_catalog_slot_rect(index, aspect);
-                slots.push((SlotType::Creative(item), rect.x0, rect.x1, rect.y0, rect.y1));
-            }
-            for index in 0..9 {
-                let rect = creative_hotbar_slot_rect(index, aspect);
-                slots.push((SlotType::Hotbar(index), rect.x0, rect.x1, rect.y0, rect.y1));
-            }
-            return slots;
-        }
-
-        let slot_w = 0.08;
-        let slot_h = 0.08 * aspect;
-        let gap = 0.01;
-        let mut slots = Vec::new();
-
-        // 1. Hotbar (0..9)
-        for i in 0..9 {
-            let x0 = -0.40 + i as f32 * (slot_w + gap);
-            let y0 = -0.85;
-            slots.push((SlotType::Hotbar(i), x0, x0 + slot_w, y0, y0 + slot_h));
-        }
-
-        // 2. Backpack (0..27)
-        for r in 0..3 {
-            for c in 0..9 {
-                let i = r * 9 + c;
-                let x0 = -0.40 + c as f32 * (slot_w + gap);
-                let y0 = -0.70 + r as f32 * (slot_h + gap);
-                slots.push((SlotType::Backpack(i), x0, x0 + slot_w, y0, y0 + slot_h));
-            }
-        }
-
-        // 3. Armor (0..4)
-        for i in 0..4 {
-            let x0 = -0.40;
-            let y0 = -0.15 + i as f32 * (slot_h + gap);
-            slots.push((SlotType::Armor(i), x0, x0 + slot_w, y0, y0 + slot_h));
-        }
-
-        // 3b. Offhand
-        let offhand_x0 = -0.40 + 1.2 * (slot_w + gap);
-        let offhand_y0 = -0.15;
-        slots.push((
-            SlotType::Offhand,
-            offhand_x0,
-            offhand_x0 + slot_w,
-            offhand_y0,
-            offhand_y0 + slot_h,
-        ));
-
-        // 4. Container slots (if chest or furnace is open)
-        if let Some(pos) = self.container_target {
-            let block = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
-            if matches!(block, BlockType::Furnace | BlockType::FurnaceLit) {
-                let in_x0 = -0.15;
-                let in_y0 = 0.10;
-                slots.push((
-                    SlotType::ContainerSlot(0),
-                    in_x0,
-                    in_x0 + slot_w,
-                    in_y0,
-                    in_y0 + slot_h,
-                ));
-
-                let fuel_x0 = -0.15;
-                let fuel_y0 = -0.10;
-                slots.push((
-                    SlotType::ContainerSlot(1),
-                    fuel_x0,
-                    fuel_x0 + slot_w,
-                    fuel_y0,
-                    fuel_y0 + slot_h,
-                ));
-
-                let out_x0 = 0.15;
-                let out_y0 = 0.0;
-                slots.push((
-                    SlotType::ContainerSlot(2),
-                    out_x0,
-                    out_x0 + slot_w,
-                    out_y0,
-                    out_y0 + slot_h,
-                ));
-            } else {
-                let container_slots =
-                    crate::container_sessions::ContainerSessionManager::get_slot_count(
-                        &self.chunk_manager,
-                        pos.0,
-                        pos.1,
-                        pos.2,
-                    );
-                let container_rows = container_slots.saturating_add(8) / 9;
-                let x_start = -0.40;
-                let y_start = -0.70 - (container_rows as f32) * (slot_h + gap) - gap;
-                for r in 0..container_rows {
-                    for c in 0..9 {
-                        let i = r * 9 + c;
-                        let x0 = x_start + c as f32 * (slot_w + gap);
-                        let y0 = y_start + r as f32 * (slot_h + gap);
-                        slots.push((SlotType::ContainerSlot(i), x0, x0 + slot_w, y0, y0 + slot_h));
-                    }
-                }
-            }
-        }
-
-        // 5. Crafting Grid & Output
-        if self.container_target.is_none()
-            && self.active_station.is_none()
-            && self.inventory.is_table_open
-        {
-            // 3x3 table
-            let x_start = -0.05;
-            for r in 0..3 {
-                for c in 0..3 {
-                    let i = r * 3 + c;
-                    let x0 = x_start + c as f32 * (slot_w + gap);
-                    let y0 = -0.10 + r as f32 * (slot_h + gap);
-                    slots.push((SlotType::CraftInput(i), x0, x0 + slot_w, y0, y0 + slot_h));
-                }
-            }
-            // Output
-            let x0 = x_start + 3.0 * (slot_w + gap) + 0.06;
-            let y0 = -0.10 + 1.0 * (slot_h + gap);
-            slots.push((SlotType::CraftOutput, x0, x0 + slot_w, y0, y0 + slot_h));
-        } else if self.active_station.is_none() {
-            // 2x2 player craft
-            let x_start = 0.05;
-            for r in 0..2 {
-                for c in 0..2 {
-                    let i = r * 2 + c;
-                    let x0 = x_start + c as f32 * (slot_w + gap);
-                    let y0 = -0.05 + r as f32 * (slot_h + gap);
-                    slots.push((SlotType::CraftInput(i), x0, x0 + slot_w, y0, y0 + slot_h));
-                }
-            }
-            // Output
-            let x0 = x_start + 2.0 * (slot_w + gap) + 0.06;
-            let y0 = -0.05 + 0.5 * (slot_h + gap);
-            slots.push((SlotType::CraftOutput, x0, x0 + slot_w, y0, y0 + slot_h));
-        }
-
-        match self.active_station {
-            Some(StationKind::Enchanting) => {
-                slots.push((
-                    SlotType::EnchantInput,
-                    -0.18,
-                    -0.18 + slot_w,
-                    0.12,
-                    0.12 + slot_h,
-                ));
-                slots.push((
-                    SlotType::EnchantLapis,
-                    -0.18,
-                    -0.18 + slot_w,
-                    -0.02,
-                    -0.02 + slot_h,
-                ));
-            }
-            Some(StationKind::Brewing) => {
-                for i in 0..3 {
-                    let x0 = -0.18 + i as f32 * (slot_w + gap);
-                    slots.push((
-                        SlotType::BrewBottle(i),
-                        x0,
-                        x0 + slot_w,
-                        -0.02,
-                        -0.02 + slot_h,
-                    ));
-                }
-                slots.push((
-                    SlotType::BrewIngredient,
-                    -0.09,
-                    -0.09 + slot_w,
-                    0.17,
-                    0.17 + slot_h,
-                ));
-            }
-            Some(StationKind::Anvil) => {
-                slots.push((
-                    SlotType::AnvilLeft,
-                    -0.20,
-                    -0.20 + slot_w,
-                    0.10,
-                    0.10 + slot_h,
-                ));
-                slots.push((
-                    SlotType::AnvilRight,
-                    -0.05,
-                    -0.05 + slot_w,
-                    0.10,
-                    0.10 + slot_h,
-                ));
-                slots.push((
-                    SlotType::AnvilOutput,
-                    0.20,
-                    0.20 + slot_w,
-                    0.10,
-                    0.10 + slot_h,
-                ));
-            }
-            None | Some(StationKind::Furnace) | Some(StationKind::Merchant) => {}
-        }
-
-        slots
-    }
-
-    pub fn get_item_at_slot(&self, slot: SlotType) -> Option<ItemStack> {
-        match slot {
-            SlotType::Creative(item) => Some(ItemStack::new(item, 1)),
-            SlotType::Hotbar(i) => self.inventory.hotbar[i],
-            SlotType::Backpack(i) => self.inventory.main[i],
-            SlotType::Armor(i) => self.inventory.armor[i],
-            SlotType::Offhand => self.inventory.offhand,
-            SlotType::CraftInput(i) => self.inventory.craft_input.get(i).copied().flatten(),
-            SlotType::CraftOutput => self.inventory.craft_output,
-            SlotType::EnchantInput => self.enchanting.input,
-            SlotType::EnchantLapis => self.enchanting.lapis,
-            SlotType::BrewBottle(i) => self.brewing.bottles[i],
-            SlotType::BrewIngredient => self.brewing.ingredient,
-            SlotType::AnvilLeft => self.anvil.left,
-            SlotType::AnvilRight => self.anvil.right,
-            SlotType::AnvilOutput => self.anvil.output,
-            SlotType::ContainerSlot(i) => self.container_target.and_then(|pos| {
-                crate::container_sessions::ContainerSessionManager::get_container_slots(
-                    &self.chunk_manager,
-                    pos.0,
-                    pos.1,
-                    pos.2,
-                )
-                .and_then(|slots| slots.get(i).copied().flatten())
-            }),
-        }
-    }
-
-    pub fn set_item_at_slot(&mut self, slot: SlotType, stack: Option<ItemStack>) {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
-            return;
-        }
-        match slot {
-            SlotType::Creative(item) => self.inventory.write_creative_slot(item, stack),
-            SlotType::Hotbar(i) => self.inventory.hotbar[i] = stack,
-            SlotType::Backpack(i) => self.inventory.main[i] = stack,
-            SlotType::Armor(i) => self.inventory.armor[i] = stack,
-            SlotType::Offhand => self.inventory.offhand = stack,
-            SlotType::CraftInput(i) => {
-                if i < self.inventory.craft_input.len() {
-                    self.inventory.craft_input[i] = stack;
-                }
-            }
-            SlotType::CraftOutput => self.inventory.craft_output = stack,
-            SlotType::EnchantInput => self.enchanting.input = stack,
-            SlotType::EnchantLapis => self.enchanting.lapis = stack,
-            SlotType::BrewBottle(i) => self.brewing.bottles[i] = stack,
-            SlotType::BrewIngredient => self.brewing.ingredient = stack,
-            SlotType::AnvilLeft => self.anvil.left = stack,
-            SlotType::AnvilRight => self.anvil.right = stack,
-            SlotType::AnvilOutput => {}
-            SlotType::ContainerSlot(i) => {
-                if let Some(pos) = self.container_target {
-                    if let Some(mut slots) =
-                        crate::container_sessions::ContainerSessionManager::get_container_slots(
-                            &self.chunk_manager,
-                            pos.0,
-                            pos.1,
-                            pos.2,
-                        )
-                    {
-                        if i < slots.len() {
-                            let access = self
-                                .chunk_manager
-                                .get_block_entity(pos.0, pos.1, pos.2)
-                                .and_then(crate::block_entity::ContainerAccess::for_entity);
-                            if access.is_some_and(|access| {
-                                stack
-                                    .as_ref()
-                                    .map_or(true, |item| access.can_insert(i, item, None))
-                            }) {
-                                slots[i] = stack;
-                                if crate::container_sessions::ContainerSessionManager::set_container_slots(
-                                    &mut self.chunk_manager,
-                                    pos.0,
-                                    pos.1,
-                                    pos.2,
-                                    &slots,
-                                ) {
-                                    self.redstone
-                                        .mark_container_changed(&self.chunk_manager, pos);
-                                    let entity = self.chunk_manager.get_block_entity(pos.0, pos.1, pos.2).cloned();
-                                    self.broadcast_block_entity_delta(pos.0, pos.1, pos.2, entity);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn slot_accepts(&self, slot: SlotType, stack: ItemStack) -> bool {
-        match slot {
-            SlotType::Creative(_) => false,
-            SlotType::EnchantInput => crate::enchantment::can_enchant(stack.item),
-            SlotType::EnchantLapis => stack.item == Item::LapisLazuli,
-            SlotType::BrewBottle(_) => stack.potion.is_some(),
-            SlotType::AnvilOutput | SlotType::CraftOutput => false,
-            SlotType::ContainerSlot(i) => {
-                if let Some(pos) = self.container_target {
-                    let Some(entity) = self.chunk_manager.get_block_entity(pos.0, pos.1, pos.2)
-                    else {
-                        return false;
-                    };
-                    let Some(access) = crate::block_entity::ContainerAccess::for_entity(entity)
-                    else {
-                        return false;
-                    };
-                    if let Some(item) = Some(stack) {
-                        return access.can_insert(i, &item, None);
-                    }
-                }
-                true
-            }
-            _ => true,
-        }
-    }
-
-    pub fn handle_swap_offhand_pressed(&mut self) {
-        if !self.is_chat_open && !self.is_paused && !self.player_state.is_dead {
-            if self.has_in_process_runtime() || !self.is_authoritative() {
-                return;
-            }
-            self.inventory.swap_offhand();
-            self.audio_manager
-                .play_sound(crate::audio::SoundId::UiClick);
-        }
-    }
-
-    fn refresh_workstations(&mut self) {
-        self.enchanting.refresh();
-        self.anvil.refresh();
     }
 
     pub fn handle_inventory_click(&mut self, is_left: bool) {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
-            let mouse_x = self.mouse_ndc[0];
-            let mouse_y = self.mouse_ndc[1];
-            if self.active_station == Some(StationKind::Merchant) && is_left {
-                let mut offer_y = 0.28;
-                for idx in 0..self.active_merchant_offers.len() {
-                    if mouse_x >= -0.35
-                        && mouse_x <= 0.35
-                        && mouse_y >= offer_y - 0.04
-                        && mouse_y <= offer_y + 0.03
-                    {
-                        let _ = self.execute_active_merchant_trade(idx);
-                        return;
-                    }
-                    offer_y -= 0.09;
-                    if offer_y < -0.30 {
-                        break;
-                    }
-                }
-            }
-            let clicked_slot =
-                self.get_inventory_slots()
-                    .into_iter()
-                    .find(|&(_, x0, x1, y0, y1)| {
-                        mouse_x >= x0 && mouse_x <= x1 && mouse_y >= y0 && mouse_y <= y1
-                    });
-            if let Some((SlotType::ContainerSlot(slot), _, _, _, _)) = clicked_slot {
-                if let Some(position) = self.container_target {
-                    let _ = self.submit_local_authority_container_action(
-                        position,
-                        crate::network::protocol::ContainerAction::Click,
-                        slot as u16,
-                        is_left,
-                    );
-                }
-            }
-            // Crafting, enchanting, brewing, anvil and player inventory
-            // actions have no typed authority operation yet.  Explicitly
-            // reject them rather than mutating a second local inventory.
+        let probe = self.probe_inventory_click(is_left);
+        let hit = probe.authority_hit();
+        if let InventoryHit::Merchant { offer_index } = hit {
+            // Merchant is not a `PresentationInventoryTarget`. Mapping it to
+            // Workstation would `inventory_decision` → Reject, but the live
+            // path submits `GameplayOperation::Trade` on both topologies.
+            let _ = self.execute_active_merchant_trade(offer_index);
             return;
         }
-        let mouse_x = self.mouse_ndc[0];
-        let mouse_y = self.mouse_ndc[1];
-        let creative_catalog = self.is_creative_catalog_open();
-        if creative_catalog && is_left {
-            for (index, tab) in CreativeTab::TABS.into_iter().enumerate() {
-                if creative_tab_rect(index).contains(mouse_x, mouse_y) {
-                    self.audio_manager
-                        .play_sound(crate::audio::SoundId::UiClick);
-                    self.inventory.select_creative_tab(tab);
-                    return;
-                }
-            }
-        }
-        let slots = self.get_inventory_slots();
-
-        if is_left && mouse_x >= -0.45 && mouse_x <= -0.37 && mouse_y >= 0.35 && mouse_y <= 0.43 {
-            self.recipe_book_open = !self.recipe_book_open;
-            self.audio_manager
-                .play_sound(crate::audio::SoundId::UiClick);
-            return;
-        }
-
-        if self.active_station == Some(StationKind::Merchant) && is_left {
-            let mut offer_y = 0.28;
-            for idx in 0..self.active_merchant_offers.len() {
-                if mouse_x >= -0.35
-                    && mouse_x <= 0.35
-                    && mouse_y >= offer_y - 0.04
-                    && mouse_y <= offer_y + 0.03
-                {
-                    if !self.active_merchant_offers[idx].is_out_of_stock() {
-                        let _ = self.execute_active_merchant_trade(idx);
-                    }
-                    return;
-                }
-                offer_y -= 0.09;
-                if offer_y < -0.30 {
-                    break;
-                }
-            }
-        }
-
-        if self.recipe_book_open
-            && is_left
-            && mouse_x >= -0.85
-            && mouse_x <= -0.48
-            && mouse_y >= -0.45
-            && mouse_y <= 0.45
-        {
-            let smelting_recipes = self.recipe_manager.get_smelting_recipes();
-            let mut line_y = 0.34;
-            for r in smelting_recipes {
-                if mouse_y >= line_y - 0.05 && mouse_y <= line_y + 0.02 {
-                    if let Some(pos) = self.container_target {
-                        let block = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
-                        if matches!(block, BlockType::Furnace | BlockType::FurnaceLit) {
-                            if let Some((inv_slot_idx, stack)) = self.inventory.find_item(r.input) {
-                                let (cx, cz) = (pos.0.div_euclid(16), pos.2.div_euclid(16));
-                                let (bx, by, bz) = (
-                                    pos.0.rem_euclid(16) as u8,
-                                    pos.1 as i16,
-                                    pos.2.rem_euclid(16) as u8,
-                                );
-                                if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
-                                    if let Some(crate::block_entity::BlockEntity::Furnace(
-                                        ref mut f,
-                                    )) = chunk.get_block_entity_mut(bx, by, bz)
-                                    {
-                                        if f.slots[0].is_none() {
-                                            f.slots[0] = Some(stack);
-                                            self.inventory.remove_at_slot(inv_slot_idx);
-                                            self.audio_manager
-                                                .play_sound(crate::audio::SoundId::UiClick);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    break;
-                }
-                line_y -= 0.07;
-                if line_y < -0.40 {
-                    break;
-                }
-            }
-            return;
-        }
-
-        if self.active_station == Some(StationKind::Enchanting) && is_left {
-            for index in 0..3 {
-                let y1 = 0.28 - index as f32 * 0.12;
-                let y0 = y1 - 0.09;
-                if mouse_x >= 0.02 && mouse_x <= 0.62 && mouse_y >= y0 && mouse_y <= y1 {
-                    self.perform_enchantment(index);
-                    return;
-                }
-            }
-        }
-
-        let clicked_slot = slots.into_iter().find(|&(_, x0, x1, y0, y1)| {
-            mouse_x >= x0 && mouse_x <= x1 && mouse_y >= y0 && mouse_y <= y1
-        });
-
-        if let Some((slot_type, _, _, _, _)) = clicked_slot {
-            self.audio_manager
-                .play_sound(crate::audio::SoundId::UiClick);
-            let slot_item = self.get_item_at_slot(slot_type);
-
-            match slot_type {
-                SlotType::Creative(item) => {
-                    self.inventory.creative_supply(item, is_left);
-                    return;
-                }
-                SlotType::Hotbar(index) if creative_catalog => {
-                    self.inventory.click_creative_hotbar(index, is_left);
-                    return;
-                }
-                _ => {}
-            }
-
-            if let Some(dragged) = self.inventory.dragged {
-                if !self.slot_accepts(slot_type, dragged) {
-                    return;
-                }
-            }
-
-            match slot_type {
-                SlotType::CraftOutput => {
-                    if let Some(output) = slot_item {
-                        self.trigger_advancement(
-                            crate::advancements::AdvancementTrigger::CraftItem(output.item),
-                        );
-                        // Can only take from output slot
-                        let max_stack = output.item.properties().max_stack;
-                        if self.inventory.dragged.is_none() {
-                            self.inventory.dragged = Some(output);
-                            // Consume craft input ingredients
-                            for slot in self.inventory.craft_input.iter_mut() {
-                                if let Some(stack) = slot {
-                                    if stack.count > 1 {
-                                        stack.count -= 1;
-                                    } else {
-                                        *slot = None;
-                                    }
-                                }
-                            }
-                            let grid_size = if self.inventory.is_table_open { 3 } else { 2 };
-                            self.inventory.craft_output = self
-                                .recipe_manager
-                                .match_recipe(&self.inventory.craft_input, grid_size);
-                        } else if let Some(ref mut dragged) = self.inventory.dragged {
-                            if dragged.can_merge_with(&output)
-                                && dragged.count + output.count <= max_stack
-                            {
-                                dragged.count += output.count;
-                                // Consume craft input ingredients
-                                for slot in self.inventory.craft_input.iter_mut() {
-                                    if let Some(stack) = slot {
-                                        if stack.count > 1 {
-                                            stack.count -= 1;
-                                        } else {
-                                            *slot = None;
-                                        }
-                                    }
-                                }
-                                let grid_size = if self.inventory.is_table_open { 3 } else { 2 };
-                                self.inventory.craft_output = self
-                                    .recipe_manager
-                                    .match_recipe(&self.inventory.craft_input, grid_size);
-                            }
-                        }
-                    }
-                }
-                SlotType::AnvilOutput => {
-                    if let Some(output) = self.anvil.output {
-                        let affordable = self.game_mode == GameMode::Creative
-                            || self.player_state.experience_level >= self.anvil.cost as u32;
-                        if affordable && self.inventory.dragged.is_none() {
-                            if self.game_mode == GameMode::Survival {
-                                self.player_state.spend_levels(self.anvil.cost as u32);
-                            }
-                            self.inventory.dragged = Some(output);
-                            self.anvil.left = None;
-                            self.anvil.right = None;
-                            self.anvil.rename.clear();
-                            self.anvil.refresh();
-                        }
-                    }
-                }
-                SlotType::ContainerSlot(slot_index)
-                    if matches!(self.role, crate::menu::MultiplayerRole::Client { .. }) =>
-                {
-                    let Some(container_pos) = self.container_target else {
-                        return;
-                    };
-                    if let crate::state::NetworkHandle::Client { game_to_client, .. } =
-                        &self.network
-                    {
-                        let dragged = self
-                            .inventory
-                            .dragged
-                            .as_ref()
-                            .map(crate::network::protocol::ItemWire::from_stack);
-                        let _ = game_to_client.tracked_send(
-                            crate::network::client::GameToClient::ContainerClickRequest {
-                                dimension: self.current_dimension as u8,
-                                revision: self
-                                    .chunk_manager
-                                    .get_block_entity(
-                                        container_pos.0,
-                                        container_pos.1,
-                                        container_pos.2,
-                                    )
-                                    .map(crate::block_entity::BlockEntity::revision)
-                                    .unwrap_or(0),
-                                slot_index: slot_index as u16,
-                                is_left,
-                                dragged,
-                            },
-                        );
-                    }
-                    return;
-                }
-                _ => {
-                    // Normal slots (Backpack, Hotbar, Armor, CraftInput, ContainerSlot for host)
-                    if self.keys.shift && is_left && self.inventory.dragged.is_none() {
-                        if let Some(stack) = slot_item {
-                            match slot_type {
-                                SlotType::ContainerSlot(_) => {
-                                    self.check_claim_furnace_xp(slot_type);
-                                    if let Some(remainder) = self.inventory.add_stack(stack) {
-                                        self.set_item_at_slot(slot_type, Some(remainder));
-                                    } else {
-                                        self.set_item_at_slot(slot_type, None);
-                                    }
-                                    return;
-                                }
-                                SlotType::Hotbar(_) | SlotType::Backpack(_) => {
-                                    if let Some(pos) = self.container_target {
-                                        let block =
-                                            self.chunk_manager.get_block(pos.0, pos.1, pos.2);
-                                        if matches!(
-                                            block,
-                                            BlockType::Furnace | BlockType::FurnaceLit
-                                        ) {
-                                            let is_fuel = self.recipe_manager.is_fuel(stack.item);
-                                            let is_smeltable = self
-                                                .recipe_manager
-                                                .match_smelting(stack.item)
-                                                .is_some();
-                                            let target_slot_idx = if is_smeltable {
-                                                Some(0)
-                                            } else if is_fuel {
-                                                Some(1)
-                                            } else {
-                                                None
-                                            };
-                                            if let Some(target_slot) = target_slot_idx {
-                                                let target_type =
-                                                    SlotType::ContainerSlot(target_slot);
-                                                let target_item =
-                                                    self.get_item_at_slot(target_type);
-                                                let max_s = stack.item.properties().max_stack;
-                                                match target_item {
-                                                    None => {
-                                                        self.set_item_at_slot(
-                                                            target_type,
-                                                            Some(stack),
-                                                        );
-                                                        self.set_item_at_slot(slot_type, None);
-                                                        return;
-                                                    }
-                                                    Some(t_stack)
-                                                        if t_stack.can_merge_with(&stack)
-                                                            && t_stack.count < max_s =>
-                                                    {
-                                                        let space = max_s - t_stack.count;
-                                                        let transfer = space.min(stack.count);
-                                                        self.set_item_at_slot(
-                                                            target_type,
-                                                            Some(ItemStack {
-                                                                count: t_stack.count + transfer,
-                                                                ..t_stack
-                                                            }),
-                                                        );
-                                                        if stack.count > transfer {
-                                                            self.set_item_at_slot(
-                                                                slot_type,
-                                                                Some(ItemStack {
-                                                                    count: stack.count - transfer,
-                                                                    ..stack
-                                                                }),
-                                                            );
-                                                        } else {
-                                                            self.set_item_at_slot(slot_type, None);
-                                                        }
-                                                        return;
-                                                    }
-                                                    _ => {}
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-
-                    let max_stack = slot_item
-                        .map(|s| s.item.properties().max_stack)
-                        .unwrap_or(64);
-
-                    if is_left {
-                        // Left Click interaction
-                        if let Some(dragged) = self.inventory.dragged {
-                            if let Some(slot) = slot_item {
-                                if slot.can_merge_with(&dragged) {
-                                    // Stack them
-                                    let space = max_stack.saturating_sub(slot.count);
-                                    let transfer = space.min(dragged.count);
-                                    let new_slot_count = slot.count + transfer;
-                                    let new_drag_count = dragged.count - transfer;
-
-                                    self.set_item_at_slot(
-                                        slot_type,
-                                        Some(ItemStack {
-                                            count: new_slot_count,
-                                            ..slot
-                                        }),
-                                    );
-                                    if new_drag_count > 0 {
-                                        self.inventory.dragged = Some(ItemStack {
-                                            count: new_drag_count,
-                                            ..dragged
-                                        });
-                                    } else {
-                                        self.inventory.dragged = None;
-                                    }
-                                } else {
-                                    // Swap slot and dragged
-                                    self.set_item_at_slot(slot_type, Some(dragged));
-                                    self.inventory.dragged = Some(slot);
-                                }
-                            } else {
-                                // Put dragged in empty slot
-                                self.set_item_at_slot(slot_type, Some(dragged));
-                                self.inventory.dragged = None;
-                            }
-                        } else {
-                            // Pickup entire slot
-                            if let Some(slot) = slot_item {
-                                self.check_claim_furnace_xp(slot_type);
-                                self.inventory.dragged = Some(slot);
-                                self.set_item_at_slot(slot_type, None);
-                            }
-                        }
-                    } else {
-                        // Right Click interaction
-                        if let Some(dragged) = self.inventory.dragged {
-                            if let Some(slot) = slot_item {
-                                if slot.can_merge_with(&dragged) && slot.count < max_stack {
-                                    // Drop 1
-                                    self.set_item_at_slot(
-                                        slot_type,
-                                        Some(ItemStack {
-                                            count: slot.count + 1,
-                                            ..slot
-                                        }),
-                                    );
-                                    if dragged.count > 1 {
-                                        self.inventory.dragged = Some(ItemStack {
-                                            count: dragged.count - 1,
-                                            ..dragged
-                                        });
-                                    } else {
-                                        self.inventory.dragged = None;
-                                    }
-                                } else if !slot.can_merge_with(&dragged) {
-                                    // Swap (like left click swap)
-                                    self.set_item_at_slot(slot_type, Some(dragged));
-                                    self.inventory.dragged = Some(slot);
-                                }
-                            } else {
-                                // Drop 1 in empty slot
-                                self.set_item_at_slot(
-                                    slot_type,
-                                    Some(ItemStack {
-                                        count: 1,
-                                        ..dragged
-                                    }),
-                                );
-                                if dragged.count > 1 {
-                                    self.inventory.dragged = Some(ItemStack {
-                                        count: dragged.count - 1,
-                                        ..dragged
-                                    });
-                                } else {
-                                    self.inventory.dragged = None;
-                                }
-                            }
-                        } else {
-                            // Split stack in slot
-                            if let Some(slot) = slot_item {
-                                let take = (slot.count + 1) / 2;
-                                let keep = slot.count - take;
-                                self.inventory.dragged = Some(ItemStack {
-                                    count: take,
-                                    ..slot
-                                });
-                                if keep > 0 {
-                                    self.set_item_at_slot(
-                                        slot_type,
-                                        Some(ItemStack {
-                                            count: keep,
-                                            ..slot
-                                        }),
-                                    );
-                                } else {
-                                    self.set_item_at_slot(slot_type, None);
-                                }
-                            }
-                        }
-                    }
-
-                    // If we clicked a craft input slot, recalculate craft output
-                    if let SlotType::CraftInput(_) = slot_type {
-                        let grid_size = if self.inventory.is_table_open { 3 } else { 2 };
-                        self.inventory.craft_output = self
-                            .recipe_manager
-                            .match_recipe(&self.inventory.craft_input, grid_size);
-                    }
-                    self.refresh_workstations();
-                }
-            }
-        } else if let Some(dragged) = self.inventory.dragged {
-            let aspect = self.size.width as f32 / self.size.height as f32;
-            if creative_catalog
-                && is_left
-                && creative_scroll_track_rect(aspect).contains(mouse_x, mouse_y)
-            {
-                return;
-            }
-            if is_left {
-                self.throw_dropped_item(dragged.item, dragged.count);
-                self.inventory.dragged = None;
-                self.inventory.creative_drag_origin = None;
-            } else {
-                self.throw_dropped_item(dragged.item, 1);
-                if dragged.count > 1 {
-                    self.inventory.dragged = Some(ItemStack {
-                        count: dragged.count - 1,
-                        ..dragged
-                    });
-                } else {
-                    self.inventory.dragged = None;
-                    self.inventory.creative_drag_origin = None;
-                }
-            }
-        }
-    }
-
-    fn perform_enchantment(&mut self, index: usize) {
-        let Some(mut input) = self.enchanting.input else {
+        let Some(target) = presentation_target_for_authority_hit(hit) else {
             return;
         };
-        if !crate::enchantment::can_enchant(input.item) {
-            return;
-        }
-        let option = self.enchanting.options[index];
-        let lapis_available = self
-            .enchanting
-            .lapis
-            .filter(|stack| stack.item == Item::LapisLazuli)
-            .map(|stack| stack.count)
-            .unwrap_or(0);
-        let affordable = self.game_mode == GameMode::Creative
-            || (lapis_available >= option.lapis_cost as u32
-                && self.player_state.experience_level >= option.cost as u32);
-        if !affordable {
-            return;
-        }
-        input.enchantments.merge(&option.enchantments);
-        self.enchanting.input = Some(input);
-        self.trigger_advancement(crate::advancements::AdvancementTrigger::EnchantItem);
-        if self.game_mode == GameMode::Survival {
-            self.player_state.spend_levels(option.cost as u32);
-            if let Some(lapis) = &mut self.enchanting.lapis {
-                if lapis.count > option.lapis_cost as u32 {
-                    lapis.count -= option.lapis_cost as u32;
-                } else {
-                    self.enchanting.lapis = None;
+        match self.presentation_topology().inventory_decision(target) {
+            PresentationInventoryAction::SendAuthorityOp => {
+                if let InventoryHit::Slot(SlotType::ContainerSlot(slot)) = hit {
+                    self.submit_inventory_container_click(slot, is_left);
                 }
             }
+            PresentationInventoryAction::LocalMutate => {
+                // Embedded player-inventory writeback exception is applied
+                // by `app` after this click via `sync_authority_gameplay_from_local`.
+                // Local slot mutation lives in presentation inventory policy, not leftover sim.
+                let _ = (probe, is_left);
+            }
+            PresentationInventoryAction::Reject => {}
         }
-        self.enchanting.seed = self.enchanting.seed.wrapping_add(0x9E37_79B9);
-        self.enchanting.refresh();
     }
 
     pub fn open_inventory(&mut self) {
@@ -19245,299 +5287,19 @@ impl State {
         self.sync_cursor_mode();
     }
 
-    /// If the chest at pos is part of a double chest (Left/Right), return the
-    /// position of the partner chest, or None if single.
-    fn double_chest_partner(
-        &self,
-        pos: (i32, i32, i32),
-        chest_type: crate::world::ChestType,
-    ) -> Option<(i32, i32, i32)> {
-        let state_raw = self.chunk_manager.get_block_state(pos.0, pos.1, pos.2);
-        let state = crate::world::BlockState::decode(state_raw);
-        let (dx, dz) = match (state.facing, chest_type) {
-            (crate::redstone::Direction::North, crate::world::ChestType::Left) => (-1, 0),
-            (crate::redstone::Direction::North, crate::world::ChestType::Right) => (1, 0),
-            (crate::redstone::Direction::East, crate::world::ChestType::Left) => (0, -1),
-            (crate::redstone::Direction::East, crate::world::ChestType::Right) => (0, 1),
-            (crate::redstone::Direction::South, crate::world::ChestType::Left) => (1, 0),
-            (crate::redstone::Direction::South, crate::world::ChestType::Right) => (-1, 0),
-            (crate::redstone::Direction::West, crate::world::ChestType::Left) => (0, 1),
-            (crate::redstone::Direction::West, crate::world::ChestType::Right) => (0, -1),
-            _ => return None,
-        };
-        let partner = (pos.0 + dx, pos.1, pos.2 + dz);
-        let partner_block = self
-            .chunk_manager
-            .get_block(partner.0, partner.1, partner.2);
-        if partner_block == crate::world::BlockType::Chest {
-            Some(partner)
-        } else {
-            None
-        }
-    }
-
-    /// Drop all items from a chest's inventory as entities in the world.
-    /// Returns true if any items were dropped.
-    fn drop_chest_inventory(&mut self, pos: (i32, i32, i32)) -> bool {
-        let (cx, cz) = (
-            pos.0.div_euclid(crate::world::CHUNK_WIDTH as i32),
-            pos.2.div_euclid(crate::world::CHUNK_DEPTH as i32),
-        );
-        let (bx, by, bz) = (
-            pos.0.rem_euclid(crate::world::CHUNK_WIDTH as i32) as u8,
-            pos.1 as i16,
-            pos.2.rem_euclid(crate::world::CHUNK_DEPTH as i32) as u8,
-        );
-        // Collect items first to avoid borrow conflict with self.spawn_dropped_item
-        let items: Vec<crate::inventory::Item> = self
-            .chunk_manager
-            .chunks
-            .get(&(cx, cz))
-            .and_then(|chunk| chunk.get_block_entity(bx, by, bz))
-            .and_then(|entry| {
-                if let crate::block_entity::BlockEntity::Chest(chest_be) = entry {
-                    Some(
-                        chest_be
-                            .inventory
-                            .slots
-                            .iter()
-                            .filter_map(|s| s.as_ref().map(|stack| stack.item))
-                            .collect(),
-                    )
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default();
-        if items.is_empty() {
-            return false;
-        }
-        let sound_pos = glam::Vec3::new(pos.0 as f32 + 0.5, pos.1 as f32 + 0.5, pos.2 as f32 + 0.5);
-        for item in &items {
-            self.spawn_dropped_item(*item, sound_pos);
-        }
-        true
-    }
-
-    /// Drops and removes any inventory-bearing block entity at `pos` while
-    /// preserving complete stack metadata.  This is shared by chest, furnace,
-    /// hopper, dispenser, and dropper break paths.
-    fn drop_block_entity_inventory(&mut self, pos: (i32, i32, i32)) -> bool {
-        let Some(mut entity) = self
-            .chunk_manager
-            .get_block_entity(pos.0, pos.1, pos.2)
-            .cloned()
-        else {
-            return false;
-        };
-        let stacks = entity.drain_stacks();
-        if stacks.is_empty() {
-            self.chunk_manager
-                .set_block_entity(pos.0, pos.1, pos.2, None);
-            self.chunk_manager.mark_block_entity_dirty(pos.0, pos.2);
-            self.redstone
-                .mark_container_changed(&self.chunk_manager, pos);
-            self.broadcast_block_entity_delta(pos.0, pos.1, pos.2, None);
-            return false;
-        }
-        let sound_pos = Vec3::new(pos.0 as f32 + 0.5, pos.1 as f32 + 0.5, pos.2 as f32 + 0.5);
-        for stack in stacks {
-            self.spawn_dropped_stack(stack, sound_pos);
-        }
-        self.chunk_manager
-            .set_block_entity(pos.0, pos.1, pos.2, None);
-        self.chunk_manager.mark_block_entity_dirty(pos.0, pos.2);
-        self.redstone
-            .mark_container_changed(&self.chunk_manager, pos);
-        self.broadcast_block_entity_delta(pos.0, pos.1, pos.2, None);
-        true
-    }
-
-    /// Close legacy sessions at one exact container coordinate. Double-chest
-    /// callers must invoke this once for the broken half and once for the
-    /// verified partner; unrelated adjacent containers remain untouched.
-    fn close_legacy_container_sessions_at(&mut self, position: (i32, i32, i32)) {
-        let affected = self.container_sessions.close_by_block(
-            self.current_dimension as u8,
-            position.0,
-            position.1,
-            position.2,
-        );
-        for session in affected {
-            if let NetworkHandle::Host { host_to_server, .. } = &self.network {
-                let _ = host_to_server.tracked_send(
-                    crate::network::server::HostToServer::SendContainerClose {
-                        to: session.player_id,
-                        dimension: session.dimension,
-                        x: session.x,
-                        y: session.y,
-                        z: session.z,
-                    },
-                );
-            }
-        }
-        if self.container_target == Some(position) {
-            self.force_close_inventory();
-        }
-    }
-
-    fn open_chest(&mut self, pos: (i32, i32, i32)) {
-        if self.has_in_process_runtime() {
-            // Authority-boundary callers must use project_authority_container
-            // after an accepted Container::Open response.
-            return;
-        }
+    fn submit_join_container_open(&mut self, pos: (i32, i32, i32)) {
         if !self.game_mode_policy().can_use_containers {
             return;
         }
-        if !self.is_authoritative() {
-            let _ = self.submit_local_authority_operation(
-                crate::network::protocol::GameplayOperation::Container {
-                    action: crate::network::protocol::ContainerAction::Open.to_wire(),
-                    x: pos.0,
-                    y: pos.1,
-                    z: pos.2,
-                    slot: 0,
-                },
-            );
-            return;
-        }
-        let (cx, cz) = (
-            pos.0.div_euclid(crate::world::CHUNK_WIDTH as i32),
-            pos.2.div_euclid(crate::world::CHUNK_DEPTH as i32),
+        let _ = self.submit_local_authority_operation(
+            crate::network::protocol::GameplayOperation::Container {
+                action: crate::network::protocol::ContainerAction::Open,
+                x: pos.0,
+                y: pos.1,
+                z: pos.2,
+                slot: 0,
+            },
         );
-        let (bx, by, bz) = (
-            pos.0.rem_euclid(crate::world::CHUNK_WIDTH as i32) as u8,
-            pos.1 as i16,
-            pos.2.rem_euclid(crate::world::CHUNK_DEPTH as i32) as u8,
-        );
-        let Some(chunk) = self.chunk_manager.chunks.get(&(cx, cz)) else {
-            return;
-        };
-        let Some(entity) = chunk.get_block_entity(bx, by, bz) else {
-            return;
-        };
-        if !matches!(
-            entity,
-            crate::block_entity::BlockEntity::Chest(_)
-                | crate::block_entity::BlockEntity::Furnace(_)
-                | crate::block_entity::BlockEntity::Hopper(_)
-                | crate::block_entity::BlockEntity::Dispenser(_)
-                | crate::block_entity::BlockEntity::Dropper(_)
-        ) {
-            return;
-        }
-        self.container_target = Some(pos);
-        let slot_count = crate::container_sessions::ContainerSessionManager::get_slot_count(
-            &self.chunk_manager,
-            pos.0,
-            pos.1,
-            pos.2,
-        );
-        self.container_is_double = slot_count > 27;
-        self.set_local_chest_open_state(pos, true);
-        self.open_inventory();
-    }
-
-    /// Count legacy viewers across both halves of a double chest. Runtime
-    /// authority paths track both halves directly; the older session manager
-    /// stores only the clicked coordinate, so first/last edges need this
-    /// pair-aware projection.
-    fn legacy_chest_viewer_count(&self, dimension: u8, position: (i32, i32, i32)) -> usize {
-        let mut count = self
-            .container_sessions
-            .viewer_count(dimension, position.0, position.1, position.2);
-        let block = self
-            .chunk_manager
-            .get_block(position.0, position.1, position.2);
-        if matches!(block, BlockType::Chest | BlockType::EndCityChest) {
-            if let Some(partner) =
-                crate::block_entity::double_chest_partner(&self.chunk_manager, position)
-            {
-                count += self
-                    .container_sessions
-                    .viewer_count(dimension, partner.0, partner.1, partner.2);
-            }
-        }
-        count
-    }
-
-    /// Legacy host/singleplayer presentation edge for chest feedback. Runtime
-    /// authority paths publish the same state through WorldMutation; this is
-    /// only used when no embedded runtime owns the world.
-    fn set_local_chest_open_state(&mut self, position: (i32, i32, i32), open: bool) {
-        let block = self
-            .chunk_manager
-            .get_block(position.0, position.1, position.2);
-        if !matches!(block, BlockType::Chest | BlockType::EndCityChest) {
-            return;
-        }
-        let current_state = self
-            .chunk_manager
-            .get_block_state(position.0, position.1, position.2);
-        let mut state = crate::world::BlockState::decode(current_state);
-        if state.is_open == open {
-            return;
-        }
-        state.is_open = open;
-        self.chunk_manager
-            .set_block_state(position.0, position.1, position.2, state.encode());
-        self.audio_manager.play_sound(if open {
-            crate::audio::SoundId::ChestOpen
-        } else {
-            crate::audio::SoundId::ChestClose
-        });
-        self.broadcast_block_change(position.0, position.1, position.2, block);
-        if let Some(partner) =
-            crate::block_entity::double_chest_partner(&self.chunk_manager, position)
-        {
-            let mut partner_state = crate::world::BlockState::decode(
-                self.chunk_manager
-                    .get_block_state(partner.0, partner.1, partner.2),
-            );
-            if partner_state.is_open != open {
-                partner_state.is_open = open;
-                self.chunk_manager.set_block_state(
-                    partner.0,
-                    partner.1,
-                    partner.2,
-                    partner_state.encode(),
-                );
-                self.broadcast_block_change(partner.0, partner.1, partner.2, block);
-            }
-        }
-    }
-
-    fn open_station(&mut self, kind: StationKind, position: Vec3) {
-        if !self.game_mode_policy().can_use_containers {
-            return;
-        }
-        self.active_station = Some(kind);
-        if kind == StationKind::Enchanting {
-            let wx = position.x as i32;
-            let wy = position.y as i32;
-            let wz = position.z as i32;
-            let mut shelves = 0;
-            for dx in -2i32..=2i32 {
-                for dz in -2i32..=2i32 {
-                    if dx.abs() != 2 && dz.abs() != 2 {
-                        continue;
-                    }
-                    for dy in 0..=1 {
-                        if self.chunk_manager.get_block(wx + dx, wy + dy, wz + dz)
-                            == BlockType::Bookshelf
-                        {
-                            shelves += 1;
-                        }
-                    }
-                }
-            }
-            self.enchanting.bookshelves = shelves.min(15);
-            self.enchanting.seed =
-                self.world_time.ticks as u32 ^ wx as u32 ^ (wz as u32).rotate_left(16);
-            self.enchanting.refresh();
-        }
-        self.open_inventory();
     }
 
     pub fn open_merchant_trade_window(&mut self, villager_id: u64) {
@@ -19554,11 +5316,8 @@ impl State {
                     let profession = entity.profession;
                     let level = entity.villager_level;
                     let xp = entity.villager_xp;
-                    let offers = if entity.offers.is_empty() {
-                        crate::village::trade::generate_offers_for_level(profession, level)
-                    } else {
-                        entity.offers.clone()
-                    };
+                    // Offers are authority/entity projection only — never generate on GPU.
+                    let offers = entity.offers.clone();
                     Some((profession, level, xp, offers))
                 } else {
                     None
@@ -19590,159 +5349,22 @@ impl State {
         if offer_index >= self.active_merchant_offers.len() {
             return false;
         }
-        if self.has_in_process_runtime() || !self.is_authoritative() {
-            let response = self.submit_local_authority_operation(
-                crate::network::protocol::GameplayOperation::Trade {
-                    villager_id,
-                    offer_index: offer_index as u16,
-                },
-            );
-            let accepted = matches!(
-                response.map(|response| response.outcome),
-                Some(crate::network::protocol::GameplayOutcome::Accepted { .. })
-            );
-            if accepted {
-                if let Some(offer) = self.active_merchant_offers.get_mut(offer_index) {
-                    offer.uses = offer.uses.saturating_add(1);
-                }
-            }
-            return accepted;
-        }
-
-        let discount = if self.player_state.hero_of_the_village_timer > 0.0 {
-            0.3
-        } else {
-            0.0
-        };
-        let offer = &self.active_merchant_offers[offer_index];
-        if offer.is_out_of_stock() {
-            return false;
-        }
-
-        let required_a_count = offer.effective_cost_a(discount);
-        let mut count_a = 0;
-        let mut count_b = 0;
-
-        for slot in self
-            .inventory
-            .hotbar
-            .iter()
-            .chain(self.inventory.main.iter())
-            .flatten()
-        {
-            if slot.item == offer.buy_a.item {
-                count_a += slot.count;
-            }
-            if let Some(buy_b) = &offer.buy_b {
-                if slot.item == buy_b.item {
-                    count_b += slot.count;
-                }
+        let response = self.submit_local_authority_operation(
+            crate::network::protocol::GameplayOperation::Trade {
+                villager_id,
+                offer_index: offer_index as u16,
+            },
+        );
+        let accepted = matches!(
+            response.map(|response| response.outcome),
+            Some(crate::network::protocol::GameplayOutcome::Accepted { .. })
+        );
+        if accepted {
+            if let Some(offer) = self.active_merchant_offers.get_mut(offer_index) {
+                offer.uses = offer.uses.saturating_add(1);
             }
         }
-
-        if count_a < required_a_count {
-            return false;
-        }
-        if let Some(buy_b) = &offer.buy_b {
-            if count_b < buy_b.count {
-                return false;
-            }
-        }
-
-        // Deduct item A
-        let mut needed_a = required_a_count;
-        for slot in self
-            .inventory
-            .hotbar
-            .iter_mut()
-            .chain(self.inventory.main.iter_mut())
-        {
-            if needed_a == 0 {
-                break;
-            }
-            if let Some(stack) = slot {
-                if stack.item == offer.buy_a.item {
-                    let take = stack.count.min(needed_a);
-                    stack.count -= take;
-                    needed_a -= take;
-                    if stack.count == 0 {
-                        *slot = None;
-                    }
-                }
-            }
-        }
-
-        // Deduct item B if present
-        if let Some(buy_b) = &offer.buy_b {
-            let mut needed_b = buy_b.count;
-            for slot in self
-                .inventory
-                .hotbar
-                .iter_mut()
-                .chain(self.inventory.main.iter_mut())
-            {
-                if needed_b == 0 {
-                    break;
-                }
-                if let Some(stack) = slot {
-                    if stack.item == buy_b.item {
-                        let take = stack.count.min(needed_b);
-                        stack.count -= take;
-                        needed_b -= take;
-                        if stack.count == 0 {
-                            *slot = None;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Grant sell item
-        let _ = self.inventory.add_stack(offer.sell);
-
-        // Update trade offer stock and XP
-        let mut new_xp = self.active_merchant_xp;
-        let mut new_level = self.active_merchant_level;
-
-        if let Some(offer_mut) = self.active_merchant_offers.get_mut(offer_index) {
-            offer_mut.uses += 1;
-            new_xp += offer_mut.xp_reward;
-        }
-
-        if let Some(next) = new_level.next_level() {
-            if new_xp >= next.xp_threshold() {
-                new_level = next;
-                let new_offers = crate::village::trade::generate_offers_for_level(
-                    self.active_merchant_profession,
-                    new_level,
-                );
-                for no in new_offers {
-                    if !self
-                        .active_merchant_offers
-                        .iter()
-                        .any(|o| o.buy_a == no.buy_a && o.sell == no.sell)
-                    {
-                        self.active_merchant_offers.push(no);
-                    }
-                }
-            }
-        }
-
-        self.active_merchant_xp = new_xp;
-        self.active_merchant_level = new_level;
-
-        // Persist to villager entity
-        if let Some(index) = self.entity_manager.id_to_index.get(&villager_id).copied() {
-            let entity = &mut self.entity_manager.entities[index];
-            entity.villager_xp = new_xp;
-            entity.villager_level = new_level;
-            entity.offers = self.active_merchant_offers.clone();
-        }
-
-        self.trigger_advancement(crate::advancements::AdvancementTrigger::VillagerTrade);
-        self.audio_manager
-            .play_sound(crate::audio::SoundId::UiClick);
-        true
+        accepted
     }
 
     /// Tear down a container UI after an authoritative invalidation.
@@ -19766,10 +5388,6 @@ impl State {
         self.anvil.right = None;
         self.anvil.output = None;
         self.anvil.rename.clear();
-        if let Some(villager_id) = self.active_merchant_villager_id {
-            self.merchant_sessions
-                .close_sessions_for_villager(villager_id);
-        }
         self.active_merchant_villager_id = None;
         self.active_merchant_offers.clear();
         self.inventory.is_open = false;
@@ -19787,7 +5405,6 @@ impl State {
                     pos,
                     crate::network::protocol::ContainerAction::Close,
                     0,
-                    true,
                 )
             } else {
                 self.inventory.is_open = false;
@@ -19811,11 +5428,11 @@ impl State {
             }
             return accepted;
         }
-        if !self.is_authoritative() {
+        if self.presentation_topology().is_join_client() {
             if let Some(pos) = self.container_target {
                 let _ = self.submit_local_authority_operation(
                     crate::network::protocol::GameplayOperation::Container {
-                        action: crate::network::protocol::ContainerAction::Close.to_wire(),
+                        action: crate::network::protocol::ContainerAction::Close,
                         x: pos.0,
                         y: pos.1,
                         z: pos.2,
@@ -19833,107 +5450,7 @@ impl State {
             self.sync_cursor_mode();
             return true;
         }
-        if !matches!(self.role, MultiplayerRole::Client { .. }) {
-            if let Some(position) = self.container_target {
-                if self.legacy_chest_viewer_count(self.current_dimension as u8, position) == 0 {
-                    self.set_local_chest_open_state(position, false);
-                }
-            }
-        }
-        if matches!(self.role, crate::menu::MultiplayerRole::Client { .. }) {
-            if let Some(pos) = self.container_target {
-                if let crate::state::NetworkHandle::Client { game_to_client, .. } = &self.network {
-                    let _ = game_to_client.tracked_send(
-                        crate::network::client::GameToClient::ContainerClose {
-                            dimension: self.current_dimension as u8,
-                            x: pos.0,
-                            y: pos.1,
-                            z: pos.2,
-                        },
-                    );
-                }
-            }
-        }
-        let mut returning_items: Vec<ItemStack> = self
-            .inventory
-            .craft_input
-            .iter()
-            .flatten()
-            .copied()
-            .collect();
-        returning_items.extend(match self.active_station {
-            Some(StationKind::Enchanting) => [self.enchanting.input, self.enchanting.lapis]
-                .into_iter()
-                .flatten()
-                .collect(),
-            Some(StationKind::Brewing) => self
-                .brewing
-                .bottles
-                .iter()
-                .copied()
-                .chain(std::iter::once(self.brewing.ingredient))
-                .flatten()
-                .collect(),
-            Some(StationKind::Anvil) => [self.anvil.left, self.anvil.right]
-                .into_iter()
-                .flatten()
-                .collect(),
-            None | Some(StationKind::Furnace) | Some(StationKind::Merchant) => Vec::new(),
-        });
-
-        for stack in returning_items {
-            if let Some(remainder) = self.inventory.add_stack(stack) {
-                self.throw_dropped_item(remainder.item, remainder.count);
-            }
-        }
-
-        if self.inventory.creative_drag_origin
-            == Some(crate::inventory::CreativeDragOrigin::Catalog)
-        {
-            self.inventory.dragged = None;
-            self.inventory.creative_drag_origin = None;
-        } else if let Some(dragged) = self.inventory.dragged {
-            if let Some(remainder) = self.inventory.add_stack(dragged) {
-                self.throw_dropped_item(remainder.item, remainder.count);
-            }
-            self.inventory.dragged = None;
-            self.inventory.creative_drag_origin = None;
-        }
-
-        self.inventory.craft_input.fill(None);
-        match self.active_station {
-            Some(StationKind::Enchanting) => {
-                self.enchanting.input = None;
-                self.enchanting.lapis = None;
-            }
-            Some(StationKind::Brewing) => {
-                self.brewing.bottles.fill(None);
-                self.brewing.ingredient = None;
-            }
-            Some(StationKind::Anvil) => {
-                self.anvil.left = None;
-                self.anvil.right = None;
-            }
-            None | Some(StationKind::Furnace) | Some(StationKind::Merchant) => {}
-        }
-
-        self.inventory.is_open = false;
-        self.inventory.is_table_open = false;
-        self.inventory.craft_input = vec![None; 4];
-        self.inventory.craft_output = None;
-        if self.active_station == Some(StationKind::Merchant) {
-            if let Some(vid) = self.active_merchant_villager_id {
-                self.merchant_sessions.close_sessions_for_villager(vid);
-            }
-            self.active_merchant_villager_id = None;
-            self.active_merchant_offers.clear();
-        }
-        self.active_station = None;
-        self.container_target = None;
-        self.container_is_double = false;
-        self.anvil.rename.clear();
-
-        self.sync_cursor_mode();
+        self.force_close_inventory();
         true
     }
 
@@ -19942,9 +5459,12 @@ impl State {
             self.size = new_size;
             self.config.width = new_size.width;
             self.config.height = new_size.height;
-            self.surface.configure(&self.device, &self.config);
+            self.surface
+                .as_ref()
+                .expect("presentation surface")
+                .configure(self.device.as_ref().unwrap(), &self.config);
             // Recreate depth texture on resize
-            self.depth_view = Self::create_depth_texture(&self.device, &self.config);
+            self.depth_view = Self::create_depth_texture(self.device.as_ref().unwrap(), &self.config);
         }
     }
 
@@ -19975,29 +5495,38 @@ impl State {
     }
 
     fn poll_gpu_timestamp_readbacks(&mut self) {
+        use std::sync::atomic::Ordering;
+
+        // Hot path: AtomicBool only — never take the status mutex just to decide
+        // whether a device poll is needed.
         if self
             .gpu_timestamp_readback_slots
             .iter()
-            .any(|slot| slot.status.lock().unwrap().state == GpuTimestampReadbackState::Mapping)
+            .any(|slot| slot.mapping.load(Ordering::Acquire))
         {
-            self.device.poll(wgpu::Maintain::Poll);
+            self.device.as_ref().unwrap().poll(wgpu::Maintain::Poll);
         }
 
         let mut newest_sample = None;
         for slot in &self.gpu_timestamp_readback_slots {
-            let status = *slot.status.lock().unwrap();
+            // Skip while the map callback still owns the mutex.
+            let Ok(mut status) = slot.status.try_lock() else {
+                continue;
+            };
             if status.state != GpuTimestampReadbackState::Mapped {
                 continue;
             }
             let Some(submission_tag) = status.submission_tag else {
                 continue;
             };
+            // Drop the lock before touching the mapped range.
+            drop(status);
 
             let slice = slot.buffer.slice(..);
             let range = slice.get_mapped_range();
             if range.len() == GPU_TIMESTAMP_READBACK_BYTES as usize {
                 let mut pass_timings_ns = [0; 7];
-                let period = f64::from(self.queue.get_timestamp_period());
+                let period = f64::from(self.queue.as_ref().unwrap().get_timestamp_period());
                 for (pass_index, timing) in pass_timings_ns.iter_mut().enumerate() {
                     let start_offset = pass_index * 16;
                     let start = u64::from_ne_bytes(
@@ -20020,7 +5549,12 @@ impl State {
             }
             drop(range);
             slot.buffer.unmap();
-            let consumed = slot.status.lock().unwrap().consume(submission_tag);
+            slot.mapping.store(false, Ordering::Release);
+            let consumed = slot
+                .status
+                .lock()
+                .unwrap()
+                .consume(submission_tag);
             debug_assert!(consumed, "mapped timestamp slot must be consumed once");
         }
 
@@ -20033,4101 +5567,40 @@ impl State {
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         self.sync_translation_catalog();
-        let font_source = &self.font_source;
-        let add_string_lines = |s: &str,
-                                start_x: f32,
-                                y: f32,
-                                char_w: f32,
-                                char_h: f32,
-                                spacing: f32,
-                                color: [f32; 4],
-                                vertices: &mut Vec<UiVertex>| {
-            add_string_lines_with_source(
-                font_source,
-                s,
-                start_x,
-                y,
-                char_w,
-                char_h,
-                spacing,
-                color,
-                vertices,
-            );
-        };
         let allocs_before = crate::perf::thread_alloc_count();
-        let output = self.surface.get_current_texture()?;
+        let output = self
+            .surface
+            .as_ref()
+            .expect("presentation surface")
+            .get_current_texture()?;
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let mut gpu_upload_elapsed = Duration::ZERO;
 
-        let terrain_prepare_started = Instant::now();
-        let view_projection = Mat4::from_cols_array_2d(&self.camera_uniform.view_proj);
-        let frustum = Frustum::from_view_projection(view_projection);
+        self.prepare_terrain_draw_plan();
 
-        let cam_pos = self.camera.position;
-        let render_blocks = self.chunk_manager.render_distance as f32 * CHUNK_WIDTH as f32;
-        let render_distance_sq = render_blocks * render_blocks;
-        let r_i32 = self.chunk_manager.render_distance as i32;
-
-        let cam_sec_x = (cam_pos.x / 16.0).floor() as i32;
-        let cam_sec_y_raw = (cam_pos.y / 16.0).floor() as i32;
-        let cam_sec_z = (cam_pos.z / 16.0).floor() as i32;
-
-        let height = self.chunk_manager.dimension.height();
-        let fail_open_section_vis = cam_sec_y_raw < height.min_section_y() as i32
-            || cam_sec_y_raw >= height.max_section_y_exclusive() as i32
-            || !self.chunk_meshes.contains_key(&(cam_sec_x, cam_sec_z));
-
-        if !fail_open_section_vis {
-            crate::culling::traverse_section_visibility_with_scratch(
-                cam_sec_x,
-                cam_sec_y_raw as i8,
-                cam_sec_z,
-                r_i32,
-                &frustum,
-                |x, sy, z| {
-                    self.chunk_meshes
-                        .get(&(x, z))
-                        .and_then(|mesh| mesh.section(sy))
-                        .map(|section| section.connectivity.fail_open())
-                },
-                &mut self.visible_sections_scratch,
-                &mut self.section_visibility_scratch,
-            );
-        }
-
-        self.perf_counters.save_queue_depth = self.save_queue_stats.depth();
-        self.perf_counters.save_queue_bytes = self.save_queue_stats.queued_bytes();
-        self.perf_counters.save_in_flight = self.save_queue_stats.in_flight();
-        self.perf_counters.save_in_flight_bytes = self.save_queue_stats.in_flight_bytes();
-        self.perf_counters.save_drop = self.save_queue_stats.dropped();
-        if let Ok(mgr) = self.save_manager.try_lock() {
-            self.perf_counters.loaded_region_cache_bytes = mgr.region_cache_bytes();
-        }
-
-        let lod_thresholds = LodThresholds::new(render_blocks * 0.5, render_blocks * 0.75);
-        self.terrain_candidates_scratch.clear();
-        let mut occluded_sections = 0u64;
-
-        for (&coord, mesh) in &self.chunk_meshes {
-            for (sec_idx, section) in mesh.sections.iter().enumerate() {
-                let section_y = mesh.section_y_at_index(sec_idx);
-                let Some(bounds) = section.finest_bounds() else {
-                    continue;
-                };
-
-                let distance_sq = bounds.center_distance_squared(cam_pos);
-                if distance_sq > render_distance_sq || !frustum.intersects_aabb(&bounds) {
-                    continue;
-                }
-
-                if !fail_open_section_vis
-                    && !self
-                        .visible_sections_scratch
-                        .contains(&(coord.0, section_y, coord.1))
-                {
-                    occluded_sections += 1;
-                    continue;
-                }
-
-                let lod = select_lod_for_bounds(cam_pos, bounds, lod_thresholds);
-                let Some(level) = section.level(lod) else {
-                    continue;
-                };
-                let key = SectionKey::new(coord.0, section_y, coord.1);
-
-                if let Some(bounds) = level.opaque.bounds {
-                    self.terrain_candidates_scratch
-                        .push(DrawCandidate::for_section(
-                            key,
-                            bounds,
-                            level.opaque.num_indices(),
-                            DrawLayer::Opaque,
-                            lod,
-                            distance_sq,
-                        ));
-                }
-                if let Some(bounds) = level.transparent.bounds {
-                    self.terrain_candidates_scratch
-                        .push(DrawCandidate::for_section(
-                            key,
-                            bounds,
-                            level.transparent.num_indices(),
-                            DrawLayer::Transparent,
-                            lod,
-                            distance_sq,
-                        ));
-                }
-            }
-        }
-
-        let terrain_candidate_count = self.terrain_candidates_scratch.len();
-        self.terrain_draw_plan_scratch
-            .build_into(self.terrain_candidates_scratch.iter().copied(), &frustum);
-        let draw_plan = &self.terrain_draw_plan_scratch;
-        self.submitted_terrain_triangles = draw_plan.submitted_triangle_count();
-        self.submitted_terrain_draw_calls = draw_plan.draw_call_count();
-        self.visible_chunk_count = draw_plan.visible_chunk_count();
-        self.perf_counters.loaded_chunks = self.chunk_manager.chunks.len() as u64;
-        self.perf_counters.visible_chunks = self.visible_chunk_count as u64;
-        self.perf_counters.occluded_chunks = occluded_sections;
-        self.perf_counters.terrain_candidates = terrain_candidate_count as u64;
-        self.perf_counters.terrain_triangles = self.submitted_terrain_triangles;
-        self.perf_counters.in_flight =
-            (self.chunk_load_in_flight.len() + self.section_scheduler.in_flight.len()) as u64;
-        let total_committed: usize = self
-            .render_regions
-            .values()
-            .map(|r| r.committed_bytes())
-            .sum();
-        let total_used: usize = self.render_regions.values().map(|r| r.used_bytes()).sum();
-        self.perf_counters.gpu_mesh_bytes = total_committed as u64;
-        self.perf_counters.gpu_arena_used_bytes = total_used as u64;
-        self.perf_counters.gpu_arena_wasted_bytes =
-            total_committed.saturating_sub(total_used) as u64;
-        self.perf_counters.gpu_arena_regions = self.render_regions.len() as u64;
-        self.perf_counters.gpu_buffer_objects = self
-            .render_regions
-            .values()
-            .map(|region| region.buffer_object_count() as u64)
-            .sum();
-        self.perf_recorder.record(
-            crate::perf::ScopeId::RenderPrepareTerrain,
-            terrain_prepare_started.elapsed(),
-        );
-
+        // Frame-slot acquire must stay between terrain prepare and entity
+        // uploads. Do not reorder this with timestamp queries. When the GPU is
+        // behind, skip the present rather than stalling with Maintain::Wait.
         while let Ok(completed) = self.gpu_completion_rx.try_recv() {
             self.frame_resource_pool.complete(completed);
         }
         let frame_submission_id = self.next_gpu_submission_id;
         self.next_gpu_submission_id = self.next_gpu_submission_id.wrapping_add(1).max(1);
-        self.frame_ring_index = loop {
-            match self.frame_resource_pool.acquire(frame_submission_id) {
-                Ok(lease) => break lease.slot_id,
-                Err(crate::gpu_frame_resources::AcquireError::Exhausted { .. }) => {
-                    // The bounded three-slot pool never overwrites GPU-owned
-                    // instance data. Waiting is rare (only when CPU outruns all
-                    // configured frames in flight) and completion callbacks
-                    // reclaim the exact submission's slot.
-                    self.device.poll(wgpu::Maintain::Wait);
-                    while let Ok(completed) = self.gpu_completion_rx.try_recv() {
-                        self.frame_resource_pool.complete(completed);
-                    }
-                }
+        self.frame_ring_index = match self.frame_resource_pool.acquire(frame_submission_id) {
+            Ok(lease) => lease.slot_id,
+            Err(crate::gpu_frame_resources::AcquireError::Exhausted { .. }) => {
+                drop(view);
+                drop(output);
+                return Ok(());
             }
         };
 
-        self.entity_los_manager.counters = crate::culling::CullingCounters::default();
-        self.entity_los_manager
-            .set_current_identity(crate::culling::LosIdentity {
-                dimension: self.current_dimension,
-                generation: self.terrain_generation,
-                world_revision: self.los_world_revision,
-            });
-        // Poll entity LOS async results
-        self.entity_los_manager.poll_results();
-
-        // Compile mob instance data with culling hierarchy
-        let entity_prepare_started = Instant::now();
-        self.mob_cuboid_instances_scratch.clear();
-        self.mob_quad_instances_scratch.clear();
-
-        let mut entities_rendered = 0u64;
-        let mut entities_frustum_culled = 0u64;
-        let mut entities_occlusion_culled = 0u64;
-
-        let cam_cell = (
-            cam_pos.x.floor() as i32,
-            cam_pos.y.floor() as i32,
-            cam_pos.z.floor() as i32,
-        );
-
-        for entity in self
-            .entity_manager
-            .query_radius(cam_pos, render_distance_sq.sqrt())
-        {
-            // 1. Distance check
-            let entity_render_dist_sq = render_distance_sq
-                * (self.settings.entity_distance_scale * self.settings.entity_distance_scale);
-            let dist_sq = entity.position.distance_squared(cam_pos);
-            if dist_sq > entity_render_dist_sq {
-                self.entity_los_manager.counters.distance += 1;
-                continue;
-            }
-
-            // 2. Frustum check
-            let aabb = entity.get_aabb();
-            let bounds = crate::chunk_render::MeshBounds::new(aabb.min, aabb.max);
-            if !frustum.intersects_aabb(&bounds) {
-                entities_frustum_culled += 1;
-                self.entity_los_manager.counters.frustum += 1;
-                continue;
-            }
-
-            // 3. Section visibility check
-            let sec_x = (entity.position.x / 16.0).floor() as i32;
-            let sec_y = (entity.position.y / 16.0).floor() as i32;
-            let sec_z = (entity.position.z / 16.0).floor() as i32;
-
-            if !fail_open_section_vis {
-                let valid_y = sec_y.clamp(
-                    height.min_section_y() as i32,
-                    height.max_section_y_exclusive() as i32 - 1,
-                ) as i8;
-                if !self
-                    .visible_sections_scratch
-                    .contains(&(sec_x, valid_y, sec_z))
-                {
-                    entities_occlusion_culled += 1;
-                    self.entity_los_manager.counters.section += 1;
-                    continue;
-                }
-            }
-
-            // 4. Asynchronous Entity LOS check
-            if !self.entity_los_manager.is_entity_visible(
-                entity,
-                cam_pos,
-                cam_cell,
-                &self.chunk_manager,
-            ) {
-                entities_occlusion_culled += 1;
-                continue;
-            }
-
-            entities_rendered += 1;
-            crate::mob_renderer::render_mobs(
-                std::iter::once(entity),
-                &self.chunk_manager,
-                &mut self.mob_cuboid_instances_scratch,
-                &mut self.mob_quad_instances_scratch,
-                self.total_time,
-            );
-        }
-
-        self.perf_counters.rendered_entities = entities_rendered;
-        self.perf_counters.frustum_culled_entities = entities_frustum_culled;
-        self.perf_counters.occlusion_culled_entities = entities_occlusion_culled;
-
-        if self.camera_perspective.is_third_person() {
-            let held_item = self.inventory.hotbar[self.inventory.selected]
-                .map(|stack| stack.item)
-                .unwrap_or(Item::Air);
-            crate::mob_renderer::render_local_player(
-                self.player_physics.position,
-                std::f32::consts::FRAC_PI_2 - self.camera.yaw,
-                -self.camera.pitch,
-                &self.chunk_manager,
-                &mut self.mob_cuboid_instances_scratch,
-                &mut self.mob_quad_instances_scratch,
-                held_item,
-                self.total_time,
-                self.player_physics.velocity,
-            );
-        }
-
-        self.mob_cuboid_num_instances = self.mob_cuboid_instances_scratch.len() as u32;
-        self.mob_quad_num_instances = self.mob_quad_instances_scratch.len() as u32;
-
-        if self.mob_cuboid_num_instances > 0 {
-            let limit = (self.mob_cuboid_num_instances as usize).min(16384);
-            self.mob_cuboid_num_instances = limit as u32;
-            let upload_started = Instant::now();
-            self.queue.write_buffer(
-                &self.mob_cuboid_instance_buffers[self.frame_ring_index],
-                0,
-                bytemuck::cast_slice(&self.mob_cuboid_instances_scratch[..limit]),
-            );
-            let upload_elapsed = upload_started.elapsed();
-            self.gpu_upload_time_frame += upload_elapsed;
-            self.gpu_upload_scopes_frame
-                .record(crate::perf::UploadSource::Entity as usize, upload_elapsed);
-            self.perf_counters.upload_bytes_frame =
-                self.perf_counters.upload_bytes_frame.saturating_add(
-                    (limit * std::mem::size_of::<crate::mob_renderer::MobInstance>()) as u64,
-                );
-        }
-
-        if self.mob_quad_num_instances > 0 {
-            let limit = (self.mob_quad_num_instances as usize).min(4096);
-            self.mob_quad_num_instances = limit as u32;
-            let upload_started = Instant::now();
-            self.queue.write_buffer(
-                &self.mob_quad_instance_buffers[self.frame_ring_index],
-                0,
-                bytemuck::cast_slice(&self.mob_quad_instances_scratch[..limit]),
-            );
-            let upload_elapsed = upload_started.elapsed();
-            self.gpu_upload_time_frame += upload_elapsed;
-            self.gpu_upload_scopes_frame
-                .record(crate::perf::UploadSource::Entity as usize, upload_elapsed);
-            self.perf_counters.upload_bytes_frame =
-                self.perf_counters.upload_bytes_frame.saturating_add(
-                    (limit * std::mem::size_of::<crate::mob_renderer::MobInstance>()) as u64,
-                );
-        }
-        let mut entity_prepare_elapsed = entity_prepare_started.elapsed();
-
-        // Compile particle instance data
-        let particle_prepare_started = Instant::now();
-        self.particle_instances_scratch.clear();
-        self.particle_num_indices = self
-            .particles
-            .compile_instances(&mut self.particle_instances_scratch);
-        let particle_count = self.particle_instances_scratch.len();
-        if particle_count > 0 {
-            let upload_started = Instant::now();
-            self.queue.write_buffer(
-                &self.particle_instance_buffers[self.frame_ring_index],
-                0,
-                bytemuck::cast_slice(&self.particle_instances_scratch),
-            );
-            let upload_elapsed = upload_started.elapsed();
-            self.gpu_upload_time_frame += upload_elapsed;
-            self.gpu_upload_scopes_frame
-                .record(crate::perf::UploadSource::Particle as usize, upload_elapsed);
-            self.perf_counters.upload_bytes_frame =
-                self.perf_counters.upload_bytes_frame.saturating_add(
-                    (particle_count * std::mem::size_of::<crate::particles::ParticleInstance>())
-                        as u64,
-                );
-        }
-        let particle_prepare_elapsed = particle_prepare_started.elapsed();
-        self.perf_recorder.record(
-            crate::perf::ScopeId::RenderPrepareParticles,
-            particle_prepare_elapsed,
-        );
-
-        // Compile first-person hand mesh in view space. Hidden in third-person.
-        let hand_prepare_started = Instant::now();
-        if !self.camera_perspective.is_third_person() {
-            let speed_2d = Vec3::new(
-                self.player_physics.velocity.x,
-                0.0,
-                self.player_physics.velocity.z,
-            )
-            .length();
-            let walking = speed_2d > 0.1;
-            let walk_swing = if walking && self.settings.accessibility.camera_bobbing {
-                (self.total_time * 8.0).sin() * 0.6
-            } else {
-                0.0
-            };
-            let swing_active = self.left_mouse_pressed || self.total_time < self.hand_swing_until;
-            let attack_swing = crate::hand_renderer::hand_swing_progress(
-                (self.total_time - self.hand_swing_started_at).max(0.0),
-                swing_active,
-            );
-            let mesh_key = crate::hand_renderer::hand_mesh_key(&self.inventory);
-            if crate::hand_renderer::should_rebuild_hand_mesh(self.last_hand_mesh_key, mesh_key) {
-                self.last_hand_mesh_key = Some(mesh_key);
-                crate::hand_renderer::build_first_person_hand_base_mesh(
-                    mesh_key,
-                    &mut self.hand_vertices_scratch,
-                    &mut self.hand_indices_scratch,
-                );
-                let hand_vertices_len = self.hand_vertices_scratch.len();
-                let hand_indices_len = self.hand_indices_scratch.len();
-                let mesh_fits_buffers = hand_vertices_len
-                    <= crate::hand_renderer::HAND_VERTEX_CAPACITY
-                    && hand_indices_len <= crate::hand_renderer::HAND_INDEX_CAPACITY
-                    && self
-                        .hand_indices_scratch
-                        .iter()
-                        .all(|index| (*index as usize) < hand_vertices_len);
-                self.hand_num_indices = 0;
-                if hand_indices_len > 0 && mesh_fits_buffers {
-                    self.hand_num_indices = hand_indices_len as u32;
-                    let upload_started = Instant::now();
-                    self.queue.write_buffer(
-                        &self.hand_vertex_buffer,
-                        0,
-                        bytemuck::cast_slice(&self.hand_vertices_scratch),
-                    );
-                    self.queue.write_buffer(
-                        &self.hand_index_buffer,
-                        0,
-                        bytemuck::cast_slice(&self.hand_indices_scratch),
-                    );
-                    let hand_upload_elapsed = upload_started.elapsed();
-                    gpu_upload_elapsed += hand_upload_elapsed;
-                    self.gpu_upload_scopes_frame.record(
-                        crate::perf::UploadSource::Entity as usize,
-                        hand_upload_elapsed,
-                    );
-                    self.perf_counters.upload_bytes_frame =
-                        self.perf_counters.upload_bytes_frame.saturating_add(
-                            (hand_vertices_len * std::mem::size_of::<Vertex>()
-                                + hand_indices_len * std::mem::size_of::<u32>())
-                                as u64,
-                        );
-                } else if hand_indices_len > 0 {
-                    eprintln!(
-                        "Skipping invalid first-person hand mesh: {hand_vertices_len} vertices, \
-                         {hand_indices_len} indices"
-                    );
-                }
-            }
-
-            // Animation is a per-frame uniform transform over the cached base
-            // mesh; walking and attacking never regenerate or upload vertices.
-            let animation =
-                crate::hand_renderer::animation_for_hand_mesh(mesh_key, walk_swing, attack_swing);
-            let aspect = self.size.width.max(1) as f32 / self.size.height.max(1) as f32;
-            let hand_proj = Mat4::perspective_lh(f32::to_radians(70.0), aspect, 0.01, 10.0);
-            let combined = hand_proj * animation.matrix();
-            let mut hand_uniform = crate::camera::CameraUniform::new();
-            hand_uniform.view_proj = combined.to_cols_array_2d();
-            hand_uniform.inv_view_proj = combined.inverse().to_cols_array_2d();
-            hand_uniform.camera_pos = [0.0, 0.0, 0.0, 0.0];
-            let upload_started = Instant::now();
-            self.queue.write_buffer(
-                &self.hand_camera_buffer,
-                0,
-                bytemuck::bytes_of(&hand_uniform),
-            );
-            let elapsed = upload_started.elapsed();
-            gpu_upload_elapsed += elapsed;
-            self.gpu_upload_scopes_frame
-                .record(crate::perf::UploadSource::Entity as usize, elapsed);
-            self.perf_counters.upload_bytes_frame = self
-                .perf_counters
-                .upload_bytes_frame
-                .saturating_add(std::mem::size_of::<crate::camera::CameraUniform>() as u64);
-        }
-        entity_prepare_elapsed += hand_prepare_started.elapsed();
-        self.perf_recorder.record(
-            crate::perf::ScopeId::RenderPrepareEntities,
-            entity_prepare_elapsed,
-        );
-
-        let ui_prepare_started = Instant::now();
-        let mut ui_vertices = std::mem::take(&mut self.ui_vertices_scratch);
-        let mut ui_line_vertices = std::mem::take(&mut self.ui_line_vertices_scratch);
-        ui_vertices.clear();
-        ui_line_vertices.clear();
-        if self.is_saving || self.save_error.is_some() {
-            let bg_color = [0.1, 0.1, 0.1, 0.75];
-            ui_vertices.push(UiVertex {
-                position: [-1.0, 1.0, 0.0],
-                color: bg_color,
-            });
-            ui_vertices.push(UiVertex {
-                position: [-1.0, -1.0, 0.0],
-                color: bg_color,
-            });
-            ui_vertices.push(UiVertex {
-                position: [1.0, -1.0, 0.0],
-                color: bg_color,
-            });
-            ui_vertices.push(UiVertex {
-                position: [-1.0, 1.0, 0.0],
-                color: bg_color,
-            });
-            ui_vertices.push(UiVertex {
-                position: [1.0, -1.0, 0.0],
-                color: bg_color,
-            });
-            ui_vertices.push(UiVertex {
-                position: [1.0, 1.0, 0.0],
-                color: bg_color,
-            });
-
-            if self.save_error.is_some() {
-                let [mouse_x, mouse_y] = self.mouse_ndc;
-                for (y0, y1) in [(0.02, 0.12), (-0.16, -0.06)] {
-                    let hovered = (-0.3..=0.3).contains(&mouse_x) && (y0..=y1).contains(&mouse_y);
-                    add_ui_quad(
-                        &mut ui_vertices,
-                        -0.3,
-                        0.3,
-                        y0,
-                        y1,
-                        if hovered {
-                            [0.45, 0.18, 0.14, 1.0]
-                        } else {
-                            [0.22, 0.08, 0.07, 1.0]
-                        },
-                    );
-                    add_ui_border(
-                        &mut ui_line_vertices,
-                        -0.3,
-                        0.3,
-                        y0,
-                        y1,
-                        [0.9, 0.55, 0.45, 1.0],
-                    );
-                }
-            }
-
-            let draw_centered_text =
-                |s: &str,
-                 y: f32,
-                 char_w: f32,
-                 char_h: f32,
-                 spacing: f32,
-                 color: [f32; 4],
-                 vertices: &mut Vec<UiVertex>| {
-                    let upper = s.to_uppercase();
-                    let n = upper.len() as f32;
-                    let width = n * char_w + (n - 1.0) * spacing;
-                    let start_x = -width / 2.0;
-                    add_string_lines(&upper, start_x, y, char_w, char_h, spacing, color, vertices);
-                };
-
-            if let Some(error) = &self.save_error {
-                let save_failed = self.translate("hud.save_failed");
-                draw_centered_text(
-                    &save_failed,
-                    0.38,
-                    0.03,
-                    0.06,
-                    0.012,
-                    [1.0, 0.35, 0.28, 1.0],
-                    &mut ui_line_vertices,
-                );
-                let reason: String = error.chars().take(56).collect();
-                draw_centered_text(
-                    &reason,
-                    0.25,
-                    0.015,
-                    0.03,
-                    0.006,
-                    [1.0, 0.8, 0.7, 1.0],
-                    &mut ui_line_vertices,
-                );
-                let retry = self.translate("hud.retry");
-                draw_centered_text(
-                    &retry,
-                    0.05,
-                    0.025,
-                    0.05,
-                    0.01,
-                    [1.0, 1.0, 1.0, 1.0],
-                    &mut ui_line_vertices,
-                );
-                let quit_without_saving = self.translate("hud.quit_without_saving");
-                draw_centered_text(
-                    &quit_without_saving,
-                    -0.13,
-                    0.018,
-                    0.036,
-                    0.007,
-                    [1.0, 1.0, 1.0, 1.0],
-                    &mut ui_line_vertices,
-                );
-            } else {
-                let saving_world = self.translate("hud.saving_world");
-                draw_centered_text(
-                    &saving_world,
-                    0.0,
-                    0.03,
-                    0.06,
-                    0.012,
-                    [1.0, 1.0, 1.0, 1.0],
-                    &mut ui_line_vertices,
-                );
-            }
-
-            self.apply_ui_accessibility(&mut ui_vertices, &mut ui_line_vertices, &mut []);
-            let ui_vert_len = ui_vertices.len().min(4096);
-            let ui_line_vert_len = ui_line_vertices.len().min(4096);
-
-            let upload_started = Instant::now();
-            self.queue.write_buffer(
-                &self.ui_vertex_buffer,
-                0,
-                bytemuck::cast_slice(&ui_vertices[..ui_vert_len]),
-            );
-            self.queue.write_buffer(
-                &self.ui_line_vertex_buffer,
-                0,
-                bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]),
-            );
-            let upload_elapsed = upload_started.elapsed();
-            self.gpu_upload_time_frame += upload_elapsed;
-            self.gpu_upload_scopes_frame
-                .record(crate::perf::UploadSource::Ui as usize, upload_elapsed);
-            self.perf_counters.upload_bytes_frame =
-                self.perf_counters.upload_bytes_frame.saturating_add(
-                    ((ui_vert_len * std::mem::size_of::<UiVertex>())
-                        + (ui_line_vert_len * std::mem::size_of::<UiVertex>()))
-                        as u64,
-                );
-
-            self.num_ui_vertices = ui_vert_len as u32;
-            self.num_ui_line_vertices = ui_line_vert_len as u32;
-            self.num_ui_textured_vertices = 0;
-        } else if self.connection_lost {
-            let [mouse_x, mouse_y] = self.mouse_ndc;
-            let button_hover = (-0.3..=0.3).contains(&mouse_x) && (-0.10..=0.00).contains(&mouse_y);
-
-            add_ui_quad(
-                &mut ui_vertices,
-                -1.0,
-                1.0,
-                -1.0,
-                1.0,
-                [0.04, 0.02, 0.02, 0.82],
-            );
-            add_ui_quad(
-                &mut ui_vertices,
-                -0.3,
-                0.3,
-                -0.10,
-                0.00,
-                if button_hover {
-                    [0.45, 0.18, 0.14, 1.0]
-                } else {
-                    [0.22, 0.08, 0.07, 1.0]
-                },
-            );
-            add_ui_border(
-                &mut ui_line_vertices,
-                -0.3,
-                0.3,
-                -0.10,
-                0.00,
-                if button_hover {
-                    [1.0, 1.0, 1.0, 1.0]
-                } else {
-                    [0.75, 0.35, 0.3, 1.0]
-                },
-            );
-
-            let mut draw_centered =
-                |text: &str, y: f32, char_w: f32, char_h: f32, spacing: f32, color: [f32; 4]| {
-                    let text = text.to_uppercase();
-                    let width = text.chars().count() as f32 * (char_w + spacing) - spacing;
-                    add_string_lines(
-                        &text,
-                        -width / 2.0,
-                        y,
-                        char_w,
-                        char_h,
-                        spacing,
-                        color,
-                        &mut ui_line_vertices,
-                    );
-                };
-            let connection_lost = self.translate("hud.connection_lost");
-            draw_centered(
-                &connection_lost,
-                0.26,
-                0.030,
-                0.060,
-                0.010,
-                [1.0, 0.35, 0.28, 1.0],
-            );
-            if let Some(status) = &self.network_status {
-                let reason: String = status
-                    // `network_status` is an internal protocol/status string;
-                    // keep its stable prefix independent from the localized
-                    // heading rendered above.
-                    .strip_prefix("CONNECTION LOST: ")
-                    .unwrap_or(status)
-                    .chars()
-                    .take(64)
-                    .collect();
-                draw_centered(&reason, 0.12, 0.012, 0.024, 0.005, [0.92, 0.92, 0.92, 1.0]);
-            }
-            let return_to_menu = self.translate("hud.return_to_menu");
-            draw_centered(
-                &return_to_menu,
-                -0.07,
-                0.020,
-                0.040,
-                0.008,
-                [1.0, 1.0, 1.0, 1.0],
-            );
-
-            self.apply_ui_accessibility(&mut ui_vertices, &mut ui_line_vertices, &mut []);
-            let ui_vert_len = ui_vertices.len().min(UI_VERTEX_CAPACITY);
-            let ui_line_vert_len = ui_line_vertices.len().min(UI_LINE_VERTEX_CAPACITY);
-            let upload_started = Instant::now();
-            self.queue.write_buffer(
-                &self.ui_vertex_buffer,
-                0,
-                bytemuck::cast_slice(&ui_vertices[..ui_vert_len]),
-            );
-            self.queue.write_buffer(
-                &self.ui_line_vertex_buffer,
-                0,
-                bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]),
-            );
-            let upload_elapsed = upload_started.elapsed();
-            self.gpu_upload_time_frame += upload_elapsed;
-            self.gpu_upload_scopes_frame
-                .record(crate::perf::UploadSource::Ui as usize, upload_elapsed);
-            self.perf_counters.upload_bytes_frame =
-                self.perf_counters.upload_bytes_frame.saturating_add(
-                    ((ui_vert_len + ui_line_vert_len) * std::mem::size_of::<UiVertex>()) as u64,
-                );
-            self.num_ui_vertices = ui_vert_len as u32;
-            self.num_ui_line_vertices = ui_line_vert_len as u32;
-            self.num_ui_textured_vertices = 0;
-        } else if self.player_state.is_dead {
-            let mouse_x = self.mouse_ndc[0];
-            let mouse_y = self.mouse_ndc[1];
-
-            // Respawn button hover (X: [-0.3, 0.3], Y: [-0.1, 0.0])
-            let respawn_hover =
-                mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.1 && mouse_y <= 0.0;
-
-            // Reddish overlay
-            let bg_color = [0.4, 0.0, 0.0, 0.6];
-            ui_vertices.push(UiVertex {
-                position: [-1.0, 1.0, 0.0],
-                color: bg_color,
-            });
-            ui_vertices.push(UiVertex {
-                position: [-1.0, -1.0, 0.0],
-                color: bg_color,
-            });
-            ui_vertices.push(UiVertex {
-                position: [1.0, -1.0, 0.0],
-                color: bg_color,
-            });
-            ui_vertices.push(UiVertex {
-                position: [-1.0, 1.0, 0.0],
-                color: bg_color,
-            });
-            ui_vertices.push(UiVertex {
-                position: [1.0, -1.0, 0.0],
-                color: bg_color,
-            });
-            ui_vertices.push(UiVertex {
-                position: [1.0, 1.0, 0.0],
-                color: bg_color,
-            });
-
-            // Button background
-            let btn_bg = if respawn_hover {
-                [0.4, 0.1, 0.1, 1.0]
-            } else {
-                [0.2, 0.0, 0.0, 1.0]
-            };
-            let btn_border = if respawn_hover {
-                [1.0, 1.0, 1.0, 1.0]
-            } else {
-                [0.6, 0.2, 0.2, 1.0]
-            };
-            let btn_y_min = -0.10;
-            let btn_y_max = 0.00;
-
-            ui_vertices.push(UiVertex {
-                position: [-0.3, btn_y_max, 0.0],
-                color: btn_bg,
-            });
-            ui_vertices.push(UiVertex {
-                position: [-0.3, btn_y_min, 0.0],
-                color: btn_bg,
-            });
-            ui_vertices.push(UiVertex {
-                position: [0.3, btn_y_min, 0.0],
-                color: btn_bg,
-            });
-            ui_vertices.push(UiVertex {
-                position: [-0.3, btn_y_max, 0.0],
-                color: btn_bg,
-            });
-            ui_vertices.push(UiVertex {
-                position: [0.3, btn_y_min, 0.0],
-                color: btn_bg,
-            });
-            ui_vertices.push(UiVertex {
-                position: [0.3, btn_y_max, 0.0],
-                color: btn_bg,
-            });
-
-            // Button border
-            ui_line_vertices.push(UiVertex {
-                position: [-0.3, btn_y_max, 0.0],
-                color: btn_border,
-            });
-            ui_line_vertices.push(UiVertex {
-                position: [0.3, btn_y_max, 0.0],
-                color: btn_border,
-            });
-            ui_line_vertices.push(UiVertex {
-                position: [0.3, btn_y_max, 0.0],
-                color: btn_border,
-            });
-            ui_line_vertices.push(UiVertex {
-                position: [0.3, btn_y_min, 0.0],
-                color: btn_border,
-            });
-            ui_line_vertices.push(UiVertex {
-                position: [0.3, btn_y_min, 0.0],
-                color: btn_border,
-            });
-            ui_line_vertices.push(UiVertex {
-                position: [-0.3, btn_y_min, 0.0],
-                color: btn_border,
-            });
-            ui_line_vertices.push(UiVertex {
-                position: [-0.3, btn_y_min, 0.0],
-                color: btn_border,
-            });
-            ui_line_vertices.push(UiVertex {
-                position: [-0.3, btn_y_max, 0.0],
-                color: btn_border,
-            });
-
-            let draw_centered_text =
-                |s: &str,
-                 y: f32,
-                 char_w: f32,
-                 char_h: f32,
-                 spacing: f32,
-                 color: [f32; 4],
-                 vertices: &mut Vec<UiVertex>| {
-                    let upper = s.to_uppercase();
-                    let n = upper.len() as f32;
-                    let width = n * char_w + (n - 1.0) * spacing;
-                    let start_x = -width / 2.0;
-                    add_string_lines(&upper, start_x, y, char_w, char_h, spacing, color, vertices);
-                };
-
-            let you_died = self.translate("hud.you_died");
-            draw_centered_text(
-                &you_died,
-                0.30,
-                0.04,
-                0.08,
-                0.015,
-                [1.0, 0.2, 0.2, 1.0],
-                &mut ui_line_vertices,
-            );
-
-            let death_key = match self.player_state.death_reason {
-                Some(DamageSource::Fall) => "death.fall",
-                Some(DamageSource::Void) => "death.void",
-                Some(DamageSource::Hunger) => "death.starved",
-                Some(DamageSource::Mob) => "death.mob",
-                Some(DamageSource::Explosion) => "death.explosion",
-                Some(DamageSource::Drowning) => "death.drowned",
-                Some(DamageSource::Lightning) => "death.lightning",
-                None => "death.generic",
-            };
-            let msg = self.translate(death_key);
-            draw_centered_text(
-                &msg,
-                0.15,
-                0.015,
-                0.03,
-                0.006,
-                [1.0, 1.0, 1.0, 1.0],
-                &mut ui_line_vertices,
-            );
-            let respawn = self.translate("hud.respawn");
-            draw_centered_text(
-                &respawn,
-                -0.06,
-                0.02,
-                0.04,
-                0.008,
-                [1.0, 1.0, 1.0, 1.0],
-                &mut ui_line_vertices,
-            );
-
-            self.apply_ui_accessibility(&mut ui_vertices, &mut ui_line_vertices, &mut []);
-            let ui_vert_len = ui_vertices.len().min(4096);
-            let ui_line_vert_len = ui_line_vertices.len().min(4096);
-
-            let upload_started = Instant::now();
-            self.queue.write_buffer(
-                &self.ui_vertex_buffer,
-                0,
-                bytemuck::cast_slice(&ui_vertices[..ui_vert_len]),
-            );
-            self.queue.write_buffer(
-                &self.ui_line_vertex_buffer,
-                0,
-                bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]),
-            );
-            let upload_elapsed = upload_started.elapsed();
-            self.gpu_upload_time_frame += upload_elapsed;
-            self.gpu_upload_scopes_frame
-                .record(crate::perf::UploadSource::Ui as usize, upload_elapsed);
-            self.perf_counters.upload_bytes_frame =
-                self.perf_counters.upload_bytes_frame.saturating_add(
-                    ((ui_vert_len + ui_line_vert_len) * std::mem::size_of::<UiVertex>()) as u64,
-                );
-
-            self.num_ui_vertices = ui_vert_len as u32;
-            self.num_ui_line_vertices = ui_line_vert_len as u32;
-            self.num_ui_textured_vertices = 0;
-        } else if self.is_paused {
-            let mouse_x = self.mouse_ndc[0];
-            let mouse_y = self.mouse_ndc[1];
-
-            // Hover states
-            let resume_hover =
-                mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= 0.24 && mouse_y <= 0.34;
-            let fov_hover = mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= 0.10 && mouse_y <= 0.20;
-            let sens_hover =
-                mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.04 && mouse_y <= 0.06;
-            let rd_hover =
-                mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.18 && mouse_y <= -0.08;
-            let vol_hover =
-                mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.32 && mouse_y <= -0.22;
-            let weather_vol_hover = point_in_bounds(mouse_x, mouse_y, PAUSE_WEATHER_VOLUME_BOUNDS);
-            let quit_hover = point_in_bounds(mouse_x, mouse_y, PAUSE_QUIT_BOUNDS);
-
-            // 1. Dark overlay (screen covers from -1.0 to 1.0)
-            let bg_color = [0.1, 0.1, 0.1, 0.7];
-            ui_vertices.push(UiVertex {
-                position: [-1.0, 1.0, 0.0],
-                color: bg_color,
-            });
-            ui_vertices.push(UiVertex {
-                position: [-1.0, -1.0, 0.0],
-                color: bg_color,
-            });
-            ui_vertices.push(UiVertex {
-                position: [1.0, -1.0, 0.0],
-                color: bg_color,
-            });
-            ui_vertices.push(UiVertex {
-                position: [-1.0, 1.0, 0.0],
-                color: bg_color,
-            });
-            ui_vertices.push(UiVertex {
-                position: [1.0, -1.0, 0.0],
-                color: bg_color,
-            });
-            ui_vertices.push(UiVertex {
-                position: [1.0, 1.0, 0.0],
-                color: bg_color,
-            });
-
-            // Button drawing helper
-            let draw_button = |hover: bool,
-                               y_min: f32,
-                               y_max: f32,
-                               ui_verts: &mut Vec<UiVertex>,
-                               ui_line_verts: &mut Vec<UiVertex>| {
-                let bg = if hover {
-                    [0.4, 0.4, 0.4, 1.0]
-                } else {
-                    [0.2, 0.2, 0.2, 1.0]
-                };
-                let border = if hover {
-                    [1.0, 1.0, 1.0, 1.0]
-                } else {
-                    [0.6, 0.6, 0.6, 1.0]
-                };
-
-                // Background (two triangles)
-                ui_verts.push(UiVertex {
-                    position: [-0.3, y_max, 0.0],
-                    color: bg,
-                });
-                ui_verts.push(UiVertex {
-                    position: [-0.3, y_min, 0.0],
-                    color: bg,
-                });
-                ui_verts.push(UiVertex {
-                    position: [0.3, y_min, 0.0],
-                    color: bg,
-                });
-                ui_verts.push(UiVertex {
-                    position: [-0.3, y_max, 0.0],
-                    color: bg,
-                });
-                ui_verts.push(UiVertex {
-                    position: [0.3, y_min, 0.0],
-                    color: bg,
-                });
-                ui_verts.push(UiVertex {
-                    position: [0.3, y_max, 0.0],
-                    color: bg,
-                });
-
-                // Border (line loop)
-                ui_line_verts.push(UiVertex {
-                    position: [-0.3, y_max, 0.0],
-                    color: border,
-                });
-                ui_line_verts.push(UiVertex {
-                    position: [0.3, y_max, 0.0],
-                    color: border,
-                });
-                ui_line_verts.push(UiVertex {
-                    position: [0.3, y_max, 0.0],
-                    color: border,
-                });
-                ui_line_verts.push(UiVertex {
-                    position: [0.3, y_min, 0.0],
-                    color: border,
-                });
-                ui_line_verts.push(UiVertex {
-                    position: [0.3, y_min, 0.0],
-                    color: border,
-                });
-                ui_line_verts.push(UiVertex {
-                    position: [-0.3, y_min, 0.0],
-                    color: border,
-                });
-                ui_line_verts.push(UiVertex {
-                    position: [-0.3, y_min, 0.0],
-                    color: border,
-                });
-                ui_line_verts.push(UiVertex {
-                    position: [-0.3, y_max, 0.0],
-                    color: border,
-                });
-            };
-
-            // Draw Button backgrounds and borders
-            draw_button(
-                resume_hover,
-                0.24,
-                0.34,
-                &mut ui_vertices,
-                &mut ui_line_vertices,
-            );
-            draw_button(
-                fov_hover,
-                0.10,
-                0.20,
-                &mut ui_vertices,
-                &mut ui_line_vertices,
-            );
-            draw_button(
-                sens_hover,
-                -0.04,
-                0.06,
-                &mut ui_vertices,
-                &mut ui_line_vertices,
-            );
-            draw_button(
-                rd_hover,
-                -0.18,
-                -0.08,
-                &mut ui_vertices,
-                &mut ui_line_vertices,
-            );
-            draw_button(
-                vol_hover,
-                -0.32,
-                -0.22,
-                &mut ui_vertices,
-                &mut ui_line_vertices,
-            );
-            draw_button(
-                weather_vol_hover,
-                PAUSE_WEATHER_VOLUME_BOUNDS[2],
-                PAUSE_WEATHER_VOLUME_BOUNDS[3],
-                &mut ui_vertices,
-                &mut ui_line_vertices,
-            );
-            draw_button(
-                quit_hover,
-                PAUSE_QUIT_BOUNDS[2],
-                PAUSE_QUIT_BOUNDS[3],
-                &mut ui_vertices,
-                &mut ui_line_vertices,
-            );
-
-            // Centered text drawing helper
-            let draw_centered_text =
-                |s: &str,
-                 y: f32,
-                 char_w: f32,
-                 char_h: f32,
-                 spacing: f32,
-                 color: [f32; 4],
-                 vertices: &mut Vec<UiVertex>| {
-                    let upper = s.to_uppercase();
-                    let n = upper.len() as f32;
-                    let width = n * char_w + (n - 1.0) * spacing;
-                    let start_x = -width / 2.0;
-                    add_string_lines(&upper, start_x, y, char_w, char_h, spacing, color, vertices);
-                };
-
-            // Render Text Labels
-            let text_color = [1.0, 1.0, 1.0, 1.0];
-            // "GAME PAUSED"
-            let game_paused = self.translate("hud.game_paused");
-            draw_centered_text(
-                &game_paused,
-                0.40,
-                0.03,
-                0.06,
-                0.012,
-                text_color,
-                &mut ui_line_vertices,
-            );
-            if let Some(status) = &self.network_status {
-                draw_centered_text(
-                    status,
-                    0.52,
-                    0.014,
-                    0.028,
-                    0.006,
-                    [1.0, 0.45, 0.35, 1.0],
-                    &mut ui_line_vertices,
-                );
-            }
-            // "RESUME"
-            let resume = self.translate("hud.resume");
-            draw_centered_text(
-                &resume,
-                0.28,
-                0.02,
-                0.04,
-                0.008,
-                text_color,
-                &mut ui_line_vertices,
-            );
-
-            // "FOV < value >"
-            let fov_value = format!("{:.0}", self.base_fov);
-            let fov_text = self
-                .translation_catalog
-                .format_lookup("hud.fov", &[("value", &fov_value)]);
-            draw_centered_text(
-                &fov_text,
-                0.14,
-                0.02,
-                0.04,
-                0.008,
-                text_color,
-                &mut ui_line_vertices,
-            );
-
-            // "SENS < value >"
-            let sens_val = (self.sensitivity / 0.002 * 100.0).round();
-            let sens_value = format!("{sens_val:.0}");
-            let sens_text = self
-                .translation_catalog
-                .format_lookup("hud.sensitivity", &[("value", &sens_value)]);
-            draw_centered_text(
-                &sens_text,
-                0.00,
-                0.02,
-                0.04,
-                0.008,
-                text_color,
-                &mut ui_line_vertices,
-            );
-
-            // "RENDER DISTANCE < value >"
-            let rd_value = self.chunk_manager.render_distance.to_string();
-            let rd_text = self
-                .translation_catalog
-                .format_lookup("hud.render_distance", &[("value", &rd_value)]);
-            draw_centered_text(
-                &rd_text,
-                -0.14,
-                0.02,
-                0.04,
-                0.008,
-                text_color,
-                &mut ui_line_vertices,
-            );
-
-            // "MASTER VOLUME < value >"
-            let vol_value = format!("{:.0}", self.settings.master_volume * 100.0);
-            let vol_text = self
-                .translation_catalog
-                .format_lookup("hud.master_volume", &[("value", &vol_value)]);
-            draw_centered_text(
-                &vol_text,
-                -0.28,
-                0.02,
-                0.04,
-                0.008,
-                text_color,
-                &mut ui_line_vertices,
-            );
-
-            // "WEATHER VOLUME < value >"
-            let weather_value = format!("{:.0}", self.settings.weather_volume * 100.0);
-            let weather_vol_text = self
-                .translation_catalog
-                .format_lookup("hud.weather_volume", &[("value", &weather_value)]);
-            draw_centered_text(
-                &weather_vol_text,
-                -0.42,
-                0.02,
-                0.04,
-                0.008,
-                text_color,
-                &mut ui_line_vertices,
-            );
-
-            // "SAVE AND QUIT"
-            let save_and_quit = self.translate("hud.save_and_quit");
-            draw_centered_text(
-                &save_and_quit,
-                -0.56,
-                0.02,
-                0.04,
-                0.008,
-                text_color,
-                &mut ui_line_vertices,
-            );
-
-            // Cap the sizes to the preallocated buffers (4096 vertices)
-            self.apply_ui_accessibility(&mut ui_vertices, &mut ui_line_vertices, &mut []);
-            let ui_vert_len = ui_vertices.len().min(4096);
-            let ui_line_vert_len = ui_line_vertices.len().min(4096);
-
-            let upload_started = Instant::now();
-            self.queue.write_buffer(
-                &self.ui_vertex_buffer,
-                0,
-                bytemuck::cast_slice(&ui_vertices[..ui_vert_len]),
-            );
-            self.queue.write_buffer(
-                &self.ui_line_vertex_buffer,
-                0,
-                bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]),
-            );
-
-            let upload_elapsed = upload_started.elapsed();
-            self.gpu_upload_time_frame += upload_elapsed;
-            self.gpu_upload_scopes_frame
-                .record(crate::perf::UploadSource::Ui as usize, upload_elapsed);
-            self.perf_counters.upload_bytes_frame =
-                self.perf_counters.upload_bytes_frame.saturating_add(
-                    ((ui_vert_len + ui_line_vert_len) * std::mem::size_of::<UiVertex>()) as u64,
-                );
-
-            self.num_ui_vertices = ui_vert_len as u32;
-            self.num_ui_line_vertices = ui_line_vert_len as u32;
-        } else {
-            let mut ui_textured_vertices = Vec::new();
-
-            let aspect = self.size.width as f32 / self.size.height as f32;
-            let slot_w = 0.08;
-            let slot_h = 0.08 * aspect;
-            let gap = 0.01;
-            let start_x = -0.40;
-
-            let draw_durability_bar =
-                |stack: &ItemStack,
-                 x0: f32,
-                 x1: f32,
-                 y0: f32,
-                 y1: f32,
-                 _aspect: f32,
-                 ui_vertices: &mut Vec<UiVertex>| {
-                    if let Some(tool_prop) = stack.item.tool_properties() {
-                        let max_dur = tool_prop.durability;
-                        if stack.durability < max_dur {
-                            let ratio = (stack.durability as f32 / max_dur as f32).clamp(0.0, 1.0);
-
-                            // Define bar bounds relative to slot size
-                            let slot_w = x1 - x0;
-                            let slot_h = y1 - y0;
-
-                            let bar_x0 = x0 + slot_w * 0.15;
-                            let bar_x1 = x1 - slot_w * 0.15;
-                            let bar_y0 = y0 + slot_h * 0.10;
-                            let bar_y1 = y0 + slot_h * 0.16;
-
-                            // 1. Black background bar
-                            let bg_color = [0.0, 0.0, 0.0, 1.0];
-                            ui_vertices.push(UiVertex {
-                                position: [bar_x0, bar_y1, 0.0],
-                                color: bg_color,
-                            });
-                            ui_vertices.push(UiVertex {
-                                position: [bar_x0, bar_y0, 0.0],
-                                color: bg_color,
-                            });
-                            ui_vertices.push(UiVertex {
-                                position: [bar_x1, bar_y0, 0.0],
-                                color: bg_color,
-                            });
-                            ui_vertices.push(UiVertex {
-                                position: [bar_x0, bar_y1, 0.0],
-                                color: bg_color,
-                            });
-                            ui_vertices.push(UiVertex {
-                                position: [bar_x1, bar_y0, 0.0],
-                                color: bg_color,
-                            });
-                            ui_vertices.push(UiVertex {
-                                position: [bar_x1, bar_y1, 0.0],
-                                color: bg_color,
-                            });
-
-                            // 2. Colored foreground bar
-                            let fg_x1 = bar_x0 + (bar_x1 - bar_x0) * ratio;
-                            let (r, g) = if ratio > 0.5 {
-                                ((1.0 - ratio) * 2.0, 1.0)
-                            } else {
-                                (1.0, ratio * 2.0)
-                            };
-                            let fg_color = [r, g, 0.0, 1.0];
-
-                            ui_vertices.push(UiVertex {
-                                position: [bar_x0, bar_y1, 0.0],
-                                color: fg_color,
-                            });
-                            ui_vertices.push(UiVertex {
-                                position: [bar_x0, bar_y0, 0.0],
-                                color: fg_color,
-                            });
-                            ui_vertices.push(UiVertex {
-                                position: [fg_x1, bar_y0, 0.0],
-                                color: fg_color,
-                            });
-                            ui_vertices.push(UiVertex {
-                                position: [bar_x0, bar_y1, 0.0],
-                                color: fg_color,
-                            });
-                            ui_vertices.push(UiVertex {
-                                position: [fg_x1, bar_y0, 0.0],
-                                color: fg_color,
-                            });
-                            ui_vertices.push(UiVertex {
-                                position: [fg_x1, bar_y1, 0.0],
-                                color: fg_color,
-                            });
-                        }
-                    }
-                };
-
-            if self.inventory.is_open {
-                let creative_catalog = self.is_creative_catalog_open();
-                // 1. Dark overlay (screen covers from -1.0 to 1.0)
-                let bg_color = [0.08, 0.08, 0.08, 0.6];
-                ui_vertices.push(UiVertex {
-                    position: [-1.0, 1.0, 0.0],
-                    color: bg_color,
-                });
-                ui_vertices.push(UiVertex {
-                    position: [-1.0, -1.0, 0.0],
-                    color: bg_color,
-                });
-                ui_vertices.push(UiVertex {
-                    position: [1.0, -1.0, 0.0],
-                    color: bg_color,
-                });
-                ui_vertices.push(UiVertex {
-                    position: [-1.0, 1.0, 0.0],
-                    color: bg_color,
-                });
-                ui_vertices.push(UiVertex {
-                    position: [1.0, -1.0, 0.0],
-                    color: bg_color,
-                });
-                ui_vertices.push(UiVertex {
-                    position: [1.0, 1.0, 0.0],
-                    color: bg_color,
-                });
-
-                if creative_catalog {
-                    add_ui_quad(
-                        &mut ui_vertices,
-                        -0.49,
-                        0.51,
-                        -0.92,
-                        0.92,
-                        [0.10, 0.10, 0.10, 0.96],
-                    );
-                    add_ui_border(
-                        &mut ui_line_vertices,
-                        -0.49,
-                        0.51,
-                        -0.92,
-                        0.92,
-                        [0.52, 0.52, 0.52, 1.0],
-                    );
-
-                    for (index, tab) in CreativeTab::TABS.into_iter().enumerate() {
-                        let rect = creative_tab_rect(index);
-                        let hovered = rect.contains(self.mouse_ndc[0], self.mouse_ndc[1]);
-                        let selected = tab == self.inventory.creative_tab;
-                        add_ui_quad(
-                            &mut ui_vertices,
-                            rect.x0,
-                            rect.x1,
-                            rect.y0,
-                            rect.y1,
-                            if selected {
-                                [0.30, 0.42, 0.22, 1.0]
-                            } else if hovered {
-                                [0.34, 0.34, 0.34, 1.0]
-                            } else {
-                                [0.18, 0.18, 0.18, 1.0]
-                            },
-                        );
-                        add_ui_border(
-                            &mut ui_line_vertices,
-                            rect.x0,
-                            rect.x1,
-                            rect.y0,
-                            rect.y1,
-                            if selected || hovered {
-                                [0.95, 0.95, 0.95, 1.0]
-                            } else {
-                                [0.42, 0.42, 0.42, 1.0]
-                            },
-                        );
-                        let label = tab.label();
-                        let char_w = 0.005;
-                        let spacing = 0.0015;
-                        let label_w = label.chars().count() as f32 * (char_w + spacing) - spacing;
-                        add_string_lines(
-                            label,
-                            (rect.x0 + rect.x1 - label_w) * 0.5,
-                            rect.y0 + 0.035,
-                            char_w,
-                            0.020,
-                            spacing,
-                            [1.0, 1.0, 1.0, 1.0],
-                            &mut ui_line_vertices,
-                        );
-                    }
-
-                    let track = creative_scroll_track_rect(aspect);
-                    add_ui_quad(
-                        &mut ui_vertices,
-                        track.x0,
-                        track.x1,
-                        track.y0,
-                        track.y1,
-                        [0.035, 0.035, 0.035, 1.0],
-                    );
-                    add_ui_border(
-                        &mut ui_line_vertices,
-                        track.x0,
-                        track.x1,
-                        track.y0,
-                        track.y1,
-                        [0.34, 0.34, 0.34, 1.0],
-                    );
-                    let max_scroll = self.inventory.creative_max_scroll();
-                    let total_rows = max_scroll + CREATIVE_ROWS;
-                    let track_height = track.y1 - track.y0;
-                    let thumb_height = if max_scroll == 0 {
-                        track_height
-                    } else {
-                        (track_height * CREATIVE_ROWS as f32 / total_rows as f32).max(0.06)
-                    };
-                    let progress = if max_scroll == 0 {
-                        0.0
-                    } else {
-                        self.inventory.creative_scroll_row as f32 / max_scroll as f32
-                    };
-                    let thumb_y1 = track.y1 - progress * (track_height - thumb_height);
-                    add_ui_quad(
-                        &mut ui_vertices,
-                        track.x0 + 0.004,
-                        track.x1 - 0.004,
-                        thumb_y1 - thumb_height,
-                        thumb_y1,
-                        [0.68, 0.68, 0.68, 1.0],
-                    );
-                }
-
-                // 2. Draw slots
-                let slots = self.get_inventory_slots();
-                let mouse_x = self.mouse_ndc[0];
-                let mouse_y = self.mouse_ndc[1];
-                let mut hovered_slot = None;
-
-                for &(slot_type, x0, x1, y0, y1) in &slots {
-                    let is_hovered =
-                        mouse_x >= x0 && mouse_x <= x1 && mouse_y >= y0 && mouse_y <= y1;
-                    if is_hovered {
-                        hovered_slot = Some((slot_type, x0, x1, y0, y1));
-                    }
-
-                    // Background Quad
-                    let slot_bg_color = if is_hovered {
-                        [0.35, 0.35, 0.35, 0.8]
-                    } else {
-                        [0.15, 0.15, 0.15, 0.8]
-                    };
-                    ui_vertices.push(UiVertex {
-                        position: [x0, y1, 0.0],
-                        color: slot_bg_color,
-                    });
-                    ui_vertices.push(UiVertex {
-                        position: [x0, y0, 0.0],
-                        color: slot_bg_color,
-                    });
-                    ui_vertices.push(UiVertex {
-                        position: [x1, y0, 0.0],
-                        color: slot_bg_color,
-                    });
-                    ui_vertices.push(UiVertex {
-                        position: [x0, y1, 0.0],
-                        color: slot_bg_color,
-                    });
-                    ui_vertices.push(UiVertex {
-                        position: [x1, y0, 0.0],
-                        color: slot_bg_color,
-                    });
-                    ui_vertices.push(UiVertex {
-                        position: [x1, y1, 0.0],
-                        color: slot_bg_color,
-                    });
-
-                    // Borders
-                    let border_color = match slot_type {
-                        SlotType::Hotbar(idx) if idx == self.inventory.selected => {
-                            [1.0, 1.0, 1.0, 1.0]
-                        }
-                        _ => [0.3, 0.3, 0.3, 0.8],
-                    };
-                    ui_line_vertices.push(UiVertex {
-                        position: [x0, y1, 0.0],
-                        color: border_color,
-                    });
-                    ui_line_vertices.push(UiVertex {
-                        position: [x1, y1, 0.0],
-                        color: border_color,
-                    });
-                    ui_line_vertices.push(UiVertex {
-                        position: [x1, y1, 0.0],
-                        color: border_color,
-                    });
-                    ui_line_vertices.push(UiVertex {
-                        position: [x1, y0, 0.0],
-                        color: border_color,
-                    });
-                    ui_line_vertices.push(UiVertex {
-                        position: [x1, y0, 0.0],
-                        color: border_color,
-                    });
-                    ui_line_vertices.push(UiVertex {
-                        position: [x0, y0, 0.0],
-                        color: border_color,
-                    });
-                    ui_line_vertices.push(UiVertex {
-                        position: [x0, y0, 0.0],
-                        color: border_color,
-                    });
-                    ui_line_vertices.push(UiVertex {
-                        position: [x0, y1, 0.0],
-                        color: border_color,
-                    });
-
-                    // Slot Item
-                    if let Some(stack) = self.get_item_at_slot(slot_type) {
-                        let (col, row) = stack.item.properties().tex_coords;
-                        let u0 = col as f32 * 0.0625;
-                        let u1 = (col + 1) as f32 * 0.0625;
-                        let v0 = row as f32 * 0.0625;
-                        let v1 = (row + 1) as f32 * 0.0625;
-
-                        let margin_x = 0.015;
-                        let margin_y = 0.015 * aspect;
-                        let tx0 = x0 + margin_x;
-                        let tx1 = x1 - margin_x;
-                        let ty0 = y0 + margin_y;
-                        let ty1 = y1 - margin_y;
-
-                        let c = if stack.enchantments.is_empty() {
-                            [1.0, 1.0, 1.0, 1.0]
-                        } else {
-                            let pulse = 0.72 + (self.total_time * 3.0).sin() * 0.18;
-                            [0.82, pulse, 1.0, 1.0]
-                        };
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [tx0, ty1, 0.0],
-                            tex_coords: [u0, v0],
-                            color: c,
-                        });
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [tx0, ty0, 0.0],
-                            tex_coords: [u0, v1],
-                            color: c,
-                        });
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [tx1, ty0, 0.0],
-                            tex_coords: [u1, v1],
-                            color: c,
-                        });
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [tx0, ty1, 0.0],
-                            tex_coords: [u0, v0],
-                            color: c,
-                        });
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [tx1, ty0, 0.0],
-                            tex_coords: [u1, v1],
-                            color: c,
-                        });
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [tx1, ty1, 0.0],
-                            tex_coords: [u1, v0],
-                            color: c,
-                        });
-
-                        if stack.count > 1 {
-                            let count_str = format!("{}", stack.count);
-                            let cw = 0.008;
-                            let ch = 0.016;
-                            let cs = 0.003;
-                            let n_chars = count_str.len() as f32;
-                            let count_w = n_chars * cw + (n_chars - 1.0) * cs;
-                            let count_x = x1 - count_w - 0.008;
-                            let count_y = y0 + 0.01 * aspect;
-                            add_string_lines(
-                                &count_str,
-                                count_x,
-                                count_y,
-                                cw,
-                                ch,
-                                cs,
-                                [1.0, 1.0, 1.0, 1.0],
-                                &mut ui_line_vertices,
-                            );
-                        }
-
-                        // Draw durability bar
-                        draw_durability_bar(&stack, x0, x1, y0, y1, aspect, &mut ui_vertices);
-                    }
-                }
-
-                // 3. Draw crafting arrow symbol
-                if !creative_catalog && self.active_station.is_none() {
-                    let arrow_y = if self.inventory.is_table_open {
-                        -0.10 + 1.0 * (slot_h + gap) + slot_h / 2.0
-                    } else {
-                        -0.05 + 0.5 * (slot_h + gap) + slot_h / 2.0
-                    };
-                    let arrow_x = if self.inventory.is_table_open {
-                        -0.05 + 3.0 * (slot_w + gap) + 0.015
-                    } else {
-                        0.05 + 2.0 * (slot_w + gap) + 0.015
-                    };
-                    let ac = [0.8, 0.8, 0.8, 1.0];
-                    ui_line_vertices.push(UiVertex {
-                        position: [arrow_x, arrow_y, 0.0],
-                        color: ac,
-                    });
-                    ui_line_vertices.push(UiVertex {
-                        position: [arrow_x + 0.03, arrow_y, 0.0],
-                        color: ac,
-                    });
-                    ui_line_vertices.push(UiVertex {
-                        position: [arrow_x + 0.03, arrow_y, 0.0],
-                        color: ac,
-                    });
-                    ui_line_vertices.push(UiVertex {
-                        position: [arrow_x + 0.02, arrow_y + 0.01 * aspect, 0.0],
-                        color: ac,
-                    });
-                    ui_line_vertices.push(UiVertex {
-                        position: [arrow_x + 0.03, arrow_y, 0.0],
-                        color: ac,
-                    });
-                    ui_line_vertices.push(UiVertex {
-                        position: [arrow_x + 0.02, arrow_y - 0.01 * aspect, 0.0],
-                        color: ac,
-                    });
-                }
-
-                // 4. Draw texts (Labels)
-                if creative_catalog {
-                    let creative_inventory = self.translate("inventory.creative");
-                    add_string_lines(
-                        &creative_inventory,
-                        -0.45,
-                        0.70,
-                        0.010,
-                        0.020,
-                        0.003,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-                    let hotbar = self.translate("inventory.hotbar");
-                    add_string_lines(
-                        &hotbar,
-                        -0.45,
-                        -0.67,
-                        0.008,
-                        0.016,
-                        0.003,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-                } else {
-                    let inventory = self.translate("inventory.inventory");
-                    add_string_lines(
-                        &inventory,
-                        -0.40,
-                        -0.70 + 3.0 * (slot_h + gap) + 0.02,
-                        0.008,
-                        0.016,
-                        0.003,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-                    if self.active_station.is_none() {
-                        let craft_lbl_x = if self.inventory.is_table_open {
-                            -0.05
-                        } else {
-                            0.05
-                        };
-                        let craft_lbl_y = if self.inventory.is_table_open {
-                            -0.10 + 3.0 * (slot_h + gap) + 0.02
-                        } else {
-                            -0.05 + 2.0 * (slot_h + gap) + 0.02
-                        };
-                        let crafting = self.translate("inventory.crafting");
-                        add_string_lines(
-                            &crafting,
-                            craft_lbl_x,
-                            craft_lbl_y,
-                            0.008,
-                            0.016,
-                            0.003,
-                            [1.0, 1.0, 1.0, 1.0],
-                            &mut ui_line_vertices,
-                        );
-                    }
-                    if let Some(pos) = self.container_target {
-                        let block = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
-                        if matches!(block, BlockType::Furnace | BlockType::FurnaceLit) {
-                            let furnace = self.translate("inventory.furnace");
-                            add_string_lines(
-                                &furnace,
-                                -0.15,
-                                0.26,
-                                0.010,
-                                0.020,
-                                0.003,
-                                [1.0, 1.0, 1.0, 1.0],
-                                &mut ui_line_vertices,
-                            );
-
-                            let (burn_time, burn_total, cook_progress, cook_total) = {
-                                let (cx, cz) = (pos.0.div_euclid(16), pos.2.div_euclid(16));
-                                let (bx, by, bz) = (
-                                    pos.0.rem_euclid(16) as u8,
-                                    pos.1 as i16,
-                                    pos.2.rem_euclid(16) as u8,
-                                );
-                                self.chunk_manager
-                                    .chunks
-                                    .get(&(cx, cz))
-                                    .and_then(|c| {
-                                        if let Some(crate::block_entity::BlockEntity::Furnace(f)) =
-                                            c.get_block_entity(bx, by, bz)
-                                        {
-                                            Some((
-                                                f.burn_time,
-                                                f.burn_total,
-                                                f.cook_progress,
-                                                f.cook_total,
-                                            ))
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .unwrap_or((0, 0, 0, 200))
-                            };
-
-                            // Flame Fuel Progress Bar (vertical)
-                            add_ui_quad(
-                                &mut ui_vertices,
-                                -0.14,
-                                -0.09,
-                                -0.01,
-                                0.08,
-                                [0.1, 0.1, 0.1, 0.8],
-                            );
-                            if burn_time > 0 && burn_total > 0 {
-                                let fuel_ratio =
-                                    (burn_time as f32 / burn_total as f32).clamp(0.0, 1.0);
-                                let fill_h = 0.09 * fuel_ratio;
-                                add_ui_quad(
-                                    &mut ui_vertices,
-                                    -0.14,
-                                    -0.09,
-                                    -0.01,
-                                    -0.01 + fill_h,
-                                    [1.0, 0.45, 0.0, 1.0],
-                                );
-                            }
-
-                            // Cook Progress Bar (horizontal arrow)
-                            add_ui_quad(
-                                &mut ui_vertices,
-                                -0.04,
-                                0.12,
-                                0.02,
-                                0.06,
-                                [0.1, 0.1, 0.1, 0.8],
-                            );
-                            if cook_progress > 0 && cook_total > 0 {
-                                let cook_ratio =
-                                    (cook_progress as f32 / cook_total as f32).clamp(0.0, 1.0);
-                                let fill_w = 0.16 * cook_ratio;
-                                add_ui_quad(
-                                    &mut ui_vertices,
-                                    -0.04,
-                                    -0.04 + fill_w,
-                                    0.02,
-                                    0.06,
-                                    [0.9, 0.75, 0.2, 1.0],
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // Draw Recipe Book Toggle Button
-                let book_btn_hover =
-                    mouse_x >= -0.45 && mouse_x <= -0.37 && mouse_y >= 0.35 && mouse_y <= 0.43;
-                add_ui_quad(
-                    &mut ui_vertices,
-                    -0.45,
-                    -0.37,
-                    0.35,
-                    0.43,
-                    if book_btn_hover {
-                        [0.2, 0.6, 0.3, 1.0]
-                    } else {
-                        [0.15, 0.45, 0.2, 0.9]
-                    },
-                );
-                let book = self.translate("inventory.book");
-                add_string_lines(
-                    &book,
-                    -0.44,
-                    0.40,
-                    0.007,
-                    0.014,
-                    0.002,
-                    [1.0, 1.0, 1.0, 1.0],
-                    &mut ui_line_vertices,
-                );
-
-                // Draw Recipe Book Side Panel if open
-                if self.recipe_book_open {
-                    add_ui_quad(
-                        &mut ui_vertices,
-                        -0.85,
-                        -0.48,
-                        -0.45,
-                        0.45,
-                        [0.12, 0.12, 0.12, 0.95],
-                    );
-                    let recipes = self.translate("inventory.recipes");
-                    add_string_lines(
-                        &recipes,
-                        -0.82,
-                        0.40,
-                        0.008,
-                        0.016,
-                        0.003,
-                        [0.4, 0.9, 0.4, 1.0],
-                        &mut ui_line_vertices,
-                    );
-
-                    let smelting_recipes = self.recipe_manager.get_smelting_recipes();
-                    let mut line_y = 0.34;
-                    for r in smelting_recipes {
-                        let entry_hover = mouse_x >= -0.83
-                            && mouse_x <= -0.50
-                            && mouse_y >= line_y - 0.05
-                            && mouse_y <= line_y + 0.02;
-                        if entry_hover {
-                            add_ui_quad(
-                                &mut ui_vertices,
-                                -0.83,
-                                -0.50,
-                                line_y - 0.05,
-                                line_y + 0.02,
-                                [0.25, 0.35, 0.25, 0.8],
-                            );
-                        }
-                        let text = format!(
-                            "{} -> {}",
-                            self.localized_item_name(r.input),
-                            self.localized_item_name(r.output.item)
-                        );
-                        add_string_lines(
-                            &text,
-                            -0.82,
-                            line_y,
-                            0.006,
-                            0.012,
-                            0.002,
-                            [0.9, 0.9, 0.9, 1.0],
-                            &mut ui_line_vertices,
-                        );
-                        line_y -= 0.07;
-                        if line_y < -0.40 {
-                            break;
-                        }
-                    }
-                }
-
-                match self.active_station {
-                    Some(StationKind::Enchanting) => {
-                        let enchanting = self.translate("station.enchanting");
-                        add_string_lines(
-                            &enchanting,
-                            -0.18,
-                            0.37,
-                            0.012,
-                            0.024,
-                            0.004,
-                            [0.75, 0.45, 1.0, 1.0],
-                            &mut ui_line_vertices,
-                        );
-                        let level = self.player_state.experience_level.to_string();
-                        let bookshelves = self.enchanting.bookshelves.to_string();
-                        let level_text = self.translation_catalog.format_lookup(
-                            "station.level_bookshelves",
-                            &[("level", &level), ("bookshelves", &bookshelves)],
-                        );
-                        add_string_lines(
-                            &level_text,
-                            -0.18,
-                            0.31,
-                            0.008,
-                            0.016,
-                            0.003,
-                            [0.5, 1.0, 0.5, 1.0],
-                            &mut ui_line_vertices,
-                        );
-                        for (index, option) in self.enchanting.options.iter().enumerate() {
-                            let y1 = 0.28 - index as f32 * 0.12;
-                            let y0 = y1 - 0.09;
-                            let hovered = mouse_x >= 0.02
-                                && mouse_x <= 0.62
-                                && mouse_y >= y0
-                                && mouse_y <= y1;
-                            add_ui_quad(
-                                &mut ui_vertices,
-                                0.02,
-                                0.62,
-                                y0,
-                                y1,
-                                if hovered {
-                                    [0.30, 0.16, 0.42, 0.95]
-                                } else {
-                                    [0.14, 0.07, 0.20, 0.95]
-                                },
-                            );
-                            let enchantment =
-                                option.enchantments.entries.iter().flatten().next().copied();
-                            let label = enchantment
-                                .map(|e| {
-                                    let enchantment = format!("{} {}", e.short_name(), e.level());
-                                    let cost = option.cost.to_string();
-                                    let lapis = option.lapis_cost.to_string();
-                                    self.translation_catalog.format_lookup(
-                                        "station.cost_lapis",
-                                        &[
-                                            ("enchantment", &enchantment),
-                                            ("cost", &cost),
-                                            ("lapis", &lapis),
-                                        ],
-                                    )
-                                })
-                                .unwrap_or_else(|| self.translate("station.no_enchantment"));
-                            add_string_lines(
-                                &label,
-                                0.04,
-                                y0 + 0.032,
-                                0.007,
-                                0.014,
-                                0.002,
-                                [0.8, 0.65, 1.0, 1.0],
-                                &mut ui_line_vertices,
-                            );
-                        }
-                    }
-                    Some(StationKind::Brewing) => {
-                        let brewing_stand = self.translate("station.brewing_stand");
-                        add_string_lines(
-                            &brewing_stand,
-                            -0.18,
-                            0.37,
-                            0.012,
-                            0.024,
-                            0.004,
-                            [0.8, 0.6, 0.3, 1.0],
-                            &mut ui_line_vertices,
-                        );
-                        let progress = (self.brewing.progress / 10.0).clamp(0.0, 1.0);
-                        add_ui_quad(
-                            &mut ui_vertices,
-                            0.04,
-                            0.54,
-                            0.20,
-                            0.24,
-                            [0.05, 0.05, 0.05, 1.0],
-                        );
-                        add_ui_quad(
-                            &mut ui_vertices,
-                            0.04,
-                            0.04 + 0.5 * progress,
-                            0.20,
-                            0.24,
-                            [0.85, 0.45, 0.1, 1.0],
-                        );
-                        let status = if self.brewing.can_brew() {
-                            let value = format!("{:.0}", progress * 100.0);
-                            self.translation_catalog
-                                .format_lookup("station.brewing_progress", &[("value", &value)])
-                        } else {
-                            self.translate("station.add_bottles_ingredient")
-                        };
-                        add_string_lines(
-                            &status,
-                            0.04,
-                            0.28,
-                            0.008,
-                            0.016,
-                            0.003,
-                            [1.0, 0.85, 0.55, 1.0],
-                            &mut ui_line_vertices,
-                        );
-                    }
-                    Some(StationKind::Anvil) => {
-                        let anvil = self.translate("station.anvil");
-                        add_string_lines(
-                            &anvil,
-                            -0.20,
-                            0.37,
-                            0.012,
-                            0.024,
-                            0.004,
-                            [0.8, 0.8, 0.8, 1.0],
-                            &mut ui_line_vertices,
-                        );
-                        add_ui_quad(
-                            &mut ui_vertices,
-                            -0.20,
-                            0.45,
-                            0.25,
-                            0.31,
-                            [0.04, 0.04, 0.04, 0.95],
-                        );
-                        let rename = if self.anvil.rename.is_empty() {
-                            self.translate("station.type_a_name")
-                        } else {
-                            self.anvil.rename.clone()
-                        };
-                        add_string_lines(
-                            &rename,
-                            -0.18,
-                            0.27,
-                            0.009,
-                            0.018,
-                            0.003,
-                            [1.0, 1.0, 1.0, 1.0],
-                            &mut ui_line_vertices,
-                        );
-                        let cost_value = self.anvil.cost.to_string();
-                        let cost = self
-                            .translation_catalog
-                            .format_lookup("station.cost_levels", &[("cost", &cost_value)]);
-                        add_string_lines(
-                            &cost,
-                            0.20,
-                            0.05,
-                            0.008,
-                            0.016,
-                            0.003,
-                            [0.5, 1.0, 0.5, 1.0],
-                            &mut ui_line_vertices,
-                        );
-                    }
-                    Some(StationKind::Merchant) => {
-                        let profession = self.active_merchant_profession.display_name().to_string();
-                        let level = (self.active_merchant_level as u8).to_string();
-                        let title = self.translation_catalog.format_lookup(
-                            "station.villager_trading",
-                            &[("profession", &profession), ("level", &level)],
-                        );
-                        add_string_lines(
-                            &title,
-                            -0.35,
-                            0.38,
-                            0.010,
-                            0.020,
-                            0.003,
-                            [0.3, 0.9, 0.4, 1.0],
-                            &mut ui_line_vertices,
-                        );
-
-                        let mut offer_y = 0.28;
-                        let discount = if self.player_state.hero_of_the_village_timer > 0.0 {
-                            0.3
-                        } else {
-                            0.0
-                        };
-                        for (idx, offer) in self.active_merchant_offers.iter().enumerate() {
-                            let btn_hover = mouse_x >= -0.35
-                                && mouse_x <= 0.35
-                                && mouse_y >= offer_y - 0.04
-                                && mouse_y <= offer_y + 0.03;
-                            let cost_a = offer.effective_cost_a(discount);
-                            let index = (idx + 1).to_string();
-                            let buy_count = cost_a.to_string();
-                            let buy_item = format!("{:?}", offer.buy_a.item);
-                            let sell_count = offer.sell.count.to_string();
-                            let sell_item = format!("{:?}", offer.sell.item);
-                            let text = self.translation_catalog.format_lookup(
-                                "station.trade",
-                                &[
-                                    ("index", &index),
-                                    ("buy_count", &buy_count),
-                                    ("buy_item", &buy_item),
-                                    ("sell_count", &sell_count),
-                                    ("sell_item", &sell_item),
-                                ],
-                            );
-
-                            add_ui_quad(
-                                &mut ui_vertices,
-                                -0.36,
-                                0.36,
-                                offer_y - 0.04,
-                                offer_y + 0.03,
-                                if offer.is_out_of_stock() {
-                                    [0.2, 0.1, 0.1, 0.7]
-                                } else if btn_hover {
-                                    [0.2, 0.5, 0.3, 0.9]
-                                } else {
-                                    [0.15, 0.25, 0.18, 0.85]
-                                },
-                            );
-
-                            add_string_lines(
-                                &text,
-                                -0.34,
-                                offer_y,
-                                0.007,
-                                0.014,
-                                0.002,
-                                if offer.is_out_of_stock() {
-                                    [0.6, 0.6, 0.6, 1.0]
-                                } else {
-                                    [1.0, 1.0, 1.0, 1.0]
-                                },
-                                &mut ui_line_vertices,
-                            );
-
-                            offer_y -= 0.09;
-                            if offer_y < -0.30 {
-                                break;
-                            }
-                        }
-                    }
-                    None | Some(StationKind::Furnace) => {}
-                }
-
-                // 5. Draw dragged item at cursor position
-                if let Some(dragged) = self.inventory.dragged {
-                    let (cursor_slot_w, cursor_slot_h) = if creative_catalog {
-                        let (width, height, _, _) = creative_slot_metrics(aspect);
-                        (width, height)
-                    } else {
-                        (slot_w, slot_h)
-                    };
-                    let (col, row) = dragged.item.properties().tex_coords;
-                    let u0 = col as f32 * 0.0625;
-                    let u1 = (col + 1) as f32 * 0.0625;
-                    let v0 = row as f32 * 0.0625;
-                    let v1 = (row + 1) as f32 * 0.0625;
-
-                    let dx0 = mouse_x - cursor_slot_w / 2.0 + 0.015;
-                    let dx1 = mouse_x + cursor_slot_w / 2.0 - 0.015;
-                    let dy0 = mouse_y - cursor_slot_h / 2.0 + 0.015 * aspect;
-                    let dy1 = mouse_y + cursor_slot_h / 2.0 - 0.015 * aspect;
-
-                    let c = if dragged.enchantments.is_empty() {
-                        [1.0, 1.0, 1.0, 1.0]
-                    } else {
-                        [0.82, 0.65 + (self.total_time * 3.0).sin() * 0.18, 1.0, 1.0]
-                    };
-                    ui_textured_vertices.push(TexturedUiVertex {
-                        position: [dx0, dy1, 0.0],
-                        tex_coords: [u0, v0],
-                        color: c,
-                    });
-                    ui_textured_vertices.push(TexturedUiVertex {
-                        position: [dx0, dy0, 0.0],
-                        tex_coords: [u0, v1],
-                        color: c,
-                    });
-                    ui_textured_vertices.push(TexturedUiVertex {
-                        position: [dx1, dy0, 0.0],
-                        tex_coords: [u1, v1],
-                        color: c,
-                    });
-                    ui_textured_vertices.push(TexturedUiVertex {
-                        position: [dx0, dy1, 0.0],
-                        tex_coords: [u0, v0],
-                        color: c,
-                    });
-                    ui_textured_vertices.push(TexturedUiVertex {
-                        position: [dx1, dy0, 0.0],
-                        tex_coords: [u1, v1],
-                        color: c,
-                    });
-                    ui_textured_vertices.push(TexturedUiVertex {
-                        position: [dx1, dy1, 0.0],
-                        tex_coords: [u1, v0],
-                        color: c,
-                    });
-
-                    if dragged.count > 1 {
-                        let count_str = format!("{}", dragged.count);
-                        let cw = 0.008;
-                        let ch = 0.016;
-                        let cs = 0.003;
-                        let n_chars = count_str.len() as f32;
-                        let count_w = n_chars * cw + (n_chars - 1.0) * cs;
-                        let count_x = mouse_x + cursor_slot_w / 2.0 - count_w - 0.008;
-                        let count_y = mouse_y - cursor_slot_h / 2.0 + 0.01 * aspect;
-                        add_string_lines(
-                            &count_str,
-                            count_x,
-                            count_y,
-                            cw,
-                            ch,
-                            cs,
-                            [1.0, 1.0, 1.0, 1.0],
-                            &mut ui_line_vertices,
-                        );
-                    }
-                }
-
-                // 6. Draw tooltip for hovered slot
-                if self.inventory.dragged.is_none() {
-                    if let Some((slot_type, _, _, _, _)) = hovered_slot {
-                        if let Some(stack) = self.get_item_at_slot(slot_type) {
-                            let name = if !stack.custom_name.is_empty() {
-                                stack.custom_name.as_str().to_string()
-                            } else if let Some(potion) = stack.potion {
-                                potion.display_name().to_string()
-                            } else {
-                                self.localized_item_name(stack.item)
-                            };
-                            let tw = name.len() as f32 * 0.014 + 0.02;
-                            let th = 0.035 * aspect;
-                            let tx = mouse_x + 0.02;
-                            let ty = mouse_y + 0.02;
-
-                            // The tooltip background must sit above the slot
-                            // icons but below the text. The colored-UI pass
-                            // now runs before the icons, so this quad goes
-                            // through the textured pass instead, using the
-                            // pure white atlas tile (col 15, row 8) tinted to
-                            // the tooltip color.
-                            let tt_bg = [0.05, 0.05, 0.1, 0.95];
-                            let (w0u, w0v) = (15.0 * 0.0625, 8.0 * 0.0625);
-                            ui_textured_vertices.push(TexturedUiVertex {
-                                position: [tx, ty + th, 0.0],
-                                tex_coords: [w0u, w0v],
-                                color: tt_bg,
-                            });
-                            ui_textured_vertices.push(TexturedUiVertex {
-                                position: [tx, ty, 0.0],
-                                tex_coords: [w0u, w0v + 0.0625],
-                                color: tt_bg,
-                            });
-                            ui_textured_vertices.push(TexturedUiVertex {
-                                position: [tx + tw, ty, 0.0],
-                                tex_coords: [w0u + 0.0625, w0v + 0.0625],
-                                color: tt_bg,
-                            });
-                            ui_textured_vertices.push(TexturedUiVertex {
-                                position: [tx, ty + th, 0.0],
-                                tex_coords: [w0u, w0v],
-                                color: tt_bg,
-                            });
-                            ui_textured_vertices.push(TexturedUiVertex {
-                                position: [tx + tw, ty, 0.0],
-                                tex_coords: [w0u + 0.0625, w0v + 0.0625],
-                                color: tt_bg,
-                            });
-                            ui_textured_vertices.push(TexturedUiVertex {
-                                position: [tx + tw, ty + th, 0.0],
-                                tex_coords: [w0u + 0.0625, w0v],
-                                color: tt_bg,
-                            });
-
-                            let tt_border = [0.3, 0.3, 0.7, 1.0];
-                            ui_line_vertices.push(UiVertex {
-                                position: [tx, ty + th, 0.0],
-                                color: tt_border,
-                            });
-                            ui_line_vertices.push(UiVertex {
-                                position: [tx + tw, ty + th, 0.0],
-                                color: tt_border,
-                            });
-                            ui_line_vertices.push(UiVertex {
-                                position: [tx + tw, ty + th, 0.0],
-                                color: tt_border,
-                            });
-                            ui_line_vertices.push(UiVertex {
-                                position: [tx + tw, ty, 0.0],
-                                color: tt_border,
-                            });
-                            ui_line_vertices.push(UiVertex {
-                                position: [tx + tw, ty, 0.0],
-                                color: tt_border,
-                            });
-                            ui_line_vertices.push(UiVertex {
-                                position: [tx, ty, 0.0],
-                                color: tt_border,
-                            });
-                            ui_line_vertices.push(UiVertex {
-                                position: [tx, ty, 0.0],
-                                color: tt_border,
-                            });
-                            ui_line_vertices.push(UiVertex {
-                                position: [tx, ty + th, 0.0],
-                                color: tt_border,
-                            });
-
-                            add_string_lines(
-                                &name,
-                                tx + 0.01,
-                                ty + 0.01 * aspect,
-                                0.008,
-                                0.016,
-                                0.003,
-                                [1.0, 1.0, 1.0, 1.0],
-                                &mut ui_line_vertices,
-                            );
-                        }
-                    }
-                }
-            } else {
-                // Background Bar
-                let bg_color = [0.05, 0.05, 0.05, 0.6];
-                let bg_x0 = -0.415;
-                let bg_x1 = 0.415;
-                let bg_y0 = -0.96;
-                let bg_y1 = -0.94 + slot_h;
-                ui_vertices.push(UiVertex {
-                    position: [bg_x0, bg_y1, 0.0],
-                    color: bg_color,
-                });
-                ui_vertices.push(UiVertex {
-                    position: [bg_x0, bg_y0, 0.0],
-                    color: bg_color,
-                });
-                ui_vertices.push(UiVertex {
-                    position: [bg_x1, bg_y0, 0.0],
-                    color: bg_color,
-                });
-                ui_vertices.push(UiVertex {
-                    position: [bg_x0, bg_y1, 0.0],
-                    color: bg_color,
-                });
-                ui_vertices.push(UiVertex {
-                    position: [bg_x1, bg_y0, 0.0],
-                    color: bg_color,
-                });
-                ui_vertices.push(UiVertex {
-                    position: [bg_x1, bg_y1, 0.0],
-                    color: bg_color,
-                });
-
-                // Slots
-                for i in 0..9 {
-                    let x0 = start_x + i as f32 * (slot_w + gap);
-                    let x1 = x0 + slot_w;
-                    let y0 = -0.95;
-                    let y1 = y0 + slot_h;
-
-                    let border_color = if i == self.inventory.selected {
-                        [1.0, 1.0, 1.0, 1.0] // White for active
-                    } else {
-                        [0.3, 0.3, 0.3, 0.8] // Gray for inactive
-                    };
-
-                    // Push lines to ui_line_vertices (forms border box)
-                    ui_line_vertices.push(UiVertex {
-                        position: [x0, y1, 0.0],
-                        color: border_color,
-                    });
-                    ui_line_vertices.push(UiVertex {
-                        position: [x1, y1, 0.0],
-                        color: border_color,
-                    });
-                    ui_line_vertices.push(UiVertex {
-                        position: [x1, y1, 0.0],
-                        color: border_color,
-                    });
-                    ui_line_vertices.push(UiVertex {
-                        position: [x1, y0, 0.0],
-                        color: border_color,
-                    });
-                    ui_line_vertices.push(UiVertex {
-                        position: [x1, y0, 0.0],
-                        color: border_color,
-                    });
-                    ui_line_vertices.push(UiVertex {
-                        position: [x0, y0, 0.0],
-                        color: border_color,
-                    });
-                    ui_line_vertices.push(UiVertex {
-                        position: [x0, y0, 0.0],
-                        color: border_color,
-                    });
-                    ui_line_vertices.push(UiVertex {
-                        position: [x0, y1, 0.0],
-                        color: border_color,
-                    });
-
-                    if let Some(stack) = &self.inventory.hotbar[i] {
-                        let (col, row) = stack.item.properties().tex_coords;
-                        let u0 = col as f32 * 0.0625;
-                        let u1 = (col + 1) as f32 * 0.0625;
-                        let v0 = row as f32 * 0.0625;
-                        let v1 = (row + 1) as f32 * 0.0625;
-
-                        let margin_x = 0.015;
-                        let margin_y = 0.015 * aspect;
-                        let tx0 = x0 + margin_x;
-                        let tx1 = x1 - margin_x;
-                        let ty0 = y0 + margin_y;
-                        let ty1 = y1 - margin_y;
-
-                        let c = if stack.enchantments.is_empty() {
-                            [1.0, 1.0, 1.0, 1.0]
-                        } else {
-                            [0.82, 0.65 + (self.total_time * 3.0).sin() * 0.18, 1.0, 1.0]
-                        };
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [tx0, ty1, 0.0],
-                            tex_coords: [u0, v0],
-                            color: c,
-                        });
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [tx0, ty0, 0.0],
-                            tex_coords: [u0, v1],
-                            color: c,
-                        });
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [tx1, ty0, 0.0],
-                            tex_coords: [u1, v1],
-                            color: c,
-                        });
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [tx0, ty1, 0.0],
-                            tex_coords: [u0, v0],
-                            color: c,
-                        });
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [tx1, ty0, 0.0],
-                            tex_coords: [u1, v1],
-                            color: c,
-                        });
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [tx1, ty1, 0.0],
-                            tex_coords: [u1, v0],
-                            color: c,
-                        });
-
-                        if stack.count > 1 {
-                            let count_str = format!("{}", stack.count);
-                            let cw = 0.008;
-                            let ch = 0.016;
-                            let cs = 0.003;
-                            let n_chars = count_str.len() as f32;
-                            let count_w = n_chars * cw + (n_chars - 1.0) * cs;
-                            let count_x = x1 - count_w - 0.01;
-                            let count_y = y0 + 0.012 * aspect;
-                            add_string_lines(
-                                &count_str,
-                                count_x,
-                                count_y,
-                                cw,
-                                ch,
-                                cs,
-                                [1.0, 1.0, 1.0, 1.0],
-                                &mut ui_line_vertices,
-                            );
-                        }
-
-                        // Draw durability bar
-                        draw_durability_bar(stack, x0, x1, y0, y1, aspect, &mut ui_vertices);
-                    }
-                }
-
-                if self.game_mode_policy().can_take_damage {
-                    // Draw Health HUD
-                    let hud_w = 0.03;
-                    let hud_h = 0.03 * aspect;
-                    let hud_gap = 0.005;
-                    let x_hearts_start = -0.38;
-                    let y_hud = -0.76;
-
-                    for i in 0..10 {
-                        let h_val = self.player_state.health;
-                        let (col, row) = if h_val >= 2.0 * (i + 1) as f32 {
-                            (0, 8) // Full
-                        } else if h_val >= 2.0 * i as f32 + 1.0 {
-                            (1, 8) // Half
-                        } else {
-                            (2, 8) // Empty
-                        };
-
-                        let u0 = col as f32 * 0.0625;
-                        let u1 = (col + 1) as f32 * 0.0625;
-                        let v0 = row as f32 * 0.0625;
-                        let v1 = (row + 1) as f32 * 0.0625;
-
-                        let hx0 = x_hearts_start + i as f32 * (hud_w + hud_gap);
-                        let hx1 = hx0 + hud_w;
-                        let hy0 = y_hud;
-                        let hy1 = hy0 + hud_h;
-
-                        let c = [1.0, 1.0, 1.0, 1.0];
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [hx0, hy1, 0.0],
-                            tex_coords: [u0, v0],
-                            color: c,
-                        });
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [hx0, hy0, 0.0],
-                            tex_coords: [u0, v1],
-                            color: c,
-                        });
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [hx1, hy0, 0.0],
-                            tex_coords: [u1, v1],
-                            color: c,
-                        });
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [hx0, hy1, 0.0],
-                            tex_coords: [u0, v0],
-                            color: c,
-                        });
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [hx1, hy0, 0.0],
-                            tex_coords: [u1, v1],
-                            color: c,
-                        });
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [hx1, hy1, 0.0],
-                            tex_coords: [u1, v0],
-                            color: c,
-                        });
-                    }
-
-                    // Draw Hunger HUD
-                    let x_hunger_start = 0.38 - 10.0 * hud_w - 9.0 * hud_gap;
-                    for i in 0..10 {
-                        let hung_val = self.player_state.hunger;
-                        let (col, row) = if hung_val >= 2.0 * (i + 1) as f32 {
-                            (3, 8) // Full
-                        } else if hung_val >= 2.0 * i as f32 + 1.0 {
-                            (4, 8) // Half
-                        } else {
-                            (5, 8) // Empty
-                        };
-
-                        let u0 = col as f32 * 0.0625;
-                        let u1 = (col + 1) as f32 * 0.0625;
-                        let v0 = row as f32 * 0.0625;
-                        let v1 = (row + 1) as f32 * 0.0625;
-
-                        let hx0 = x_hunger_start + i as f32 * (hud_w + hud_gap);
-                        let hx1 = hx0 + hud_w;
-                        let hy0 = y_hud;
-                        let hy1 = hy0 + hud_h;
-
-                        let c = [1.0, 1.0, 1.0, 1.0];
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [hx0, hy1, 0.0],
-                            tex_coords: [u0, v0],
-                            color: c,
-                        });
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [hx0, hy0, 0.0],
-                            tex_coords: [u0, v1],
-                            color: c,
-                        });
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [hx1, hy0, 0.0],
-                            tex_coords: [u1, v1],
-                            color: c,
-                        });
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [hx0, hy1, 0.0],
-                            tex_coords: [u0, v0],
-                            color: c,
-                        });
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [hx1, hy0, 0.0],
-                            tex_coords: [u1, v1],
-                            color: c,
-                        });
-                        ui_textured_vertices.push(TexturedUiVertex {
-                            position: [hx1, hy1, 0.0],
-                            tex_coords: [u1, v0],
-                            color: c,
-                        });
-                    }
-
-                    // Draw Oxygen HUD
-                    if self.player_state.oxygen < 300.0 {
-                        let oxygen = self.player_state.oxygen;
-                        let bubble_count = (oxygen / 30.0).ceil() as i32;
-                        let y_bubbles = y_hud + hud_h + 0.005;
-
-                        for i in 0..bubble_count {
-                            let col = 15;
-                            let row = 3;
-                            let u0 = col as f32 * 0.0625;
-                            let u1 = (col + 1) as f32 * 0.0625;
-                            let v0 = row as f32 * 0.0625;
-                            let v1 = (row + 1) as f32 * 0.0625;
-
-                            let slot_idx = 9 - i;
-                            let hx0 = x_hunger_start + slot_idx as f32 * (hud_w + hud_gap);
-                            let hx1 = hx0 + hud_w;
-                            let hy0 = y_bubbles;
-                            let hy1 = hy0 + hud_h;
-
-                            let c = [1.0, 1.0, 1.0, 1.0];
-                            ui_textured_vertices.push(TexturedUiVertex {
-                                position: [hx0, hy1, 0.0],
-                                tex_coords: [u0, v0],
-                                color: c,
-                            });
-                            ui_textured_vertices.push(TexturedUiVertex {
-                                position: [hx0, hy0, 0.0],
-                                tex_coords: [u0, v1],
-                                color: c,
-                            });
-                            ui_textured_vertices.push(TexturedUiVertex {
-                                position: [hx1, hy0, 0.0],
-                                tex_coords: [u1, v1],
-                                color: c,
-                            });
-                            ui_textured_vertices.push(TexturedUiVertex {
-                                position: [hx0, hy1, 0.0],
-                                tex_coords: [u0, v0],
-                                color: c,
-                            });
-                            ui_textured_vertices.push(TexturedUiVertex {
-                                position: [hx1, hy0, 0.0],
-                                tex_coords: [u1, v1],
-                                color: c,
-                            });
-                            ui_textured_vertices.push(TexturedUiVertex {
-                                position: [hx1, hy1, 0.0],
-                                tex_coords: [u1, v0],
-                                color: c,
-                            });
-                        }
-                    }
-                }
-
-                // Selected Block/Item Text
-                let selected_item = self.inventory.hotbar[self.inventory.selected]
-                    .map(|s| s.item)
-                    .unwrap_or(crate::inventory::Item::Air);
-                let selected_text = if let Some(target) = self.mining_target {
-                    let block = self.chunk_manager.get_block(
-                        target.x as i32,
-                        target.y as i32,
-                        target.z as i32,
-                    );
-                    format!(
-                        "{} / {}",
-                        self.localized_block_name(block),
-                        self.localized_item_name(selected_item)
-                    )
-                } else {
-                    self.localized_item_name(selected_item)
-                }
-                .to_uppercase();
-                let char_w = 0.010;
-                let char_h = 0.020;
-                let spacing = 0.004;
-                let n = selected_text.len() as f32;
-                let width = n * char_w + (n - 1.0) * spacing;
-                let text_x = -width / 2.0;
-                add_string_lines(
-                    &selected_text,
-                    text_x,
-                    -0.78,
-                    char_w,
-                    char_h,
-                    spacing,
-                    [1.0, 1.0, 1.0, 1.0],
-                    &mut ui_line_vertices,
-                );
-
-                // Game Mode Status Text
-                let mode_text = match (self.game_mode, self.player_physics.is_flying()) {
-                    (GameMode::Creative, true) => "CREATIVE MODE - FLYING",
-                    (GameMode::Creative, false) => "CREATIVE MODE",
-                    (GameMode::Survival, _) => "SURVIVAL MODE",
-                    (GameMode::Adventure, _) => "ADVENTURE MODE",
-                    (GameMode::Spectator, _) => "SPECTATOR MODE",
-                };
-                let mode_w = 0.009;
-                let mode_h = 0.018;
-                let mode_s = 0.003;
-                let n_mode = mode_text.len() as f32;
-                let width_mode = n_mode * mode_w + (n_mode - 1.0) * mode_s;
-                let mode_x = -width_mode / 2.0;
-                add_string_lines(
-                    mode_text,
-                    mode_x,
-                    -0.71,
-                    mode_w,
-                    mode_h,
-                    mode_s,
-                    [1.0, 0.9, 0.4, 1.0],
-                    &mut ui_line_vertices,
-                );
-
-                if self.game_mode_policy().can_take_damage {
-                    let xp_text = format!("LEVEL {}", self.player_state.experience_level);
-                    let width = xp_text.len() as f32 * 0.009;
-                    add_string_lines(
-                        &xp_text,
-                        -width / 2.0,
-                        -0.66,
-                        0.009,
-                        0.018,
-                        0.003,
-                        [0.35, 1.0, 0.25, 1.0],
-                        &mut ui_line_vertices,
-                    );
-                }
-
-                for (index, effect) in self.potion_effects.active.iter().enumerate() {
-                    let seconds = effect.remaining().ceil() as u32;
-                    let text = format!("{} {}:{:02}", effect.name(), seconds / 60, seconds % 60);
-                    add_string_lines(
-                        &text,
-                        0.54,
-                        0.86 - index as f32 * 0.05,
-                        0.007,
-                        0.014,
-                        0.002,
-                        [0.75, 0.55, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-                }
-
-                // Damaged screen red flash overlay
-                if self.player_state.damaged_flash_time > 0.0 {
-                    let base = (self.player_state.damaged_flash_time / 0.5).min(1.0) * 0.25;
-                    let alpha = crate::accessibility::damage_overlay_alpha(
-                        base,
-                        self.settings.accessibility.damage_tilt,
-                        self.settings.accessibility.reduce_flashing,
-                    );
-                    let flash_color = [1.0, 0.0, 0.0, alpha];
-                    let tilt = crate::accessibility::damage_tilt_angle(
-                        base / 0.25,
-                        self.settings.accessibility.damage_tilt,
-                        self.settings.accessibility.reduce_flashing,
-                    );
-                    for position in [
-                        [-1.0, 1.0],
-                        [-1.0, -1.0],
-                        [1.0, -1.0],
-                        [-1.0, 1.0],
-                        [1.0, -1.0],
-                        [1.0, 1.0],
-                    ] {
-                        let rotated = crate::accessibility::rotate_ndc(position, tilt);
-                        ui_vertices.push(UiVertex {
-                            position: [rotated[0], rotated[1], 0.0],
-                            color: flash_color,
-                        });
-                    }
-                }
-
-                let lightning_flash = self.weather.flash_intensity();
-                if lightning_flash > 0.0 {
-                    let flash_alpha = crate::accessibility::reduced_flash_alpha(
-                        lightning_flash * 0.82,
-                        self.settings.accessibility.reduce_flashing,
-                    );
-                    let flash_color = [1.0, 1.0, 1.0, flash_alpha];
-                    for position in [
-                        [-1.0, 1.0, 0.0],
-                        [-1.0, -1.0, 0.0],
-                        [1.0, -1.0, 0.0],
-                        [-1.0, 1.0, 0.0],
-                        [1.0, -1.0, 0.0],
-                        [1.0, 1.0, 0.0],
-                    ] {
-                        ui_vertices.push(UiVertex {
-                            position,
-                            color: flash_color,
-                        });
-                    }
-                }
-
-                // Dragon completion has a short presentation flash analogous
-                // to the End portal effect.  It is driven by a transient
-                // State timer only; no tick, damage or authority value uses
-                // this field.
-                if self.end_flash_time > 0.0 {
-                    let alpha = crate::accessibility::reduced_flash_alpha(
-                        (self.end_flash_time / 0.45).clamp(0.0, 1.0) * 0.55,
-                        self.settings.accessibility.reduce_flashing,
-                    );
-                    let flash_color = [0.72, 0.52, 1.0, alpha];
-                    for position in [
-                        [-1.0, 1.0, 0.0],
-                        [-1.0, -1.0, 0.0],
-                        [1.0, -1.0, 0.0],
-                        [-1.0, 1.0, 0.0],
-                        [1.0, -1.0, 0.0],
-                        [1.0, 1.0, 0.0],
-                    ] {
-                        ui_vertices.push(UiVertex {
-                            position,
-                            color: flash_color,
-                        });
-                    }
-                }
-
-                // F3 Debug Screen
-                if self.show_debug {
-                    use std::fmt::Write;
-
-                    let char_w = 0.007;
-                    let char_h = 0.014;
-                    let spacing = 0.002;
-                    let start_x = -0.98;
-                    let mut line_y = 0.95;
-                    let line_gap = 0.025;
-
-                    let mut render_line = |s: &str, color: [f32; 4], verts: &mut Vec<UiVertex>| {
-                        add_string_lines(s, start_x, line_y, char_w, char_h, spacing, color, verts);
-                        line_y -= line_gap;
-                    };
-
-                    self.debug_str_scratch.clear();
-                    let _ = write!(
-                        self.debug_str_scratch,
-                        "FPS: {:.1} / FRAME: {:.2} MS",
-                        self.debug_fps, self.debug_frame_ms
-                    );
-                    render_line(
-                        &self.debug_str_scratch,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-
-                    let pos = self.player_physics.position;
-                    self.debug_str_scratch.clear();
-                    let _ = write!(
-                        self.debug_str_scratch,
-                        "XYZ: {:.3} / {:.3} / {:.3}",
-                        pos.x, pos.y, pos.z
-                    );
-                    render_line(
-                        &self.debug_str_scratch,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-
-                    self.debug_str_scratch.clear();
-                    let _ = write!(
-                        self.debug_str_scratch,
-                        "AUTOMATION: MOVES {} / CHECKS {} / PULSES {} / BUDGET {} / REDSTONE Q {} / OBSERVER {}",
-                        self.perf_counters.hopper_transfers,
-                        self.perf_counters.hopper_container_checks,
-                        self.perf_counters.observer_pulses,
-                        self.perf_counters.hopper_budget_exhausted,
-                        self.perf_counters.redstone_scheduled_backlog,
-                        self.perf_counters.observer_pending_pulses
-                    );
-                    render_line(
-                        &self.debug_str_scratch,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-
-                    self.debug_str_scratch.clear();
-                    let _ = write!(
-                        self.debug_str_scratch,
-                        "FACING: YAW {:.2} / PITCH {:.2}",
-                        self.camera.yaw.to_degrees().rem_euclid(360.0),
-                        self.camera.pitch.to_degrees()
-                    );
-                    render_line(
-                        &self.debug_str_scratch,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-
-                    let chunk_x = debug_chunk_coordinate(pos.x, CHUNK_WIDTH);
-                    let chunk_z = debug_chunk_coordinate(pos.z, CHUNK_DEPTH);
-                    self.debug_str_scratch.clear();
-                    let _ = write!(self.debug_str_scratch, "CHUNK: {} / {}", chunk_x, chunk_z);
-                    render_line(
-                        &self.debug_str_scratch,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-
-                    let biome = self
-                        .weather
-                        .biome_at(pos.x.floor() as i32, pos.z.floor() as i32);
-                    self.debug_str_scratch.clear();
-                    let _ = write!(self.debug_str_scratch, "BIOME: {}", biome_debug_name(biome));
-                    render_line(
-                        &self.debug_str_scratch,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-
-                    self.debug_str_scratch.clear();
-                    let _ = write!(
-                        self.debug_str_scratch,
-                        "WEATHER: {:?}",
-                        self.weather.current
-                    );
-                    render_line(
-                        &self.debug_str_scratch,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-
-                    self.debug_str_scratch.clear();
-                    let _ = write!(
-                        self.debug_str_scratch,
-                        "CHUNKS: {} VISIBLE / {} OCCLUDED / {} LOADED / {} DRAWS",
-                        self.visible_chunk_count,
-                        self.perf_counters.occluded_chunks,
-                        self.chunk_manager.chunks.len(),
-                        self.submitted_terrain_draw_calls
-                    );
-                    render_line(
-                        &self.debug_str_scratch,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-
-                    self.debug_str_scratch.clear();
-                    let _ = write!(
-                        self.debug_str_scratch,
-                        "ENTITIES: {} ({} RENDERED, {} FRUSTUM, {} OCCLUSION) / PARTICLES: {}",
-                        self.entity_manager.entities.len(),
-                        self.perf_counters.rendered_entities,
-                        self.perf_counters.frustum_culled_entities,
-                        self.perf_counters.occlusion_culled_entities,
-                        self.particles.particles.len()
-                    );
-                    render_line(
-                        &self.debug_str_scratch,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-
-                    let culling = self.entity_los_manager.counters;
-                    self.debug_str_scratch.clear();
-                    let _ = write!(
-                        self.debug_str_scratch,
-                        "CULL: DIST {} / FRUST {} / SEC {} / LOS {} / FAIL-OPEN {} / STALE {} / TIMEOUT {} / OVERFLOW {}",
-                        culling.distance,
-                        culling.frustum,
-                        culling.section,
-                        culling.los,
-                        culling.fail_open,
-                        culling.stale,
-                        culling.timeouts,
-                        culling.overflow
-                    );
-                    render_line(
-                        &self.debug_str_scratch,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-
-                    let terrain_indices = self.submitted_terrain_triangles.saturating_mul(3);
-                    let rendered_indices = terrain_indices
-                        + u64::from(self.mob_num_indices)
-                        + u64::from(self.particle_num_indices);
-                    let rendered_triangles = rendered_indices / 3;
-                    let rendered_vertices = rendered_indices * 2 / 3;
-                    self.debug_str_scratch.clear();
-                    let _ = write!(
-                        self.debug_str_scratch,
-                        "RENDER: {} VERTICES / {} TRIANGLES / {} DRAWS",
-                        rendered_vertices, rendered_triangles, self.perf_counters.draw_calls
-                    );
-                    render_line(
-                        &self.debug_str_scratch,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-
-                    self.debug_str_scratch.clear();
-                    let _ = write!(
-                        self.debug_str_scratch,
-                        "FRAME ALLOCS: {}",
-                        self.perf_counters.frame_allocations
-                    );
-                    render_line(
-                        &self.debug_str_scratch,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-
-                    self.debug_str_scratch.clear();
-                    let _ = write!(
-                        self.debug_str_scratch,
-                        "MEMORY TRACKED: {:.1} MB",
-                        self.estimated_debug_memory_bytes() as f64 / (1024.0 * 1024.0)
-                    );
-                    render_line(
-                        &self.debug_str_scratch,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-
-                    self.debug_str_scratch.clear();
-                    let _ = write!(
-                        self.debug_str_scratch,
-                        "GPU MESH: {:.1} MB / {} BUFFERS / UPLOAD: {:.1} KB",
-                        self.perf_counters.gpu_mesh_bytes as f64 / (1024.0 * 1024.0),
-                        self.perf_counters.gpu_buffer_objects,
-                        self.perf_counters.upload_bytes_frame as f64 / 1024.0
-                    );
-                    render_line(
-                        &self.debug_str_scratch,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-
-                    self.debug_str_scratch.clear();
-                    let _ = write!(
-                        self.debug_str_scratch,
-                        "WORKERS: {} IN FLIGHT / {} STALE / {} CANCELLED",
-                        self.perf_counters.in_flight,
-                        self.perf_counters.stale_results,
-                        self.perf_counters.cancelled
-                    );
-                    render_line(
-                        &self.debug_str_scratch,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-
-                    self.debug_str_scratch.clear();
-                    let _ = write!(
-                        self.debug_str_scratch,
-                        "SAVE Q: {} ({:.2} MB) | IN FLIGHT: {} | COALESCE: {} | REGION: {:.2} MB | NET Q: {} | NET FULL: {}",
-                        self.perf_counters.save_queue_depth,
-                        self.perf_counters.save_queue_bytes as f64 / (1024.0 * 1024.0),
-                        self.perf_counters.save_in_flight,
-                        self.perf_counters.save_drop,
-                        self.perf_counters.loaded_region_cache_bytes as f64 / (1024.0 * 1024.0),
-                        self.perf_counters.network_queue_depth,
-                        self.perf_counters.network_catchup_mailbox_full
-                    );
-                    render_line(
-                        &self.debug_str_scratch,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-
-                    self.debug_str_scratch.clear();
-                    if self.perf_counters.gpu_timestamps_supported
-                        && self.perf_counters.gpu_timestamps_inside_passes
-                        && self.gpu_pass_timings_valid
-                    {
-                        let _ = write!(
-                            self.debug_str_scratch,
-                            "GPU PASSES: SKY {:.2}MS | OPAQUE {:.2}MS | MOBS {:.2}MS | TRANS {:.2}MS | PART {:.2}MS | CRACK {:.2}MS | UI {:.2}MS",
-                            self.perf_counters.gpu_sky_ns as f64 / 1_000_000.0,
-                            self.perf_counters.gpu_opaque_ns as f64 / 1_000_000.0,
-                            self.perf_counters.gpu_mobs_ns as f64 / 1_000_000.0,
-                            self.perf_counters.gpu_translucent_ns as f64 / 1_000_000.0,
-                            self.perf_counters.gpu_particles_ns as f64 / 1_000_000.0,
-                            self.perf_counters.gpu_crack_ns as f64 / 1_000_000.0,
-                            self.perf_counters.gpu_ui_ns as f64 / 1_000_000.0,
-                        );
-                    } else if self.perf_counters.gpu_timestamps_supported
-                        && self.perf_counters.gpu_timestamps_inside_passes
-                    {
-                        let _ = write!(
-                            self.debug_str_scratch,
-                            "GPU PASSES: N/A (WAITING FOR FIRST VALID TIMESTAMP SAMPLE)"
-                        );
-                    } else if self.perf_counters.gpu_timestamps_supported {
-                        let _ = write!(
-                            self.debug_str_scratch,
-                            "GPU PASSES: N/A (TIMESTAMP_QUERY_INSIDE_PASSES UNSUPPORTED)"
-                        );
-                    } else {
-                        let _ = write!(
-                            self.debug_str_scratch,
-                            "GPU PASSES: TIMESTAMP QUERY NOT SUPPORTED"
-                        );
-                    }
-                    render_line(
-                        &self.debug_str_scratch,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-
-                    let time_of_day = self.world_time.time_of_day_smooth();
-                    let hour = ((time_of_day * 24.0 + 6.0) % 24.0).floor() as u32;
-                    let minute = (((time_of_day * 24.0 + 6.0) % 1.0) * 60.0).floor() as u32;
-                    let day = self.world_time.ticks / self.world_time.day_length;
-                    self.debug_str_scratch.clear();
-                    let _ = write!(
-                        self.debug_str_scratch,
-                        "TIME: {:02}:{:02} / DAY: {} / TICKS: {}",
-                        hour, minute, day, self.world_time.ticks
-                    );
-                    render_line(
-                        &self.debug_str_scratch,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-
-                    self.debug_str_scratch.clear();
-                    match &self.role {
-                        MultiplayerRole::Host { port } => {
-                            let _ = write!(
-                                self.debug_str_scratch,
-                                "NET: HOST ON PORT {} | CLIENTS: {}",
-                                port,
-                                self.remote_players.len()
-                            );
-                        }
-                        MultiplayerRole::Client {
-                            server_addr, port, ..
-                        } => {
-                            let _ = write!(
-                                self.debug_str_scratch,
-                                "NET: CLIENT @ {}:{} | LOCAL ID: {} | PLAYERS: {}",
-                                server_addr,
-                                port,
-                                self.local_player_id
-                                    .map(|id| id.to_string())
-                                    .unwrap_or_else(|| "?".to_string()),
-                                self.remote_players.len() + 1
-                            );
-                        }
-                        MultiplayerRole::Singleplayer => {
-                            let _ = write!(self.debug_str_scratch, "NET: SINGLEPLAYER");
-                        }
-                    }
-                    render_line(
-                        &self.debug_str_scratch,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-
-                    for summary in self.perf_summaries.iter() {
-                        let name_label = if summary.name == "lighting" {
-                            "LIGHTING (LOAD+MUTATION)"
-                        } else {
-                            summary.name
-                        };
-                        self.debug_str_scratch.clear();
-                        let _ = write!(
-                            self.debug_str_scratch,
-                            "CPU {}: AVG {:.3} / P95 {:.3} / P99 {:.3} MS / N {}",
-                            name_label,
-                            summary.average() as f64 / 1_000_000.0,
-                            summary.p95() as f64 / 1_000_000.0,
-                            summary.p99() as f64 / 1_000_000.0,
-                            summary.sample_count(),
-                        );
-                        render_line(
-                            &self.debug_str_scratch,
-                            [0.82, 0.94, 1.0, 1.0],
-                            &mut ui_line_vertices,
-                        );
-                    }
-
-                    // Queue telemetry is sampled once per frame and retained in the
-                    // bounded 240-frame ring; show every queue family plus p95/p99.
-                    if let Some(latest) = self.frame_perf_samples.back() {
-                        let categories = latest.queues.categories.clone();
-                        for category in crate::perf::QueueCategory::ALL {
-                            let name = match category {
-                                crate::perf::QueueCategory::Inbound => "IN",
-                                crate::perf::QueueCategory::Outbound => "OUT",
-                                crate::perf::QueueCategory::Reliable => "REL",
-                                crate::perf::QueueCategory::CatchUp => "CATCH",
-                                crate::perf::QueueCategory::SaveProducer => "SAVE-P",
-                                crate::perf::QueueCategory::SaveWorker => "SAVE-W",
-                            };
-                            let sample = categories.get(&category).cloned().unwrap_or_default();
-                            let p95 = crate::perf::frame_percentile(
-                                &self.frame_perf_samples,
-                                95,
-                                |frame| {
-                                    frame
-                                        .queues
-                                        .categories
-                                        .get(&category)
-                                        .map_or(0, |queue| queue.depth)
-                                },
-                            );
-                            let p99 = crate::perf::frame_percentile(
-                                &self.frame_perf_samples,
-                                99,
-                                |frame| {
-                                    frame
-                                        .queues
-                                        .categories
-                                        .get(&category)
-                                        .map_or(0, |queue| queue.depth)
-                                },
-                            );
-                            self.debug_str_scratch.clear();
-                            let _ = write!(
-                                self.debug_str_scratch,
-                                "Q {} D:{} B:{} DROP:{} RETRY:{} CANCEL:{} AGE:{}ms P95:{} P99:{}",
-                                name,
-                                sample.depth,
-                                sample.bytes,
-                                sample.drops,
-                                sample.retries,
-                                sample.cancels,
-                                sample.oldest_age_ms,
-                                p95,
-                                p99
-                            );
-                            render_line(
-                                &self.debug_str_scratch,
-                                [0.82, 0.94, 1.0, 1.0],
-                                &mut ui_line_vertices,
-                            );
-                        }
-                    }
-
-                    self.debug_str_scratch.clear();
-                    let _ = write!(self.debug_str_scratch, "LIGHT SRC:");
-                    for source in crate::perf::LightingSource::ALL {
-                        let ms = self.lighting_scopes_frame.get(source as usize).unwrap_or(0)
-                            as f64
-                            / 1_000_000.0;
-                        let _ = write!(self.debug_str_scratch, " {} {:.3}ms", source.name(), ms);
-                    }
-                    render_line(
-                        &self.debug_str_scratch,
-                        [0.82, 0.94, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-
-                    self.debug_str_scratch.clear();
-                    let _ = write!(self.debug_str_scratch, "UPLOAD SRC:");
-                    for source in crate::perf::UploadSource::ALL {
-                        let ms = self
-                            .gpu_upload_scopes_frame
-                            .get(source as usize)
-                            .unwrap_or(0) as f64
-                            / 1_000_000.0;
-                        let _ = write!(self.debug_str_scratch, " {} {:.3}ms", source.name(), ms);
-                    }
-                    render_line(
-                        &self.debug_str_scratch,
-                        [0.82, 0.94, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-                }
-            }
-
-            // Remote-player name tags use the same vector-line UI as the rest
-            // of the HUD. Project the point above each avatar into NDC, then
-            // keep the label readable at the horizontal screen edge.
-            let view_proj = self.camera.build_view_projection_matrix(
-                aspect,
-                crate::camera::render_far_plane(self.chunk_manager.render_distance as u32),
-            );
-            for remote in self.remote_players.values() {
-                if remote.username.trim().is_empty() {
-                    continue;
-                }
-                let Some(entity) = self.entity_manager.get_by_id(remote.entity_id) else {
-                    continue;
-                };
-                if entity.position.distance_squared(self.camera.position) > 96.0 * 96.0 {
-                    continue;
-                }
-                let Some(projected) =
-                    project_name_tag(entity.position + Vec3::new(0.0, 2.05, 0.0), view_proj)
-                else {
-                    continue;
-                };
-                let label: String = remote.username.to_uppercase().chars().take(24).collect();
-                let char_w = 0.009;
-                let char_h = 0.018;
-                let spacing = 0.003;
-                let width = label.chars().count() as f32 * (char_w + spacing) - spacing;
-                let center_x = projected.x.clamp(-0.98 + width / 2.0, 0.98 - width / 2.0);
-                let y = (projected.y + 0.025).clamp(-0.94, 0.94);
-                add_ui_quad(
-                    &mut ui_vertices,
-                    center_x - width / 2.0 - 0.012,
-                    center_x + width / 2.0 + 0.012,
-                    y - 0.007,
-                    y + char_h + 0.007,
-                    [0.02, 0.02, 0.02, 0.68],
-                );
-                add_string_lines(
-                    &label,
-                    center_x - width / 2.0,
-                    y,
-                    char_w,
-                    char_h,
-                    spacing,
-                    [1.0, 1.0, 1.0, 1.0],
-                    &mut ui_line_vertices,
-                );
-            }
-
-            // Chat history is deliberately a compact ring buffer. The newest
-            // line sits closest to the input box at the lower-left.
-            let visible_messages: Vec<_> = self
-                .chat_messages
-                .iter()
-                .rev()
-                .take(CHAT_VISIBLE_LINES)
-                .collect();
-            let chat_scale = self.settings.accessibility.chat_scale.clamp(0.5, 2.0);
-            let chat_opacity = self.settings.accessibility.chat_opacity.clamp(0.0, 1.0);
-            for (line_index, (sender, message)) in visible_messages.iter().enumerate() {
-                let line: String = format!("<{sender}> {message}")
-                    .to_uppercase()
-                    .chars()
-                    .take(96)
-                    .collect();
-                let y = -0.80 + line_index as f32 * 0.050 * chat_scale;
-                let char_w = 0.008 * chat_scale;
-                let char_h = 0.018 * chat_scale;
-                let spacing = 0.002 * chat_scale;
-                let width = line.chars().count() as f32 * (char_w + spacing) - spacing;
-                let alpha = (1.0 - line_index as f32 * 0.07) * chat_opacity;
-                add_ui_quad(
-                    &mut ui_vertices,
-                    -0.985,
-                    (-0.955 + width).min(0.985),
-                    y - 0.007,
-                    y + char_h + 0.007,
-                    [0.01, 0.01, 0.01, 0.52 * alpha],
-                );
-                add_string_lines(
-                    &line,
-                    -0.97,
-                    y,
-                    char_w,
-                    char_h,
-                    spacing,
-                    [1.0, 1.0, 1.0, alpha],
-                    &mut ui_line_vertices,
-                );
-            }
-
-            if self.is_chat_open {
-                add_ui_quad(
-                    &mut ui_vertices,
-                    -0.99,
-                    0.99,
-                    -0.97,
-                    -0.875,
-                    [0.01, 0.01, 0.01, 0.78],
-                );
-                add_ui_border(
-                    &mut ui_line_vertices,
-                    -0.99,
-                    0.99,
-                    -0.97,
-                    -0.875,
-                    [0.65, 0.65, 0.65, 0.9],
-                );
-                let mut visible_input: Vec<char> = self.chat_input.chars().rev().take(92).collect();
-                visible_input.reverse();
-                let mut input = String::from("> ");
-                input.extend(visible_input);
-                if (self.total_time * 2.0) as u32 % 2 == 0 {
-                    input.push('_');
-                }
-                add_string_lines(
-                    &input.to_uppercase(),
-                    -0.97,
-                    -0.935,
-                    0.008 * chat_scale,
-                    0.024 * chat_scale,
-                    0.002 * chat_scale,
-                    [1.0, 1.0, 1.0, 1.0],
-                    &mut ui_line_vertices,
-                );
-            }
-
-            if self.settings.accessibility.subtitles {
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|duration| duration.as_millis() as u64)
-                    .unwrap_or_default();
-                for (index, event) in self
-                    .audio_manager
-                    .drain_subtitles(now_ms)
-                    .into_iter()
-                    .rev()
-                    .take(4)
-                    .enumerate()
-                {
-                    let direction_key = match event.direction {
-                        crate::accessibility::SubtitleDirection::Left => {
-                            "hud.subtitle.direction_left"
-                        }
-                        crate::accessibility::SubtitleDirection::Right => {
-                            "hud.subtitle.direction_right"
-                        }
-                        crate::accessibility::SubtitleDirection::Front => {
-                            "hud.subtitle.direction_front"
-                        }
-                        crate::accessibility::SubtitleDirection::Back => {
-                            "hud.subtitle.direction_back"
-                        }
-                        crate::accessibility::SubtitleDirection::Center => "hud.subtitle.center",
-                    };
-                    let direction = self.translate(direction_key);
-                    let sound = self.translate(event.key);
-                    let text = if direction.is_empty() {
-                        format!("[{}]", sound)
-                    } else {
-                        format!("[{}] {}", direction, sound)
-                    };
-                    let subtitle_scale = self.settings.accessibility.chat_scale.clamp(0.5, 2.0);
-                    let y = 0.58 - index as f32 * 0.055 * subtitle_scale;
-                    let char_w = 0.006 * subtitle_scale;
-                    let char_h = 0.014 * subtitle_scale;
-                    let spacing = 0.002 * subtitle_scale;
-                    let width = text.chars().count() as f32 * (char_w + spacing) - spacing;
-                    let x = (0.97 - width).max(0.02);
-                    add_ui_quad(
-                        &mut ui_vertices,
-                        x - 0.012,
-                        (0.98f32).min(x + width + 0.012),
-                        y - 0.006,
-                        y + char_h + 0.006,
-                        [0.01, 0.01, 0.01, 0.82 * chat_opacity],
-                    );
-                    add_string_lines(
-                        &text,
-                        x,
-                        y,
-                        char_w,
-                        char_h,
-                        spacing,
-                        [1.0, 1.0, 1.0, chat_opacity],
-                        &mut ui_line_vertices,
-                    );
-                }
-            }
-
-            if let Some(boss) = crate::boss::active_boss_hud(&self.entity_manager) {
-                let x0 = -0.42;
-                let x1 = 0.42;
-                let y0 = 0.82;
-                let y1 = 0.875;
-                add_ui_quad(&mut ui_vertices, x0, x1, y0, y1, [0.05, 0.01, 0.07, 0.92]);
-                add_ui_quad(
-                    &mut ui_vertices,
-                    x0 + 0.008,
-                    x0 + 0.008 + (x1 - x0 - 0.016) * boss.progress,
-                    y0 + 0.009,
-                    y1 - 0.009,
-                    [0.55, 0.05, 0.65, 1.0],
-                );
-                let char_w = 0.010;
-                let spacing = 0.003;
-                let boss_title = if boss.title.eq_ignore_ascii_case("ENDER DRAGON") {
-                    self.localized_entity_name(crate::entity::EntityType::EnderDragon)
-                } else if boss.title.eq_ignore_ascii_case("WITHER") {
-                    self.localized_entity_name(crate::entity::EntityType::Wither)
-                } else {
-                    boss.title.to_string()
-                };
-                let width = boss_title.chars().count() as f32 * (char_w + spacing) - spacing;
-                add_string_lines(
-                    &boss_title,
-                    -width / 2.0,
-                    0.895,
-                    char_w,
-                    0.02,
-                    spacing,
-                    [1.0, 1.0, 1.0, 1.0],
-                    &mut ui_line_vertices,
-                );
-            }
-
-            self.render_advancement_ui_and_toasts(
-                &mut ui_vertices,
-                &mut ui_line_vertices,
-                &mut ui_textured_vertices,
-            );
-
-            // Apply presentation settings after composing every HUD branch so
-            // chat, subtitles, death, advancement and save/disconnect screens
-            // share the same scale/contrast contract.  The fitted scale keeps
-            // the full layout inside NDC instead of clamping individual glyph
-            // vertices (which used to clip text at high DPI/UI scale).
-            let requested_scale = self.settings.accessibility.ui_scale;
-            let max_abs = ui_vertices
-                .iter()
-                .flat_map(|vertex| [vertex.position[0].abs(), vertex.position[1].abs()])
-                .chain(
-                    ui_line_vertices
-                        .iter()
-                        .flat_map(|vertex| [vertex.position[0].abs(), vertex.position[1].abs()]),
-                )
-                .fold(0.0, f32::max);
-            let layout_scale = crate::accessibility::fit_ui_scale(requested_scale, max_abs);
-            for vertex in ui_vertices.iter_mut() {
-                vertex.position[0] *= layout_scale;
-                vertex.position[1] *= layout_scale;
-                if self.settings.accessibility.high_contrast {
-                    vertex.color = crate::accessibility::high_contrast_color(vertex.color);
-                }
-            }
-            for vertex in ui_line_vertices.iter_mut() {
-                vertex.position[0] *= layout_scale;
-                vertex.position[1] *= layout_scale;
-                if self.settings.accessibility.high_contrast {
-                    vertex.color = crate::accessibility::high_contrast_color(vertex.color);
-                }
-            }
-            for vertex in ui_textured_vertices.iter_mut() {
-                vertex.position[0] *= layout_scale;
-                vertex.position[1] *= layout_scale;
-                if self.settings.accessibility.high_contrast {
-                    vertex.color = crate::accessibility::high_contrast_color(vertex.color);
-                }
-            }
-
-            // Write Buffers
-            let ui_vert_len = ui_vertices.len().min(UI_VERTEX_CAPACITY);
-            let ui_line_vert_len = ui_line_vertices.len().min(UI_LINE_VERTEX_CAPACITY);
-            let ui_textured_vert_len = ui_textured_vertices.len().min(UI_VERTEX_CAPACITY);
-
-            let upload_started = Instant::now();
-            self.queue.write_buffer(
-                &self.ui_vertex_buffer,
-                0,
-                bytemuck::cast_slice(&ui_vertices[..ui_vert_len]),
-            );
-            self.queue.write_buffer(
-                &self.ui_line_vertex_buffer,
-                0,
-                bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]),
-            );
-            self.queue.write_buffer(
-                &self.ui_textured_vertex_buffer,
-                0,
-                bytemuck::cast_slice(&ui_textured_vertices[..ui_textured_vert_len]),
-            );
-            let upload_elapsed = upload_started.elapsed();
-            self.gpu_upload_time_frame += upload_elapsed;
-            self.gpu_upload_scopes_frame
-                .record(crate::perf::UploadSource::Ui as usize, upload_elapsed);
-            self.perf_counters.upload_bytes_frame =
-                self.perf_counters.upload_bytes_frame.saturating_add(
-                    ((ui_vert_len + ui_line_vert_len + ui_textured_vert_len)
-                        * std::mem::size_of::<UiVertex>()) as u64,
-                );
-
-            self.num_ui_vertices = ui_vert_len as u32;
-            self.num_ui_line_vertices = ui_line_vert_len as u32;
-            self.num_ui_textured_vertices = ui_textured_vert_len as u32;
-        }
-
-        self.ui_vertices_scratch = ui_vertices;
-        self.ui_line_vertices_scratch = ui_line_vertices;
-
-        self.perf_recorder.record(
-            crate::perf::ScopeId::RenderPrepareUi,
-            ui_prepare_started.elapsed(),
-        );
-        self.gpu_upload_time_frame += gpu_upload_elapsed;
-        let mut total_draw_calls = 1 + self.submitted_terrain_draw_calls as u64;
-        total_draw_calls += u64::from(self.mob_cuboid_num_instances > 0)
-            + u64::from(self.mob_quad_num_instances > 0);
-        total_draw_calls += u64::from(!self.particle_instances_scratch.is_empty());
-        total_draw_calls += u64::from(self.mining_target.is_some() && self.mining_progress > 0.0);
-        total_draw_calls += u64::from(
-            self.hand_num_indices > 0
-                && !self.camera_perspective.is_third_person()
-                && !self.is_paused,
-        );
-        if self.is_paused {
-            total_draw_calls += 2;
-        } else {
-            total_draw_calls += u64::from(self.num_ui_vertices > 0);
-            total_draw_calls += u64::from(self.num_ui_textured_vertices > 0);
-            total_draw_calls += 1; // Crosshair.
-            total_draw_calls += u64::from(self.num_ui_line_vertices > 0);
-        }
-        self.perf_counters.draw_calls = total_draw_calls;
-
-        let render_encode_started = Instant::now();
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Render Encoder"),
-            });
-
-        let mut crack_metrics: Option<(u64, u64)> = None;
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: self.camera_uniform.sky_color_horizon[0] as f64,
-                            g: self.camera_uniform.sky_color_horizon[1] as f64,
-                            b: self.camera_uniform.sky_color_horizon[2] as f64,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                occlusion_query_set: None,
-                timestamp_writes: None,
-            });
-
-            // Viewport-only scaling renders the world into the surface's
-            // top-left corner; without an offscreen target and upscale pass it
-            // is not dynamic resolution. Keep world rendering native-sized
-            // until that complete path exists.
-            let effective_scale = 1.0_f32;
-            if effective_scale < 0.999 {
-                render_pass.set_viewport(
-                    0.0,
-                    0.0,
-                    (self.size.width as f32 * effective_scale).max(1.0),
-                    (self.size.height as f32 * effective_scale).max(1.0),
-                    0.0,
-                    1.0,
-                );
-            }
-
-            // Draw Skybox first
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 0);
-                }
-            }
-            render_pass.set_pipeline(&self.sky_pipeline);
-            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            render_pass.draw(0..6, 0..1);
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 1);
-                }
-            }
-
-            // Pass 1: Opaque & Cutout
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 2);
-                }
-            }
-            render_pass.set_pipeline(&self.terrain_render_pipeline);
-            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            let mut bound_region: Option<(i32, i32)> = None;
-            for candidate in &draw_plan.opaque {
-                let lod = candidate.lod;
-                let Some(layer) = self
-                    .chunk_meshes
-                    .get(&candidate.chunk_coord)
-                    .and_then(|mesh| {
-                        candidate
-                            .section_y
-                            .and_then(|section_y| mesh.section(section_y))
-                    })
-                    .and_then(|section| section.level(lod))
-                    .map(|level| &level.opaque)
-                else {
-                    continue;
-                };
-                let Some(handle) = layer.handle else {
-                    continue;
-                };
-                let region_coord = crate::chunk_render::chunk_to_region_coord(
-                    candidate.chunk_coord.0,
-                    candidate.chunk_coord.1,
-                );
-                let Some(region) = self.render_regions.get(&region_coord) else {
-                    continue;
-                };
-                if !region.handle_is_live(&handle) {
-                    continue;
-                }
-                if bound_region != Some(region_coord) {
-                    render_pass.set_vertex_buffer(0, region.vertex_buffer.slice(..));
-                    render_pass
-                        .set_index_buffer(region.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    render_pass.set_bind_group(1, &region.bind_group, &[]);
-                    bound_region = Some(region_coord);
-                }
-                let Some(index_end) = handle.index_offset.checked_add(handle.num_indices) else {
-                    continue;
-                };
-                let Ok(base_vertex) = i32::try_from(handle.vertex_offset) else {
-                    continue;
-                };
-                render_pass.draw_indexed(handle.index_offset..index_end, base_vertex, 0..1);
-            }
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 3);
-                }
-            }
-
-            // Draw Mobs
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 4);
-                }
-            }
-            if self.mob_cuboid_num_instances > 0 {
-                render_pass.set_pipeline(&self.mob_instanced_pipeline);
-                render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                render_pass.set_vertex_buffer(0, self.mob_cuboid_proto_vbuf.slice(..));
-                render_pass.set_vertex_buffer(
-                    1,
-                    self.mob_cuboid_instance_buffers[self.frame_ring_index].slice(..),
-                );
-                render_pass.set_index_buffer(
-                    self.mob_cuboid_proto_ibuf.slice(..),
-                    wgpu::IndexFormat::Uint32,
-                );
-                render_pass.draw_indexed(0..36, 0, 0..self.mob_cuboid_num_instances);
-            }
-            if self.mob_quad_num_instances > 0 {
-                render_pass.set_pipeline(&self.mob_instanced_pipeline);
-                render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                render_pass.set_vertex_buffer(0, self.mob_quad_proto_vbuf.slice(..));
-                render_pass.set_vertex_buffer(
-                    1,
-                    self.mob_quad_instance_buffers[self.frame_ring_index].slice(..),
-                );
-                render_pass.set_index_buffer(
-                    self.mob_quad_proto_ibuf.slice(..),
-                    wgpu::IndexFormat::Uint32,
-                );
-                render_pass.draw_indexed(0..12, 0, 0..self.mob_quad_num_instances);
-            }
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 5);
-                }
-            }
-
-            // Pass 2: Translucent (Water/Ice)
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 6);
-                }
-            }
-            render_pass.set_pipeline(&self.terrain_trans_pipeline);
-            let mut bound_region: Option<(i32, i32)> = None;
-            for candidate in &draw_plan.transparent {
-                let lod = candidate.lod;
-                let Some(layer) = self
-                    .chunk_meshes
-                    .get(&candidate.chunk_coord)
-                    .and_then(|mesh| {
-                        candidate
-                            .section_y
-                            .and_then(|section_y| mesh.section(section_y))
-                    })
-                    .and_then(|section| section.level(lod))
-                    .map(|level| &level.transparent)
-                else {
-                    continue;
-                };
-                let Some(handle) = layer.handle else {
-                    continue;
-                };
-                let region_coord = crate::chunk_render::chunk_to_region_coord(
-                    candidate.chunk_coord.0,
-                    candidate.chunk_coord.1,
-                );
-                let Some(region) = self.render_regions.get(&region_coord) else {
-                    continue;
-                };
-                if !region.handle_is_live(&handle) {
-                    continue;
-                }
-                if bound_region != Some(region_coord) {
-                    render_pass.set_vertex_buffer(0, region.vertex_buffer.slice(..));
-                    render_pass
-                        .set_index_buffer(region.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    render_pass.set_bind_group(1, &region.bind_group, &[]);
-                    bound_region = Some(region_coord);
-                }
-                let Some(index_end) = handle.index_offset.checked_add(handle.num_indices) else {
-                    continue;
-                };
-                let Ok(base_vertex) = i32::try_from(handle.vertex_offset) else {
-                    continue;
-                };
-                render_pass.draw_indexed(handle.index_offset..index_end, base_vertex, 0..1);
-            }
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 7);
-                }
-            }
-
-            // Draw billboard particles using instanced particle pipeline.
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 8);
-                }
-            }
-            if !self.particle_instances_scratch.is_empty() {
-                let num_particles = self.particle_instances_scratch.len() as u32;
-                render_pass.set_pipeline(&self.particle_instanced_pipeline);
-                render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                render_pass.set_vertex_buffer(0, self.particle_proto_vbuf.slice(..));
-                render_pass.set_vertex_buffer(
-                    1,
-                    self.particle_instance_buffers[self.frame_ring_index].slice(..),
-                );
-                render_pass.set_index_buffer(
-                    self.particle_proto_ibuf.slice(..),
-                    wgpu::IndexFormat::Uint32,
-                );
-                render_pass.draw_indexed(0..6, 0, 0..num_particles);
-            }
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 9);
-                }
-            }
-
-            // Draw Block cracking animation overlay (multiply blend)
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 10);
-                }
-            }
-            if let Some(target) = self.mining_target {
-                if self.mining_progress > 0.0 {
-                    if let Some((_num_vertices, num_indices, upload_ns, upload_bytes)) =
-                        self.update_crack_buffers(target, self.mining_progress)
-                    {
-                        crack_metrics = Some((upload_ns, upload_bytes));
-                        render_pass.set_pipeline(&self.crack_pipeline);
-                        render_pass.set_vertex_buffer(0, self.crack_vertex_buffer.slice(..));
-                        render_pass.set_index_buffer(
-                            self.crack_index_buffer.slice(..),
-                            wgpu::IndexFormat::Uint32,
-                        );
-                        render_pass.draw_indexed(0..num_indices, 0, 0..1);
-                    }
-                }
-            }
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 11);
-                }
-            }
-
-            // Draw first-person right hand and held item. Uses a dedicated
-            // camera with a very near plane so the view-space model never
-            // clips into world geometry. Hidden in third-person mode and when
-            // the game is paused.
-            if self.hand_num_indices > 0
-                && !self.camera_perspective.is_third_person()
-                && !self.is_paused
-            {
-                render_pass.set_pipeline(&self.hand_pipeline);
-                render_pass.set_bind_group(0, &self.hand_camera_bind_group, &[]);
-                render_pass.set_vertex_buffer(0, self.hand_vertex_buffer.slice(..));
-                render_pass
-                    .set_index_buffer(self.hand_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..self.hand_num_indices, 0, 0..1);
-            }
-
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 12);
-                }
-            }
-            if effective_scale < 0.999 {
-                render_pass.set_viewport(
-                    0.0,
-                    0.0,
-                    self.size.width as f32,
-                    self.size.height as f32,
-                    0.0,
-                    1.0,
-                );
-            }
-            if !self.is_paused {
-                // 1. Draw Colored UI (slot/panel backgrounds). Backgrounds go
-                // first so the item icons drawn next stay fully visible;
-                // previously the semi-transparent slot quads were drawn over
-                // the icons and washed them out.
-                if self.num_ui_vertices > 0 {
-                    render_pass.set_pipeline(&self.ui_pipeline);
-                    render_pass.set_vertex_buffer(0, self.ui_vertex_buffer.slice(..));
-                    render_pass.draw(0..self.num_ui_vertices, 0..1);
-                }
-
-                // 2. Draw Textured UI (block thumbnails, hearts, dragged item)
-                if self.num_ui_textured_vertices > 0 {
-                    render_pass.set_pipeline(&self.ui_textured_pipeline);
-                    render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                    render_pass.set_vertex_buffer(0, self.ui_textured_vertex_buffer.slice(..));
-                    render_pass.draw(0..self.num_ui_textured_vertices, 0..1);
-                }
-
-                // 3. Draw Crosshair
-                render_pass.set_pipeline(&self.crosshair_pipeline);
-                render_pass.set_vertex_buffer(0, self.crosshair_buffer.slice(..));
-                render_pass.draw(0..4, 0..1);
-
-                // 4. Draw Line/Text UI (slot borders & texts)
-                if self.num_ui_line_vertices > 0 {
-                    render_pass.set_pipeline(&self.ui_line_pipeline);
-                    render_pass.set_vertex_buffer(0, self.ui_line_vertex_buffer.slice(..));
-                    render_pass.draw(0..self.num_ui_line_vertices, 0..1);
-                }
-            } else {
-                // 3. Draw Pause Menu
-                // Background overlay & buttons
-                render_pass.set_pipeline(&self.ui_pipeline);
-                render_pass.set_vertex_buffer(0, self.ui_vertex_buffer.slice(..));
-                render_pass.draw(0..self.num_ui_vertices, 0..1);
-
-                // Borders & Text
-                render_pass.set_pipeline(&self.ui_line_pipeline);
-                render_pass.set_vertex_buffer(0, self.ui_line_vertex_buffer.slice(..));
-                render_pass.draw(0..self.num_ui_line_vertices, 0..1);
-            }
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 13);
-                }
-            }
-        }
-
-        if let Some((upload_ns, upload_bytes)) = crack_metrics {
-            self.gpu_upload_time_frame += Duration::from_nanos(upload_ns);
-            self.gpu_upload_scopes_frame
-                .record_nanos(crate::perf::UploadSource::Crack as usize, upload_ns);
-            self.perf_counters.upload_bytes_frame = self
-                .perf_counters
-                .upload_bytes_frame
-                .saturating_add(upload_bytes);
-        }
-        self.perf_recorder
-            .record(crate::perf::ScopeId::GpuUpload, self.gpu_upload_time_frame);
-
-        self.poll_gpu_timestamp_readbacks();
-        let mut timestamp_readback_slot = None;
-        if let (Some(query_set), Some(resolve_buffer)) = (
-            &self.gpu_timestamp_query_set,
-            &self.gpu_timestamp_resolve_buffer,
-        ) {
-            for (slot_index, slot) in self.gpu_timestamp_readback_slots.iter().enumerate() {
-                if !slot
-                    .status
-                    .lock()
-                    .unwrap()
-                    .reserve_copy(frame_submission_id)
-                {
-                    continue;
-                }
-                encoder.resolve_query_set(
-                    query_set,
-                    0..GPU_TIMESTAMP_QUERY_COUNT,
-                    resolve_buffer,
-                    0,
-                );
-                encoder.copy_buffer_to_buffer(
-                    resolve_buffer,
-                    0,
-                    &slot.buffer,
-                    0,
-                    GPU_TIMESTAMP_READBACK_BYTES,
-                );
-                timestamp_readback_slot = Some(slot_index);
-                break;
-            }
-        }
-        self.perf_counters.gpu_sky_ns = self.gpu_pass_timings_ns[0];
-        self.perf_counters.gpu_opaque_ns = self.gpu_pass_timings_ns[1];
-        self.perf_counters.gpu_mobs_ns = self.gpu_pass_timings_ns[2];
-        self.perf_counters.gpu_translucent_ns = self.gpu_pass_timings_ns[3];
-        self.perf_counters.gpu_particles_ns = self.gpu_pass_timings_ns[4];
-        self.perf_counters.gpu_crack_ns = self.gpu_pass_timings_ns[5];
-        self.perf_counters.gpu_ui_ns = self.gpu_pass_timings_ns[6];
-        self.perf_counters.gpu_timestamps_supported = self.gpu_timestamps_supported;
-        self.perf_counters.gpu_timestamps_inside_passes = self.gpu_timestamps_inside_passes;
-
-        let command_buffer = encoder.finish();
-        self.queue.submit(std::iter::once(command_buffer));
-        let completion_tx = self.gpu_completion_tx.clone();
-        self.queue.on_submitted_work_done(move || {
-            let _ = completion_tx.send(frame_submission_id);
-        });
-        if let Some(slot_index) = timestamp_readback_slot {
-            let slot = &self.gpu_timestamp_readback_slots[slot_index];
-            if slot
-                .status
-                .lock()
-                .unwrap()
-                .begin_mapping(frame_submission_id)
-            {
-                let status = std::sync::Arc::clone(&slot.status);
-                slot.buffer
-                    .slice(..)
-                    .map_async(wgpu::MapMode::Read, move |result| {
-                        status
-                            .lock()
-                            .unwrap()
-                            .map_completed(frame_submission_id, result.is_ok());
-                    });
-            }
-        }
-        self.perf_recorder.record(
-            crate::perf::ScopeId::RenderEncode,
-            render_encode_started.elapsed(),
-        );
-        let present_started = Instant::now();
-        output.present();
-        self.perf_recorder
-            .record(crate::perf::ScopeId::Present, present_started.elapsed());
-        let allocs_after = crate::perf::thread_alloc_count();
-        self.perf_counters.frame_allocations = allocs_after.saturating_sub(allocs_before);
-        self.record_frame_perf_sample();
-        Ok(())
+        self.prepare_entities(&mut gpu_upload_elapsed);
+        self.prepare_hand(&mut gpu_upload_elapsed);
+        self.build_hud(&mut gpu_upload_elapsed);
+        self.encode_frame(output, view, frame_submission_id, allocs_before)
     }
 
     fn apply_ui_accessibility(
@@ -24136,17 +5609,8 @@ impl State {
         ui_line_vertices: &mut [UiVertex],
         ui_textured_vertices: &mut [TexturedUiVertex],
     ) {
-        let max_abs = ui_vertices
-            .iter()
-            .flat_map(|vertex| [vertex.position[0].abs(), vertex.position[1].abs()])
-            .chain(
-                ui_line_vertices
-                    .iter()
-                    .flat_map(|vertex| [vertex.position[0].abs(), vertex.position[1].abs()]),
-            )
-            .fold(0.0, f32::max);
         let layout_scale =
-            crate::accessibility::fit_ui_scale(self.settings.accessibility.ui_scale, max_abs);
+            crate::accessibility::fit_ui_scale(self.settings.accessibility.ui_scale, 1.0);
         for vertex in ui_vertices.iter_mut() {
             vertex.position[0] *= layout_scale;
             vertex.position[1] *= layout_scale;
@@ -24191,7 +5655,6 @@ impl State {
                 .map(|(name, ns)| (name.to_string(), ns))
                 .collect()
         });
-        let save = &self.save_queue_stats;
         let reliable = self.perf_counters.network_inbound_reliable_pending;
         let latest = self.perf_counters.network_inbound_latest_pending;
         let now_ms = std::time::SystemTime::now()
@@ -24208,25 +5671,11 @@ impl State {
             .collect();
         categories.insert(
             crate::perf::QueueCategory::SaveProducer,
-            crate::perf::QueueCategorySample {
-                depth: save.depth().saturating_sub(save.in_flight()),
-                bytes: save.queued_bytes(),
-                oldest_age_ms: 0,
-                drops: save.dropped(),
-                retries: save.retries(),
-                cancels: save.cancels(),
-            },
+            crate::perf::QueueCategorySample::default(),
         );
         categories.insert(
             crate::perf::QueueCategory::SaveWorker,
-            crate::perf::QueueCategorySample {
-                depth: save.in_flight(),
-                bytes: save.in_flight_bytes(),
-                oldest_age_ms: 0,
-                drops: 0,
-                retries: save.retries(),
-                cancels: save.cancels(),
-            },
+            crate::perf::QueueCategorySample::default(),
         );
         let inbound = categories
             .get(&crate::perf::QueueCategory::Inbound)
@@ -24738,272 +6187,56 @@ fn add_char_lines_with_source(
     vertices: &mut Vec<UiVertex>,
 ) {
     let character = c.to_ascii_uppercase();
-    let x0 = x;
-    let x1 = x + w;
-    let xm = x + w * 0.5;
-    let y0 = y;
-    let y1 = y + h;
-    let ym = y + h * 0.5;
+    let rows = font_source
+        .glyph_override(character)
+        .unwrap_or_else(|| crate::glyph_atlas::glyph(character));
 
-    let mut add_line = |x_start: f32, y_start: f32, x_end: f32, y_end: f32| {
-        vertices.push(UiVertex {
-            position: [x_start, y_start, 0.0],
-            color,
-        });
-        vertices.push(UiVertex {
-            position: [x_end, y_end, 0.0],
-            color,
-        });
-    };
-
-    if let Some(rows) = font_source.glyph_override(character) {
-        let cell_w = w / 5.0;
-        let cell_h = h / 7.0;
-        for (row, mask) in rows.into_iter().enumerate() {
-            let center_y = y + h - (row as f32 + 0.5) * cell_h;
-            for column in 0..5 {
-                if mask & (1 << (4 - column)) != 0 {
-                    let cell_x = x + column as f32 * cell_w;
-                    add_line(cell_x, center_y, cell_x + cell_w, center_y);
-                }
+    let cell_w = w / 5.0;
+    let cell_h = h / 7.0;
+    for (row, mask) in rows.into_iter().enumerate() {
+        let center_y = y + h - (row as f32 + 0.5) * cell_h;
+        for column in 0..5 {
+            if mask & (1 << (4 - column)) != 0 {
+                let cell_x = x + column as f32 * cell_w;
+                vertices.push(UiVertex {
+                    position: [cell_x, center_y, 0.0],
+                    color,
+                });
+                vertices.push(UiVertex {
+                    position: [cell_x + cell_w, center_y, 0.0],
+                    color,
+                });
             }
         }
-        return;
     }
+}
 
-    match character {
-        'R' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, ym);
-            add_line(x1, ym, x0, ym);
-            add_line(x0, ym, x1, y0);
-        }
-        'E' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x0, ym, x1, ym);
-            add_line(x0, y0, x1, y0);
-        }
-        'S' => {
-            add_line(x1, y1, x0, y1);
-            add_line(x0, y1, x0, ym);
-            add_line(x0, ym, x1, ym);
-            add_line(x1, ym, x1, y0);
-            add_line(x1, y0, x0, y0);
-        }
-        'U' => {
-            add_line(x0, y1, x0, y0);
-            add_line(x0, y0, x1, y0);
-            add_line(x1, y0, x1, y1);
-        }
-        'M' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, xm, ym);
-            add_line(xm, ym, x1, y1);
-            add_line(x1, y1, x1, y0);
-        }
-        'G' => {
-            add_line(x1, y1, x0, y1);
-            add_line(x0, y1, x0, y0);
-            add_line(x0, y0, x1, y0);
-            add_line(x1, y0, x1, ym);
-            add_line(x1, ym, xm, ym);
-        }
-        'A' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, y0);
-            add_line(x0, ym, x1, ym);
-        }
-        'Q' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, y0);
-            add_line(x1, y0, x0, y0);
-            add_line(xm, ym, x1 + w * 0.2, y0 - h * 0.2);
-        }
-        'I' => {
-            add_line(xm, y0, xm, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x0, y0, x1, y0);
-        }
-        'T' => {
-            add_line(x0, y1, x1, y1);
-            add_line(xm, y1, xm, y0);
-        }
-        'P' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, ym);
-            add_line(x1, ym, x0, ym);
-        }
-        'O' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, y0);
-            add_line(x1, y0, x0, y0);
-        }
-        'D' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, xm, y1);
-            add_line(xm, y1, x1, ym);
-            add_line(x1, ym, xm, y0);
-            add_line(xm, y0, x0, y0);
-        }
-        'F' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x0, ym, x1, ym);
-        }
-        'V' => {
-            add_line(x0, y1, xm, y0);
-            add_line(xm, y0, x1, y1);
-        }
-        'N' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, x1, y0);
-            add_line(x1, y0, x1, y1);
-        }
-        'Y' => {
-            add_line(x0, y1, xm, ym);
-            add_line(x1, y1, xm, ym);
-            add_line(xm, ym, xm, y0);
-        }
-        'C' => {
-            add_line(x1, y1, x0, y1);
-            add_line(x0, y1, x0, y0);
-            add_line(x0, y0, x1, y0);
-        }
-        'H' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x1, y0, x1, y1);
-            add_line(x0, ym, x1, ym);
-        }
-        'L' => {
-            add_line(x0, y1, x0, y0);
-            add_line(x0, y0, x1, y0);
-        }
-        'B' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, ym);
-            add_line(x1, ym, x0, ym);
-            add_line(x1, ym, x1, y0);
-            add_line(x1, y0, x0, y0);
-        }
-        'K' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, ym, x1, y1);
-            add_line(x0, ym, x1, y0);
-        }
-        'W' => {
-            add_line(x0, y1, x0 + w * 0.2, y0);
-            add_line(x0 + w * 0.2, y0, xm, ym);
-            add_line(xm, ym, x0 + w * 0.8, y0);
-            add_line(x0 + w * 0.8, y0, x1, y1);
-        }
-        'X' => {
-            add_line(x0, y0, x1, y1);
-            add_line(x0, y1, x1, y0);
-        }
-        'Z' => {
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x0, y0);
-            add_line(x0, y0, x1, y0);
-        }
-        '<' => {
-            add_line(x1, y1, x0, ym);
-            add_line(x0, ym, x1, y0);
-        }
-        '>' => {
-            add_line(x0, y1, x1, ym);
-            add_line(x1, ym, x0, y0);
-        }
-        '-' => {
-            add_line(x0, ym, x1, ym);
-        }
-        '_' => {
-            add_line(x0, y0, x1, y0);
-        }
-        '+' => {
-            add_line(x0, ym, x1, ym);
-            add_line(xm, y0, xm, y1);
-        }
-        '/' => {
-            add_line(x0, y0, x1, y1);
-        }
-        ':' => {
-            add_line(xm - w * 0.05, y0 + h * 0.7, xm + w * 0.05, y0 + h * 0.7);
-            add_line(xm - w * 0.05, y0 + h * 0.3, xm + w * 0.05, y0 + h * 0.3);
-        }
-        '0' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, y0);
-            add_line(x1, y0, x0, y0);
-        }
-        '1' => {
-            add_line(xm, y0, xm, y1);
-            add_line(x0, y0, x1, y0);
-            add_line(xm - w * 0.2, y1 - h * 0.2, xm, y1);
-        }
-        '2' => {
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, ym);
-            add_line(x1, ym, x0, ym);
-            add_line(x0, ym, x0, y0);
-            add_line(x0, y0, x1, y0);
-        }
-        '3' => {
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, y0);
-            add_line(x1, y0, x0, y0);
-            add_line(x0, ym, x1, ym);
-        }
-        '4' => {
-            add_line(x0, y1, x0, ym);
-            add_line(x0, ym, x1, ym);
-            add_line(x1, y1, x1, y0);
-        }
-        '5' => {
-            add_line(x1, y1, x0, y1);
-            add_line(x0, y1, x0, ym);
-            add_line(x0, ym, x1, ym);
-            add_line(x1, ym, x1, y0);
-            add_line(x1, y0, x0, y0);
-        }
-        '6' => {
-            add_line(x1, y1, x0, y1);
-            add_line(x0, y1, x0, y0);
-            add_line(x0, y0, x1, y0);
-            add_line(x1, y0, x1, ym);
-            add_line(x1, ym, x0, ym);
-        }
-        '7' => {
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, y0);
-        }
-        '8' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, y0);
-            add_line(x1, y0, x0, y0);
-            add_line(x0, ym, x1, ym);
-        }
-        '9' => {
-            add_line(x0, ym, x1, ym);
-            add_line(x0, ym, x0, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, y0);
-            add_line(x1, y0, x0, y0);
-        }
-        '.' => {
-            add_line(xm - w * 0.05, y0, xm + w * 0.05, y0);
-        }
-        ' ' => {}
-        _ => {}
-    }
+#[allow(dead_code)] // Wired when glyph atlas bind group replaces line-list HUD text.
+fn add_char_textured_with_source(
+    font_source: &crate::resources::FontSource,
+    c: char,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: [f32; 4],
+    vertices: &mut Vec<TexturedUiVertex>,
+) {
+    let _ = font_source;
+    crate::glyph_atlas::push_glyph_quad(
+        vertices,
+        x,
+        y,
+        x + w,
+        y + h,
+        c,
+        color,
+        |position, tex_coords, color| TexturedUiVertex {
+            position,
+            tex_coords,
+            color,
+        },
+    );
 }
 
 fn add_string_lines_with_source(
@@ -25033,9 +6266,38 @@ fn add_string_lines_with_source(
     }
 }
 
+#[allow(dead_code)] // Wired when glyph atlas bind group replaces line-list HUD text.
+fn add_string_textured_with_source(
+    font_source: &crate::resources::FontSource,
+    s: &str,
+    start_x: f32,
+    y: f32,
+    char_w: f32,
+    char_h: f32,
+    spacing: f32,
+    color: [f32; 4],
+    vertices: &mut Vec<TexturedUiVertex>,
+) {
+    let mut current_x = start_x;
+    for c in s.chars() {
+        add_char_textured_with_source(
+            font_source,
+            c.to_ascii_uppercase(),
+            current_x,
+            y,
+            char_w,
+            char_h,
+            color,
+            vertices,
+        );
+        current_x += char_w + spacing;
+    }
+}
+
 /// Built-in compatibility helper used by unit tests and non-State callers.
 /// State's render paths install their selected `FontSource` through the local
 /// closures at the render boundary above.
+#[cfg(test)]
 fn add_char_lines(
     c: char,
     x: f32,
@@ -25058,6 +6320,7 @@ fn add_char_lines(
 }
 
 /// Built-in compatibility helper used by unit tests and non-State callers.
+#[cfg(test)]
 fn add_string_lines(
     s: &str,
     start_x: f32,
@@ -25089,199 +6352,6 @@ fn weather_tile_uv(column: u32, row: u32) -> [f32; 4] {
         (column as f32 + 1.0 - inset) / 16.0,
         (row as f32 + 1.0 - inset) / 16.0,
     ]
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct BlockBreakRewards {
-    pub drops: Vec<ItemStack>,
-    pub xp: u32,
-    pub exhaustion: f32,
-    pub tool_damaged: bool,
-}
-
-pub fn calculate_block_break_rewards(
-    old_block: BlockType,
-    old_state: u8,
-    pos: (i32, i32, i32),
-    held_stack: Option<&ItemStack>,
-    game_mode: GameMode,
-) -> BlockBreakRewards {
-    if matches!(game_mode, GameMode::Creative | GameMode::Spectator) {
-        return BlockBreakRewards {
-            drops: Vec::new(),
-            xp: 0,
-            exhaustion: 0.0,
-            tool_damaged: false,
-        };
-    }
-
-    let (wx, wy, wz) = pos;
-    let mut drops = Vec::new();
-
-    let mut eligible_to_harvest = true;
-    if let Some(min_material) = old_block.min_harvest_material() {
-        let held_item = held_stack.map(|s| s.item).unwrap_or(Item::Air);
-        if let Some(tool_prop) = held_item.tool_properties() {
-            eligible_to_harvest = tool_prop.tool_type == old_block.preferred_tool()
-                && tool_prop.material >= min_material;
-        } else {
-            eligible_to_harvest = false;
-        }
-    }
-
-    if eligible_to_harvest {
-        let held_enchantments = held_stack
-            .map(|stack| stack.enchantments)
-            .unwrap_or_default();
-        let silk_touch = held_enchantments.level_of(crate::enchantment::Enchantment::SilkTouch) > 0;
-        let fortune =
-            held_enchantments.level_of(crate::enchantment::Enchantment::Fortune(1)) as u32;
-        let is_any_leaves = old_block == BlockType::OakLeaves
-            || old_block == BlockType::BirchLeaves
-            || old_block == BlockType::SpruceLeaves;
-        if silk_touch {
-            drops.push(ItemStack::new(Item::from_block(old_block), 1));
-        } else if is_any_leaves {
-            let mut rng_seed = (wx as u32)
-                .wrapping_mul(31)
-                .wrapping_add(wy as u32)
-                .wrapping_mul(17)
-                .wrapping_add(wz as u32);
-            let mut next_rand = || {
-                rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
-                (rng_seed / 65536) % 32768
-            };
-            if next_rand() % 10 == 0 {
-                drops.push(ItemStack::new(Item::Apple, 1));
-            } else {
-                drops.push(ItemStack::new(Item::from_block(old_block), 1));
-            }
-        } else if old_block == BlockType::TallGrass {
-            let mut rng_seed = (wx as u32)
-                .wrapping_mul(31)
-                .wrapping_add(wy as u32)
-                .wrapping_mul(17)
-                .wrapping_add(wz as u32);
-            let mut next_rand = || {
-                rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
-                (rng_seed / 65536) % 32768
-            };
-            if next_rand() % 8 == 0 {
-                drops.push(ItemStack::new(Item::Seeds, 1));
-            }
-        } else if matches!(
-            old_block,
-            BlockType::WheatCrop | BlockType::CarrotCrop | BlockType::PotatoCrop
-        ) {
-            let age = old_state & 0b111;
-            let mut rng_seed = (wx as u32)
-                .wrapping_mul(31)
-                .wrapping_add(wy as u32)
-                .wrapping_mul(17)
-                .wrapping_add(wz as u32);
-            let mut next_rand = || {
-                rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
-                (rng_seed / 65536) % 32768
-            };
-
-            match old_block {
-                BlockType::WheatCrop => {
-                    if age == 7 {
-                        drops.push(ItemStack::new(Item::Wheat, 1));
-                        let bonus = if fortune > 0 {
-                            next_rand() as u32 % (fortune + 1)
-                        } else {
-                            0
-                        };
-                        let seeds_count = 1 + (next_rand() as u32 % 3) + bonus;
-                        drops.push(ItemStack::new(Item::Seeds, seeds_count));
-                    } else {
-                        drops.push(ItemStack::new(Item::Seeds, 1));
-                    }
-                }
-                BlockType::CarrotCrop => {
-                    if age == 7 {
-                        let bonus = if fortune > 0 {
-                            next_rand() as u32 % (fortune + 1)
-                        } else {
-                            0
-                        };
-                        let count = 1 + (next_rand() as u32 % 3) + bonus;
-                        drops.push(ItemStack::new(Item::Carrot, count));
-                    } else {
-                        drops.push(ItemStack::new(Item::Carrot, 1));
-                    }
-                }
-                BlockType::PotatoCrop => {
-                    if age == 7 {
-                        let bonus = if fortune > 0 {
-                            next_rand() as u32 % (fortune + 1)
-                        } else {
-                            0
-                        };
-                        let count = 1 + (next_rand() as u32 % 3) + bonus;
-                        drops.push(ItemStack::new(Item::Potato, count));
-                        if (next_rand() % 50) == 0 {
-                            drops.push(ItemStack::new(Item::PoisonousPotato, 1));
-                        }
-                    } else {
-                        drops.push(ItemStack::new(Item::Potato, 1));
-                    }
-                }
-                _ => {}
-            }
-        } else {
-            let base_drop = match old_block {
-                BlockType::CoalOre => Item::Coal,
-                BlockType::DiamondOre => Item::Diamond,
-                BlockType::RedstoneOre => Item::Redstone,
-                _ => Item::from_block(old_block),
-            };
-            let fortune_eligible = matches!(
-                old_block,
-                BlockType::CoalOre | BlockType::DiamondOre | BlockType::RedstoneOre
-            );
-            let bonus = if fortune_eligible && fortune > 0 {
-                ((wx as u32)
-                    .wrapping_mul(31)
-                    .wrapping_add(wy as u32 * 17)
-                    .wrapping_add(wz as u32 * 13)
-                    % (fortune + 1))
-                    + fortune / 2
-            } else {
-                0
-            };
-            for _ in 0..(1 + bonus) {
-                drops.push(ItemStack::new(base_drop, 1));
-            }
-        }
-    }
-
-    let mut xp = 0;
-    if matches!(
-        old_block,
-        BlockType::CoalOre
-            | BlockType::IronOre
-            | BlockType::GoldOre
-            | BlockType::DiamondOre
-            | BlockType::RedstoneOre
-    ) {
-        xp = if old_block == BlockType::DiamondOre {
-            5
-        } else {
-            2
-        };
-        if old_block == BlockType::RedstoneOre && ((wx ^ wy ^ wz) & 1) == 0 {
-            drops.push(ItemStack::new(Item::LapisLazuli, 1));
-        }
-    }
-
-    BlockBreakRewards {
-        drops,
-        xp,
-        exhaustion: 0.005,
-        tool_damaged: true,
-    }
 }
 
 impl Drop for State {
@@ -25319,1194 +6389,6 @@ fn debug_chunk_coordinate(position: f32, chunk_size: usize) -> i32 {
     (position.floor() as i32).div_euclid(chunk_size as i32)
 }
 
-#[cfg(test)]
-mod render_region_lifecycle_tests {
-    use super::{
-        empty_region_rebuild_worthwhile, region_allocation_handle_is_live,
-        should_decrement_region_active_chunks, RenderRegion,
-    };
-    use crate::chunk_render::{FreeList, RegionAllocationHandle};
 
-    #[test]
-    fn active_chunk_count_changes_only_for_resident_mesh_in_current_region() {
-        assert!(!should_decrement_region_active_chunks(false, false, false));
-        assert!(should_decrement_region_active_chunks(true, false, false));
-        assert!(should_decrement_region_active_chunks(true, true, true));
-        assert!(!should_decrement_region_active_chunks(true, true, false));
-    }
 
-    #[test]
-    fn stale_region_instance_and_stale_tokens_are_rejected() {
-        let mut vertices = FreeList::new(16);
-        let mut indices = FreeList::new(24);
-        let vertex_token = vertices.allocate_owned(4, 7).unwrap();
-        let index_token = indices.allocate_owned(6, 7).unwrap();
-        let handle = RegionAllocationHandle {
-            region_instance_id: 41,
-            vertex_token,
-            index_token,
-            vertex_offset: vertex_token.offset,
-            index_offset: index_token.offset,
-            num_vertices: vertex_token.count,
-            num_indices: index_token.count,
-        };
 
-        assert!(region_allocation_handle_is_live(
-            41, &vertices, &indices, &handle
-        ));
-        assert!(!region_allocation_handle_is_live(
-            42, &vertices, &indices, &handle
-        ));
-        vertices.deallocate_owned(vertex_token).unwrap();
-        assert!(!region_allocation_handle_is_live(
-            41, &vertices, &indices, &handle
-        ));
-    }
-
-    #[test]
-    fn arena_rebuild_is_limited_to_empty_grown_regions() {
-        assert!(empty_region_rebuild_worthwhile(
-            0,
-            0,
-            RenderRegion::INITIAL_VERTEX_CAPACITY * 2,
-            RenderRegion::INITIAL_INDEX_CAPACITY
-        ));
-        assert!(!empty_region_rebuild_worthwhile(
-            1,
-            0,
-            RenderRegion::INITIAL_VERTEX_CAPACITY * 2,
-            RenderRegion::INITIAL_INDEX_CAPACITY
-        ));
-        assert!(!empty_region_rebuild_worthwhile(
-            0,
-            0,
-            RenderRegion::INITIAL_VERTEX_CAPACITY,
-            RenderRegion::INITIAL_INDEX_CAPACITY
-        ));
-    }
-}
-
-#[cfg(test)]
-mod debug_tests {
-    use super::*;
-
-    fn embedded_test_world(name: &str) -> std::path::PathBuf {
-        let unique = format!(
-            "icraft-state-runtime-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        );
-        std::env::temp_dir().join(unique)
-    }
-
-    #[test]
-    fn embedded_runtime_uses_world_player_profile_and_fifo_ack() {
-        let world_dir = embedded_test_world("fifo");
-        let role = MultiplayerRole::Singleplayer;
-        let mut bridge =
-            EmbeddedRuntimeBridge::new(&role, world_dir.clone(), 1234, Difficulty::Normal, 8, true)
-                .expect("embedded runtime should construct");
-        let session = bridge
-            .runtime
-            .players
-            .get(&u64::MAX)
-            .expect("local world-player session");
-        assert_eq!(session.username, "local");
-        assert_eq!(
-            session.storage,
-            crate::server_runtime::LocalSessionStorage::WorldPlayer
-        );
-
-        bridge
-            .queue_request(crate::network::protocol::GameplayRequest {
-                request_id: 0,
-                client_sequence: 0,
-                session_id: 0,
-                dimension: crate::dimension::Dimension::Overworld as u8,
-                client_revision: 0,
-                operation: crate::network::protocol::GameplayOperation::BlockUse {
-                    x: 8,
-                    y: 80,
-                    z: 8,
-                    block: BlockType::Glass.to_wire(),
-                },
-            })
-            .expect("request should enter bounded FIFO");
-        assert!(bridge.runtime.authority.world.get_block(8, 80, 8) != BlockType::Glass);
-        let output = bridge.tick().expect("fixed tick should run");
-        assert!(output.snapshot.mutations.iter().any(|mutation| {
-            mutation.position == (8, 80, 8) && mutation.block == BlockType::Glass.to_wire()
-        }));
-        assert!(output.presentation_events.iter().any(|event| {
-            matches!(
-                event,
-                crate::server_runtime::RuntimePresentationEvent::GameplayResponse {
-                    target,
-                    response,
-                } if *target == u64::MAX
-                    && response.request_id == 1
-                    && matches!(
-                        response.outcome,
-                        crate::network::protocol::GameplayOutcome::Accepted { .. }
-                    )
-            )
-        }));
-        bridge.shutdown().expect("runtime save/shutdown");
-        let _ = std::fs::remove_dir_all(world_dir);
-    }
-
-    #[test]
-    fn embedded_runtime_poses_use_monotonic_sender_time() {
-        let world_dir = embedded_test_world("pose");
-        let role = MultiplayerRole::Singleplayer;
-        let mut bridge =
-            EmbeddedRuntimeBridge::new(&role, world_dir.clone(), 1234, Difficulty::Normal, 8, true)
-                .expect("embedded runtime should construct");
-        let initial = bridge
-            .runtime
-            .players
-            .get(&u64::MAX)
-            .expect("local session")
-            .data
-            .position;
-        bridge
-            .queue_position(
-                1,
-                glam::Vec3::new(initial[0] + 1.0, initial[1], initial[2]),
-                0.5,
-                0.1,
-            )
-            .expect("first pose should enter bounded FIFO");
-        bridge.tick().expect("first pose tick");
-        let first = bridge
-            .runtime
-            .players
-            .get(&u64::MAX)
-            .expect("local session")
-            .data
-            .position;
-        assert_eq!(first[0], initial[0] + 1.0);
-
-        bridge
-            .queue_position(
-                2,
-                glam::Vec3::new(first[0] + 1.0, first[1], first[2]),
-                0.5,
-                0.1,
-            )
-            .expect("second pose should enter bounded FIFO");
-        bridge.tick().expect("second pose tick");
-        let second = bridge
-            .runtime
-            .players
-            .get(&u64::MAX)
-            .expect("local session")
-            .data
-            .position;
-        assert_eq!(second[0], first[0] + 1.0);
-
-        bridge.shutdown().expect("runtime save/shutdown");
-        let _ = std::fs::remove_dir_all(world_dir);
-    }
-
-    #[test]
-    fn terrain_translucent_pipeline_is_double_sided() {
-        assert_eq!(terrain_translucent_cull_mode(), None);
-    }
-
-    fn rects_overlap(a: InventoryUiRect, b: InventoryUiRect) -> bool {
-        a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0
-    }
-
-    #[test]
-    fn creative_layout_is_only_used_without_a_station_or_crafting_table() {
-        assert_eq!(
-            inventory_layout_kind(GameMode::Creative, false, false),
-            InventoryLayoutKind::CreativeCatalog
-        );
-        assert_eq!(
-            inventory_layout_kind(GameMode::Survival, false, false),
-            InventoryLayoutKind::Standard
-        );
-        assert_eq!(
-            inventory_layout_kind(GameMode::Creative, true, false),
-            InventoryLayoutKind::Standard
-        );
-        assert_eq!(
-            inventory_layout_kind(GameMode::Creative, false, true),
-            InventoryLayoutKind::Standard
-        );
-    }
-
-    #[test]
-    fn creative_tabs_catalog_scrollbar_and_hotbar_do_not_overlap() {
-        for aspect in [4.0 / 3.0, 16.0 / 9.0, 21.0 / 9.0] {
-            let catalog: Vec<_> = (0..CREATIVE_VISIBLE_SLOTS)
-                .map(|index| creative_catalog_slot_rect(index, aspect))
-                .collect();
-            let hotbar: Vec<_> = (0..9)
-                .map(|index| creative_hotbar_slot_rect(index, aspect))
-                .collect();
-            let tabs: Vec<_> = (0..CreativeTab::TABS.len())
-                .map(creative_tab_rect)
-                .collect();
-            let scrollbar = creative_scroll_track_rect(aspect);
-
-            for group in [&catalog, &hotbar, &tabs] {
-                for (index, rect) in group.iter().enumerate() {
-                    assert!(rect.x0 >= -1.0 && rect.x1 <= 1.0);
-                    assert!(rect.y0 >= -1.0 && rect.y1 <= 1.0);
-                    for other in group.iter().skip(index + 1) {
-                        assert!(!rects_overlap(*rect, *other), "{rect:?} {other:?}");
-                    }
-                }
-            }
-            for catalog_rect in &catalog {
-                assert!(!rects_overlap(*catalog_rect, scrollbar));
-                assert!(hotbar
-                    .iter()
-                    .all(|hotbar_rect| !rects_overlap(*catalog_rect, *hotbar_rect)));
-                assert!(tabs
-                    .iter()
-                    .all(|tab_rect| !rects_overlap(*catalog_rect, *tab_rect)));
-            }
-            assert!(hotbar
-                .iter()
-                .all(|hotbar_rect| !rects_overlap(*hotbar_rect, scrollbar)));
-            assert!(tabs
-                .iter()
-                .all(|tab_rect| !rects_overlap(*tab_rect, scrollbar)));
-        }
-    }
-
-    #[test]
-    fn primary_press_decision_controls_block_fallback_and_held_mining_latch() {
-        assert_eq!(
-            primary_press_decision(GameMode::Survival, true),
-            PrimaryPressDecision {
-                keep_held_mining: false,
-                instant_break: false,
-            }
-        );
-        assert_eq!(
-            primary_press_decision(GameMode::Survival, false),
-            PrimaryPressDecision {
-                keep_held_mining: true,
-                instant_break: false,
-            }
-        );
-        assert_eq!(
-            primary_press_decision(GameMode::Creative, true),
-            PrimaryPressDecision {
-                keep_held_mining: false,
-                instant_break: false,
-            }
-        );
-        assert_eq!(
-            primary_press_decision(GameMode::Creative, false),
-            PrimaryPressDecision {
-                keep_held_mining: false,
-                instant_break: true,
-            }
-        );
-    }
-
-    #[test]
-    fn creative_can_break_end_portal_while_survival_cannot() {
-        assert!(can_break_block(BlockType::EndPortal, GameMode::Creative));
-        assert!(!can_break_block(BlockType::EndPortal, GameMode::Survival));
-        assert!(!can_break_block(BlockType::Air, GameMode::Creative));
-    }
-
-    #[test]
-    fn friendly_arrow_damage_settles_lethal_rewards_exactly_once() {
-        let mut zombie =
-            crate::entity::Entity::new(1, crate::entity::EntityType::Zombie, Vec3::ZERO);
-        zombie.health = 5.0;
-
-        assert!(apply_player_projectile_damage(&mut zombie, 4.0).is_none());
-        assert_eq!(zombie.health, 1.0);
-        assert!(!zombie.player_kill_rewarded);
-
-        let kill =
-            apply_player_projectile_damage(&mut zombie, 1.0).expect("lethal arrow should settle");
-        assert_eq!(zombie.health, 0.0);
-        assert!(zombie.player_kill_rewarded);
-        assert_eq!(
-            standard_player_kill_rewards(kill, 0),
-            PlayerKillRewards {
-                items: vec![Item::RottenFlesh],
-                experience: 5,
-            }
-        );
-
-        assert!(apply_player_projectile_damage(&mut zombie, 4.0).is_none());
-        assert!(claim_standard_player_kill(&mut zombie).is_none());
-        assert_eq!(zombie.health, 0.0);
-    }
-
-    #[test]
-    fn full_inventory_generates_exactly_one_world_drop_at_the_source() {
-        let mut inventory = Inventory::new();
-        inventory
-            .hotbar
-            .fill(Some(ItemStack::new(Item::DiamondSword, 1)));
-        inventory
-            .main
-            .fill(Some(ItemStack::new(Item::DiamondPickaxe, 1)));
-        let original_hotbar = inventory.hotbar;
-        let original_main = inventory.main;
-        let mut entities = crate::entity::EntityManager::new();
-        let source = Vec3::new(8.5, 64.5, -2.5);
-
-        assert_eq!(
-            store_or_drop_generated_item(
-                &mut inventory,
-                &mut entities,
-                Item::RottenFlesh,
-                source,
-                123,
-            ),
-            GeneratedItemDestination::Dropped
-        );
-        assert_eq!(inventory.hotbar, original_hotbar);
-        assert_eq!(inventory.main, original_main);
-        assert_eq!(entities.entities.len(), 1);
-        let dropped = &entities.entities[0];
-        assert_eq!(dropped.entity_type, crate::entity::EntityType::DroppedItem);
-        assert_eq!(dropped.dropped_item, Some(Item::RottenFlesh));
-        assert_eq!(dropped.position, source);
-        assert_eq!(dropped.pickup_cooldown, 0.5);
-    }
-
-    #[test]
-    fn generated_item_stored_in_inventory_does_not_duplicate_as_a_drop() {
-        let mut inventory = Inventory::new();
-        let mut entities = crate::entity::EntityManager::new();
-
-        assert_eq!(
-            store_or_drop_generated_item(
-                &mut inventory,
-                &mut entities,
-                Item::Wool,
-                Vec3::ZERO,
-                456,
-            ),
-            GeneratedItemDestination::Inventory
-        );
-        assert_eq!(inventory.count_item(Item::Wool), 1);
-        assert!(entities.entities.is_empty());
-    }
-
-    #[test]
-    fn friendly_arrows_destroy_end_crystals_without_standard_mob_rewards() {
-        let mut crystal =
-            crate::entity::Entity::new(1, crate::entity::EntityType::EndCrystal, Vec3::ZERO);
-        assert!(!crystal.is_local_living_target());
-        assert!(crystal.is_player_projectile_target());
-        assert!(is_legal_melee_target(&crystal));
-
-        assert!(apply_player_projectile_damage(&mut crystal, 5.0).is_none());
-        assert_eq!(crystal.health, 0.0);
-        assert!(!crystal.player_kill_rewarded);
-        assert!(!crystal.is_player_projectile_target());
-    }
-
-    #[test]
-    fn one_point_melee_hit_destroys_end_crystal() {
-        let mut crystal =
-            crate::entity::Entity::new(1, crate::entity::EntityType::EndCrystal, Vec3::ZERO);
-
-        assert_eq!(
-            apply_melee_impact(&mut crystal, Vec3::Z, 1.0, 0.0, 0),
-            MeleeImpact::Damaged { killed: true }
-        );
-        assert_eq!(crystal.health, 0.0);
-    }
-
-    #[test]
-    fn splash_effects_ignore_nonliving_entities_but_affect_living_targets() {
-        let poison = crate::brewing::PotionData {
-            kind: crate::brewing::PotionKind::Poison,
-            level: 1,
-            duration_seconds: 30,
-            splash: true,
-        };
-        let slowness = crate::brewing::PotionData {
-            kind: crate::brewing::PotionKind::Slowness,
-            level: 1,
-            duration_seconds: 30,
-            splash: true,
-        };
-        let mut nonliving = vec![
-            crate::entity::Entity::new(1, crate::entity::EntityType::DroppedItem, Vec3::ZERO),
-            crate::entity::Entity::new(2, crate::entity::EntityType::Arrow, Vec3::ZERO),
-            crate::entity::Entity::new(3, crate::entity::EntityType::HeartParticle, Vec3::ZERO),
-            crate::entity::Entity::new(4, crate::entity::EntityType::EndCrystal, Vec3::ZERO),
-        ];
-        for entity in &mut nonliving {
-            entity.velocity = Vec3::new(2.0, 1.0, -3.0);
-            let health = entity.health;
-            let velocity = entity.velocity;
-            assert!(apply_player_splash_effect(entity, poison).is_none());
-            assert!(apply_player_splash_effect(entity, slowness).is_none());
-            assert_eq!(entity.health, health);
-            assert_eq!(entity.velocity, velocity);
-        }
-
-        let mut zombie =
-            crate::entity::Entity::new(5, crate::entity::EntityType::Zombie, Vec3::ZERO);
-        zombie.health = 10.0;
-        zombie.velocity = Vec3::new(2.0, 1.0, -3.0);
-        assert!(apply_player_splash_effect(&mut zombie, poison).is_none());
-        assert_eq!(zombie.health, 8.0);
-        assert!(apply_player_splash_effect(&mut zombie, slowness).is_none());
-        assert_eq!(zombie.velocity, Vec3::new(0.8, 0.4, -1.2));
-    }
-
-    #[test]
-    fn melee_targeting_filters_noncombat_entities_and_selects_the_nearest_living_target() {
-        use crate::entity::{Entity, EntityType};
-
-        let mut entity_manager = crate::entity::EntityManager::new();
-        let entities = [
-            Entity::new(1, EntityType::DroppedItem, Vec3::new(0.0, 0.0, 0.75)),
-            Entity::new(2, EntityType::HeartParticle, Vec3::new(0.0, 0.0, 0.9)),
-            Entity::new(3, EntityType::Arrow, Vec3::new(0.0, 0.0, 1.0)),
-            Entity::new(4, EntityType::SplashPotion, Vec3::new(0.0, 0.0, 1.1)),
-            Entity::new(5, EntityType::WitherSkull, Vec3::new(0.0, 0.0, 1.2)),
-            Entity::new(6, EntityType::DragonBreath, Vec3::new(0.0, 0.0, 1.3)),
-            Entity::new(7, EntityType::RemotePlayer, Vec3::new(0.0, 0.0, 1.4)),
-            Entity::new(8, EntityType::Zombie, Vec3::new(0.0, 0.0, 3.0)),
-            Entity::new(9, EntityType::Skeleton, Vec3::new(0.0, 0.0, 2.0)),
-        ];
-        for entity in entities {
-            entity_manager.entities.push(entity);
-        }
-        entity_manager.rebuild_indexes();
-        let invalid_types = [
-            EntityType::DroppedItem,
-            EntityType::HeartParticle,
-            EntityType::Arrow,
-            EntityType::SplashPotion,
-            EntityType::WitherSkull,
-            EntityType::DragonBreath,
-            EntityType::RemotePlayer,
-        ];
-        for entity_type in invalid_types {
-            let entity = entity_manager
-                .entities
-                .iter()
-                .find(|entity| entity.entity_type == entity_type)
-                .unwrap();
-            assert!(!is_legal_melee_target(entity));
-        }
-
-        assert_eq!(
-            closest_melee_target(
-                &entity_manager,
-                Vec3::new(0.0, 0.1, 0.0),
-                Vec3::Z,
-                MELEE_REACH
-            ),
-            Some(9)
-        );
-
-        entity_manager
-            .entities
-            .iter_mut()
-            .find(|entity| entity.id == 9)
-            .unwrap()
-            .health = 0.0;
-        assert_eq!(
-            closest_melee_target(
-                &entity_manager,
-                Vec3::new(0.0, 0.1, 0.0),
-                Vec3::Z,
-                MELEE_REACH
-            ),
-            Some(8)
-        );
-
-        let mut endermen = crate::entity::EntityManager::new();
-        endermen.entities.push(Entity::new(
-            10,
-            EntityType::Enderman,
-            Vec3::new(0.0, 0.0, 2.0),
-        ));
-        endermen.rebuild_indexes();
-        assert_eq!(
-            closest_melee_target(&endermen, Vec3::new(0.0, 0.1, 0.0), Vec3::Z, MELEE_REACH),
-            Some(10)
-        );
-    }
-
-    #[test]
-    fn invulnerable_melee_target_consumes_impact_without_damage_or_knockback() {
-        let mut zombie = crate::entity::Entity::new(
-            1,
-            crate::entity::EntityType::Zombie,
-            Vec3::new(0.0, 0.0, 2.0),
-        );
-        zombie.invulnerable_time = 0.25;
-        let initial_health = zombie.health;
-        let initial_velocity = zombie.velocity;
-
-        assert_eq!(
-            apply_melee_impact(&mut zombie, Vec3::Z, 5.0, 8.0, 2),
-            MeleeImpact::Invulnerable
-        );
-        assert_eq!(zombie.health, initial_health);
-        assert_eq!(zombie.velocity, initial_velocity);
-        assert_eq!(zombie.fire_aspect_timer, 0.0);
-    }
-
-    #[test]
-    fn melee_impact_applies_damage_knockback_fire_and_reports_lethal_hits() {
-        let mut zombie = crate::entity::Entity::new(
-            1,
-            crate::entity::EntityType::Zombie,
-            Vec3::new(0.0, 0.0, 2.0),
-        );
-        zombie.health = 5.0;
-
-        assert_eq!(
-            apply_melee_impact(&mut zombie, Vec3::Z, 5.0, 8.0, 2),
-            MeleeImpact::Damaged { killed: true }
-        );
-        assert_eq!(zombie.health, 0.0);
-        assert_eq!(zombie.invulnerable_time, 0.4);
-        assert_eq!(zombie.velocity, Vec3::new(0.0, 3.0, 8.0));
-        assert_eq!(zombie.fire_aspect_timer, 8.0);
-    }
-
-    #[test]
-    fn terrain_vertex_layout_exposes_ambient_occlusion() {
-        let layout = Vertex::desc();
-        assert_eq!(std::mem::size_of::<Vertex>(), 28);
-        assert_eq!(layout.array_stride, 28);
-        assert_eq!(layout.attributes.len(), 4);
-        assert_eq!(layout.attributes[3].offset, 24);
-        assert_eq!(layout.attributes[3].shader_location, 3);
-        assert_eq!(layout.attributes[3].format, wgpu::VertexFormat::Float32);
-    }
-
-    #[test]
-    fn debug_chunk_coordinates_handle_negative_world_positions() {
-        assert_eq!(debug_chunk_coordinate(0.0, CHUNK_WIDTH), 0);
-        assert_eq!(debug_chunk_coordinate(15.999, CHUNK_WIDTH), 0);
-        assert_eq!(debug_chunk_coordinate(16.0, CHUNK_WIDTH), 1);
-        assert_eq!(debug_chunk_coordinate(-0.001, CHUNK_WIDTH), -1);
-        assert_eq!(debug_chunk_coordinate(-16.0, CHUNK_WIDTH), -1);
-        assert_eq!(debug_chunk_coordinate(-16.001, CHUNK_WIDTH), -2);
-    }
-
-    #[test]
-    fn initial_world_load_is_bounded_independently_of_render_distance() {
-        assert_eq!(initial_chunk_radius(0), 0);
-        assert_eq!(initial_chunk_radius(2), INITIAL_WORLD_CHUNK_RADIUS);
-        assert_eq!(initial_chunk_radius(12), INITIAL_WORLD_CHUNK_RADIUS);
-        assert_eq!(initial_chunk_radius(16), INITIAL_WORLD_CHUNK_RADIUS);
-    }
-
-    #[test]
-    fn debug_overlay_font_supports_every_required_character() {
-        let mut vertices = Vec::new();
-        for character in ['B', 'K', 'W', 'X', 'Z', 'b', 'k', 'w', 'x', 'z', '/', '_'] {
-            let before = vertices.len();
-            add_char_lines(character, 0.0, 0.0, 0.1, 0.2, [1.0; 4], &mut vertices);
-            assert!(vertices.len() > before, "missing glyph for {character}");
-        }
-    }
-
-    #[test]
-    fn state_text_helper_uses_bitmap_override_and_builtin_fallback() {
-        let source = crate::resources::FontSource::Bitmap(
-            [('A', [0b1_1111, 0, 0, 0, 0, 0, 0])].into_iter().collect(),
-        );
-        let mut overridden = Vec::new();
-        add_string_lines_with_source(
-            &source,
-            "A",
-            0.0,
-            0.0,
-            0.1,
-            0.2,
-            0.0,
-            [1.0; 4],
-            &mut overridden,
-        );
-        // Five lit cells are five line-list segments (ten vertices).
-        assert_eq!(overridden.len(), 10);
-
-        let mut fallback = Vec::new();
-        add_string_lines("A", 0.0, 0.0, 0.1, 0.2, 0.0, [1.0; 4], &mut fallback);
-        // Built-in A remains the existing four-segment glyph.
-        assert_eq!(fallback.len(), 8);
-    }
-
-    #[test]
-    fn chat_history_evicts_the_oldest_message() {
-        let mut history = std::collections::VecDeque::new();
-        for index in 0..=CHAT_HISTORY_CAPACITY {
-            push_chat_history(
-                &mut history,
-                "Player".to_string(),
-                format!("message {index}"),
-            );
-        }
-        assert_eq!(history.len(), CHAT_HISTORY_CAPACITY);
-        assert_eq!(history.front().unwrap().1, "message 1");
-        assert_eq!(history.back().unwrap().1, "message 50");
-    }
-
-    #[test]
-    fn chat_messages_are_trimmed_sanitized_and_bounded() {
-        assert_eq!(normalized_chat_message(" \n\t "), None);
-        assert_eq!(
-            normalized_chat_message("  hello\nworld  ").as_deref(),
-            Some("helloworld")
-        );
-        let oversized = "x".repeat(CHAT_INPUT_CAPACITY + 10);
-        assert_eq!(
-            normalized_chat_message(&oversized).unwrap().chars().count(),
-            CHAT_INPUT_CAPACITY
-        );
-    }
-
-    #[test]
-    fn name_tag_projection_rejects_invalid_clip_space() {
-        assert_eq!(
-            project_name_tag(Vec3::new(0.25, -0.5, 0.5), Mat4::IDENTITY),
-            Some(Vec2::new(0.25, -0.5))
-        );
-        assert_eq!(project_name_tag(Vec3::ZERO, Mat4::ZERO), None);
-        assert_eq!(
-            project_name_tag(Vec3::new(0.0, 0.0, 2.0), Mat4::IDENTITY),
-            None
-        );
-    }
-
-    #[test]
-    fn network_handle_preserves_client_chat_and_disconnect_payloads() {
-        let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
-        let (outbound_tx, _outbound_rx) = std::sync::mpsc::channel();
-        let handle = NetworkHandle::Client {
-            client_to_game: inbound_rx,
-            game_to_client: outbound_tx,
-            thread: None,
-        };
-        inbound_tx
-            .send(crate::network::client::ClientToGame::Chat {
-                sender: "Alex".to_string(),
-                message: "hello".to_string(),
-            })
-            .unwrap();
-        inbound_tx
-            .send(crate::network::client::ClientToGame::Disconnected {
-                reason: "server stopped".to_string(),
-            })
-            .unwrap();
-
-        let events = handle.drain_inbound();
-        assert!(matches!(
-            &events[0],
-            NetworkInbound::Chat { sender, message }
-                if sender == "Alex" && message == "hello"
-        ));
-        assert!(matches!(
-            &events[1],
-            NetworkInbound::Disconnected(reason) if reason == "server stopped"
-        ));
-    }
-
-    #[test]
-    fn host_inbound_block_request_preserves_authenticated_player_id() {
-        let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
-        let (outbound_tx, _outbound_rx) = std::sync::mpsc::channel();
-        let handle = NetworkHandle::Host {
-            server_to_host: inbound_rx,
-            host_to_server: outbound_tx,
-            thread: None,
-        };
-        inbound_tx
-            .send(crate::network::server::ServerToHost::ClientBlockChange {
-                id: 7,
-                x: 3,
-                y: 80,
-                z: -4,
-                block: BlockType::Stone.to_wire(),
-                state: 0,
-            })
-            .unwrap();
-
-        let events = handle.drain_inbound();
-        assert!(matches!(
-            events.as_slice(),
-            [NetworkInbound::ClientBlockChange {
-                id: 7,
-                x: 3,
-                y: 80,
-                z: -4,
-                block,
-                state: 0,
-            }] if *block == BlockType::Stone.to_wire()
-        ));
-    }
-
-    #[test]
-    fn client_block_change_is_classified_as_host_authority() {
-        let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
-        let (outbound_tx, _outbound_rx) = std::sync::mpsc::channel();
-        let handle = NetworkHandle::Client {
-            client_to_game: inbound_rx,
-            game_to_client: outbound_tx,
-            thread: None,
-        };
-        inbound_tx
-            .send(crate::network::client::ClientToGame::BlockChange {
-                dimension: 0,
-                revision: 1,
-                x: 3,
-                y: 80,
-                z: -4,
-                block: BlockType::Stone.to_wire(),
-                state: 0,
-                raw_fluid: 0,
-            })
-            .unwrap();
-
-        assert!(matches!(
-            handle.drain_inbound().as_slice(),
-            [NetworkInbound::AuthoritativeBlockChange {
-                x: 3,
-                y: 80,
-                z: -4,
-                block,
-                state: 0,
-                ..
-            }] if *block == BlockType::Stone.to_wire()
-        ));
-    }
-
-    #[test]
-    fn disconnect_cleanup_removes_only_remote_player_entities() {
-        let mut entities = crate::entity::EntityManager::new();
-        let remote_id = entities.spawn(crate::entity::EntityType::RemotePlayer, Vec3::ZERO);
-        let zombie_id = entities.spawn(crate::entity::EntityType::Zombie, Vec3::ZERO);
-        let mut remote_players = std::collections::HashMap::new();
-        remote_players.insert(7, RemotePlayerState::new(remote_id, "Alex".to_string()));
-
-        clear_remote_players(&mut remote_players, &mut entities);
-
-        assert!(remote_players.is_empty());
-        assert!(!entities
-            .entities
-            .iter()
-            .any(|entity| entity.id == remote_id));
-        assert!(entities
-            .entities
-            .iter()
-            .any(|entity| entity.id == zombie_id));
-    }
-
-    #[test]
-    fn every_biome_has_a_debug_name() {
-        let biomes = [
-            Biome::Plains,
-            Biome::Forest,
-            Biome::Desert,
-            Biome::Taiga,
-            Biome::Swamp,
-            Biome::WindsweptHills,
-            Biome::Ocean,
-        ];
-        assert!(biomes
-            .into_iter()
-            .all(|biome| !biome_debug_name(biome).is_empty()));
-    }
-
-    #[test]
-    fn pause_weather_volume_and_quit_hit_regions_do_not_overlap() {
-        assert!(point_in_bounds(0.0, -0.41, PAUSE_WEATHER_VOLUME_BOUNDS));
-        assert!(!point_in_bounds(0.0, -0.41, PAUSE_QUIT_BOUNDS));
-        assert!(point_in_bounds(0.0, -0.55, PAUSE_QUIT_BOUNDS));
-        assert!(!point_in_bounds(0.0, -0.55, PAUSE_WEATHER_VOLUME_BOUNDS));
-        assert!(!point_in_bounds(0.31, -0.41, PAUSE_WEATHER_VOLUME_BOUNDS));
-    }
-
-    #[test]
-    fn fov_adjustment_updates_base_fov_and_camera_fov() {
-        let mut base_fov: f32 = 70.0;
-        let mut camera_fov: f32;
-
-        // Simulate pause menu FOV increase (+5)
-        base_fov = (base_fov + 5.0).min(120.0);
-        camera_fov = base_fov;
-        assert_eq!(base_fov, 75.0);
-        assert_eq!(camera_fov, 75.0);
-
-        // Simulate frame FOV interpolation when not sprinting
-        let target_fov = base_fov;
-        let dt = 0.016;
-        camera_fov = camera_fov + (target_fov - camera_fov) * dt * 10.0;
-        assert_eq!(camera_fov, 75.0);
-
-        // Simulate pause menu FOV decrease (-5)
-        base_fov = (base_fov - 5.0).max(30.0);
-        camera_fov = base_fov;
-        assert_eq!(base_fov, 70.0);
-        assert_eq!(camera_fov, 70.0);
-    }
-
-    #[test]
-    fn test_flower_breaks_and_pops_when_ground_is_destroyed() {
-        let mut manager = ChunkManager::new(2);
-        manager.chunks.insert((0, 0), Chunk::new(0, 0));
-        manager.set_block(2, 10, 2, BlockType::Grass);
-        manager.set_block(2, 11, 2, BlockType::Dandelion);
-
-        let mut dirty = std::collections::HashSet::new();
-        let mut drops = Vec::new();
-
-        // Destroy the grass block
-        manager.set_block(2, 10, 2, BlockType::Air);
-        manager.check_and_break_unsupported_above(2, 10, 2, &mut dirty, |pos, block| {
-            drops.push((pos, block));
-        });
-
-        // Ground is Air now, flower above must be destroyed
-        assert_eq!(manager.get_block(2, 11, 2), BlockType::Air);
-        assert_eq!(drops, vec![((2, 11, 2), BlockType::Dandelion)]);
-    }
-
-    #[test]
-    fn door_and_trapdoor_placement_states_and_hinges() {
-        let mut manager = ChunkManager::new(2);
-        manager.chunks.insert((0, 0), Chunk::new(0, 0));
-
-        // Test door facing from yaw (yaw=0.0 -> East, yaw=FRAC_PI_2 -> South, -FRAC_PI_2 -> North, PI -> West)
-        let (bottom, top) = crate::world::BlockState::for_door_placement(
-            &manager,
-            5,
-            64,
-            5,
-            std::f32::consts::FRAC_PI_2,
-        );
-        assert_eq!(bottom.facing, crate::redstone::Direction::South);
-        assert!(!bottom.is_top);
-        assert!(!bottom.is_open);
-        assert!(top.is_top);
-        assert_eq!(top.facing, crate::redstone::Direction::South);
-
-        // Hinge logic: left solid, right empty -> right hinge
-        // North facing: left = West (-1, 0) -> (4, 64, 5), right = East (+1, 0) -> (6, 64, 5)
-        manager.set_block(4, 64, 5, BlockType::Stone); // left neighbor
-        manager.set_block(6, 64, 5, BlockType::Air); // right neighbor
-        let (bottom_hinge, _) = crate::world::BlockState::for_door_placement(
-            &manager,
-            5,
-            64,
-            5,
-            -std::f32::consts::FRAC_PI_2,
-        );
-        assert_eq!(bottom_hinge.facing, crate::redstone::Direction::North);
-        assert!(bottom_hinge.is_right_hinge);
-
-        // Trapdoor state
-        let trapdoor =
-            crate::world::BlockState::for_trapdoor_placement(-std::f32::consts::FRAC_PI_2);
-        assert_eq!(trapdoor.facing, crate::redstone::Direction::North);
-        assert!(!trapdoor.is_open);
-    }
-}
-
-#[cfg(test)]
-mod reach_tests {
-    use super::*;
-
-    #[test]
-    fn block_at_exact_reach_distance_passes() {
-        let block_center = Vec3::new(0.5, 0.5, 0.5);
-        let player_pos = block_center + Vec3::new(BLOCK_REACH, 0.0, 0.0);
-        assert!(block_within_reach(player_pos, (0, 0, 0)));
-    }
-
-    #[test]
-    fn block_within_tolerance_passes() {
-        let block_center = Vec3::new(0.5, 0.5, 0.5);
-        let player_pos = block_center + Vec3::new(6.0, 0.0, 0.0);
-        assert!(block_within_reach(player_pos, (0, 0, 0)));
-    }
-
-    #[test]
-    fn block_at_tolerance_boundary_passes() {
-        let block_center = Vec3::new(0.5, 0.5, 0.5);
-        let limit = BLOCK_REACH + BLOCK_REACH_TOLERANCE;
-        let player_pos = block_center + Vec3::new(limit, 0.0, 0.0);
-        assert!(block_within_reach(player_pos, (0, 0, 0)));
-    }
-
-    #[test]
-    fn block_just_beyond_tolerance_is_rejected() {
-        let block_center = Vec3::new(0.5, 0.5, 0.5);
-        let player_pos = block_center + Vec3::new(6.51, 0.0, 0.0);
-        assert!(!block_within_reach(player_pos, (0, 0, 0)));
-    }
-
-    #[test]
-    fn block_far_away_is_rejected() {
-        let block_center = Vec3::new(0.5, 0.5, 0.5);
-        let player_pos = block_center + Vec3::new(10.0, 0.0, 0.0);
-        assert!(!block_within_reach(player_pos, (0, 0, 0)));
-    }
-
-    #[test]
-    fn diagonal_neighbor_block_passes() {
-        let player_pos = Vec3::new(0.5, 0.5, 0.5);
-        assert!(block_within_reach(player_pos, (1, 1, 1)));
-    }
-
-    #[test]
-    fn block_center_uses_half_offset() {
-        let player_pos = Vec3::new(10.5, 0.5, 0.5);
-        assert!(block_within_reach(player_pos, (5, 0, 0)));
-    }
-
-    #[test]
-    fn same_position_block_passes() {
-        let player_pos = Vec3::new(0.5, 0.5, 0.5);
-        assert!(block_within_reach(player_pos, (0, 0, 0)));
-    }
-
-    #[test]
-    fn negative_coordinates_use_block_center_offset() {
-        let block_center = Vec3::new(-4.5, 0.5, -4.5);
-        let player_pos = block_center + Vec3::new(0.0, 0.0, 6.0);
-        assert!(block_within_reach(player_pos, (-5, 0, -5)));
-    }
-
-    #[test]
-    fn validate_remote_block_request_close_snapshot_passes() {
-        let mut remote_players = std::collections::HashMap::new();
-        let mut remote = RemotePlayerState::new(1, "Alex".to_string());
-        remote.snapshots.push_back(PlayerSnapshot {
-            position: Vec3::new(0.0, 60.0, 0.0),
-            yaw: 0.0,
-            pitch: 0.0,
-            time: 0.0,
-            sequence: 1,
-            sender_time_millis: 100,
-        });
-        remote_players.insert(7, remote);
-        // Player center = (0.0, 60.9, 0.0); block center (0.5, 60.5, 2.5) -> distance approx 2.58 <= 6.5
-        assert!(validate_remote_block_request(
-            &remote_players,
-            7,
-            (0, 60, 2)
-        ));
-    }
-
-    #[test]
-    fn validate_remote_block_request_far_snapshot_rejected() {
-        let mut remote_players = std::collections::HashMap::new();
-        let mut remote = RemotePlayerState::new(1, "Alex".to_string());
-        remote.snapshots.push_back(PlayerSnapshot {
-            position: Vec3::new(0.0, 60.0, 0.0),
-            yaw: 0.0,
-            pitch: 0.0,
-            time: 0.0,
-            sequence: 1,
-            sender_time_millis: 100,
-        });
-        remote_players.insert(7, remote);
-        // Target block at (10, 60, 0) -> distance > 6.5
-        assert!(!validate_remote_block_request(
-            &remote_players,
-            7,
-            (10, 60, 0)
-        ));
-    }
-
-    #[test]
-    fn validate_remote_block_request_empty_snapshots_rejected() {
-        let mut remote_players = std::collections::HashMap::new();
-        let remote = RemotePlayerState::new(1, "Alex".to_string());
-        remote_players.insert(7, remote);
-        assert!(!validate_remote_block_request(
-            &remote_players,
-            7,
-            (0, 60, 0)
-        ));
-    }
-
-    #[test]
-    fn validate_remote_block_request_unknown_requester_rejected() {
-        let remote_players = std::collections::HashMap::new();
-        assert!(!validate_remote_block_request(
-            &remote_players,
-            99,
-            (0, 60, 0)
-        ));
-    }
-
-    #[test]
-    fn validate_remote_block_request_destroy_close_passes_and_far_rejected() {
-        let mut remote_players = std::collections::HashMap::new();
-        let mut remote = RemotePlayerState::new(1, "Alex".to_string());
-        remote.snapshots.push_back(PlayerSnapshot {
-            position: Vec3::new(0.0, 60.0, 0.0),
-            yaw: 0.0,
-            pitch: 0.0,
-            time: 0.0,
-            sequence: 1,
-            sender_time_millis: 100,
-        });
-        remote_players.insert(7, remote);
-        // Destroying Air block close by -> true
-        assert!(validate_remote_block_request(
-            &remote_players,
-            7,
-            (0, 60, 1)
-        ));
-        // Destroying Air block far away -> false
-        assert!(!validate_remote_block_request(
-            &remote_players,
-            7,
-            (0, 60, 20)
-        ));
-    }
-
-    #[test]
-    fn calculate_block_break_rewards_harvest_and_drops() {
-        let pos = (10, 60, 10);
-
-        // Stone with bare hand in Survival -> not eligible to harvest (no drops)
-        let rewards =
-            calculate_block_break_rewards(BlockType::Stone, 0, pos, None, GameMode::Survival);
-        assert!(rewards.drops.is_empty());
-        assert_eq!(rewards.xp, 0);
-
-        // Stone with Pickaxe -> eligible, drops Stone
-        let pick = ItemStack::new(Item::StonePickaxe, 1);
-        let rewards = calculate_block_break_rewards(
-            BlockType::Stone,
-            0,
-            pos,
-            Some(&pick),
-            GameMode::Survival,
-        );
-        assert_eq!(rewards.drops.len(), 1);
-        assert_eq!(rewards.drops[0].item, Item::Stone);
-
-        // DiamondOre with IronPickaxe -> drops Diamond + 5 XP
-        let iron_pick = ItemStack::new(Item::IronPickaxe, 1);
-        let rewards = calculate_block_break_rewards(
-            BlockType::DiamondOre,
-            0,
-            pos,
-            Some(&iron_pick),
-            GameMode::Survival,
-        );
-        assert_eq!(rewards.drops[0].item, Item::Diamond);
-        assert_eq!(rewards.xp, 5);
-
-        // DiamondOre with SilkTouch -> drops DiamondOre block
-        let mut silk_pick = ItemStack::new(Item::IronPickaxe, 1);
-        silk_pick
-            .enchantments
-            .add_or_upgrade(crate::enchantment::Enchantment::SilkTouch);
-        let rewards = calculate_block_break_rewards(
-            BlockType::DiamondOre,
-            0,
-            pos,
-            Some(&silk_pick),
-            GameMode::Survival,
-        );
-        assert_eq!(rewards.drops[0].item, Item::DiamondOre);
-
-        // Creative mode -> zero drops
-        let rewards = calculate_block_break_rewards(
-            BlockType::Stone,
-            0,
-            pos,
-            Some(&pick),
-            GameMode::Creative,
-        );
-        assert!(rewards.drops.is_empty());
-    }
-
-    #[test]
-    fn calculate_block_break_rewards_mature_and_immature_crops() {
-        let pos = (10, 60, 10);
-
-        // Mature Wheat (age 7) -> drops Wheat + Seeds
-        let mature_wheat =
-            calculate_block_break_rewards(BlockType::WheatCrop, 7, pos, None, GameMode::Survival);
-        assert_eq!(mature_wheat.drops.len(), 2);
-        assert_eq!(mature_wheat.drops[0].item, Item::Wheat);
-        assert_eq!(mature_wheat.drops[1].item, Item::Seeds);
-
-        // Immature Wheat (age 3) -> drops 1 Seeds only
-        let immature_wheat =
-            calculate_block_break_rewards(BlockType::WheatCrop, 3, pos, None, GameMode::Survival);
-        assert_eq!(immature_wheat.drops.len(), 1);
-        assert_eq!(immature_wheat.drops[0].item, Item::Seeds);
-        assert_eq!(immature_wheat.drops[0].count, 1);
-
-        // Immature Carrot (age 2) -> drops 1 Carrot
-        let immature_carrot =
-            calculate_block_break_rewards(BlockType::CarrotCrop, 2, pos, None, GameMode::Survival);
-        assert_eq!(immature_carrot.drops.len(), 1);
-        assert_eq!(immature_carrot.drops[0].item, Item::Carrot);
-        assert_eq!(immature_carrot.drops[0].count, 1);
-    }
-
-    #[test]
-    fn inventory_click_outside_and_close_overflow_tests() {
-        let mut inv = Inventory::new();
-        inv.dragged = Some(ItemStack::new(Item::Dirt, 64));
-        assert_eq!(inv.dragged.unwrap().count, 64);
-
-        // Fill inventory completely
-        for slot in inv.hotbar.iter_mut() {
-            *slot = Some(ItemStack::new(Item::Stone, 64));
-        }
-        for slot in inv.main.iter_mut() {
-            *slot = Some(ItemStack::new(Item::Stone, 64));
-        }
-
-        // add_stack with full inventory returns remainder
-        let remainder = inv.add_stack(ItemStack::new(Item::Dirt, 64));
-        assert_eq!(remainder, Some(ItemStack::new(Item::Dirt, 64)));
-    }
-}
-
-#[cfg(test)]
-mod authority_projection_tests {
-    use super::*;
-
-    #[test]
-    fn session_inventory_projection_preserves_rich_stack_metadata() {
-        let mut stack = ItemStack::new(Item::DiamondPickaxe, 1);
-        stack.durability = 37;
-        stack
-            .enchantments
-            .add_or_upgrade(crate::enchantment::Enchantment::Efficiency(3));
-        stack.custom_name.set("authority pick");
-        stack.can_break = 0x1234;
-        stack.can_place_on = 0x5678;
-        let slot = State::session_slot_from_stack(Some(stack)).expect("slot");
-        let roundtrip = State::stack_from_session_slot(slot).expect("stack");
-        assert_eq!(roundtrip.item, stack.item);
-        assert_eq!(roundtrip.count, stack.count);
-        assert_eq!(roundtrip.durability, stack.durability);
-        assert_eq!(roundtrip.enchantments, stack.enchantments);
-        assert_eq!(roundtrip.custom_name, stack.custom_name);
-        assert_eq!(roundtrip.can_break, stack.can_break);
-        assert_eq!(roundtrip.can_place_on, stack.can_place_on);
-    }
-}

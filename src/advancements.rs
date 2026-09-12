@@ -1,9 +1,7 @@
-use crate::dimension::Dimension;
-use crate::entity::EntityType;
 use crate::inventory::Item;
 use crate::world::BlockType;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AdvancementCategory {
@@ -21,22 +19,12 @@ pub enum AdvancementFrameType {
     Challenge,
 }
 
+/// Live presentation trigger. Wave 10 Plan 06 keeps only `MineBlock` — other
+/// historical criteria were never fired by authority and are display-only
+/// (`MineBlock(Air)` in the tree).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AdvancementTrigger {
-    ObtainItem(Item),
-    CraftItem(Item),
     MineBlock(BlockType),
-    KillMob(EntityType),
-    EnterDimension(Dimension),
-    BrewPotion,
-    EnchantItem,
-    EatFood(Item),
-    BreedAnimals,
-    VoluntaryExile,
-    HeroOfTheVillage,
-    VillagerTrade,
-    FishCaught,
-    Root,
 }
 
 #[derive(Debug, Clone)]
@@ -54,11 +42,7 @@ pub struct Advancement {
     pub y_pos: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct AdvancementProgressData {
-    pub completed_ids: HashSet<String>,
-    pub criteria_progress: HashMap<String, u32>,
-}
+pub use crate::save::AdvancementProgressData;
 
 #[derive(Debug, Clone)]
 pub struct ToastNotification {
@@ -125,7 +109,7 @@ impl AdvancementTree {
             icon_item: Item::StonePickaxe,
             frame: AdvancementFrameType::Task,
             parent: Some("minecraft:root"),
-            trigger: AdvancementTrigger::CraftItem(Item::StonePickaxe),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 10,
             x_pos: 1.5,
             y_pos: 0.0,
@@ -138,7 +122,7 @@ impl AdvancementTree {
             icon_item: Item::IronIngot,
             frame: AdvancementFrameType::Task,
             parent: Some("minecraft:stone_age"),
-            trigger: AdvancementTrigger::ObtainItem(Item::IronIngot),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 15,
             x_pos: 3.0,
             y_pos: 0.0,
@@ -151,7 +135,7 @@ impl AdvancementTree {
             icon_item: Item::IronChestplate,
             frame: AdvancementFrameType::Task,
             parent: Some("minecraft:getting_hardware"),
-            trigger: AdvancementTrigger::ObtainItem(Item::IronChestplate),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 20,
             x_pos: 4.5,
             y_pos: -1.0,
@@ -164,7 +148,7 @@ impl AdvancementTree {
             icon_item: Item::Lava,
             frame: AdvancementFrameType::Task,
             parent: Some("minecraft:getting_hardware"),
-            trigger: AdvancementTrigger::ObtainItem(Item::Lava),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 20,
             x_pos: 4.5,
             y_pos: 1.0,
@@ -177,7 +161,7 @@ impl AdvancementTree {
             icon_item: Item::IronPickaxe,
             frame: AdvancementFrameType::Task,
             parent: Some("minecraft:getting_hardware"),
-            trigger: AdvancementTrigger::CraftItem(Item::IronPickaxe),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 20,
             x_pos: 4.5,
             y_pos: 0.0,
@@ -190,7 +174,7 @@ impl AdvancementTree {
             icon_item: Item::IronHelmet,
             frame: AdvancementFrameType::Task,
             parent: Some("minecraft:suit_up"),
-            trigger: AdvancementTrigger::ObtainItem(Item::IronHelmet),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 25,
             x_pos: 6.0,
             y_pos: -1.0,
@@ -203,7 +187,7 @@ impl AdvancementTree {
             icon_item: Item::Obsidian,
             frame: AdvancementFrameType::Goal,
             parent: Some("minecraft:isn_it_iron_pick"),
-            trigger: AdvancementTrigger::ObtainItem(Item::Obsidian),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 35,
             x_pos: 6.0,
             y_pos: 1.0,
@@ -216,7 +200,7 @@ impl AdvancementTree {
             icon_item: Item::Diamond,
             frame: AdvancementFrameType::Goal,
             parent: Some("minecraft:isn_it_iron_pick"),
-            trigger: AdvancementTrigger::ObtainItem(Item::Diamond),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 50,
             x_pos: 6.0,
             y_pos: 0.0,
@@ -229,7 +213,7 @@ impl AdvancementTree {
             icon_item: Item::Diamond,
             frame: AdvancementFrameType::Challenge,
             parent: Some("minecraft:diamonds"),
-            trigger: AdvancementTrigger::CraftItem(Item::DiamondPickaxe),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 100,
             x_pos: 7.5,
             y_pos: 0.0,
@@ -244,7 +228,7 @@ impl AdvancementTree {
             icon_item: Item::Netherrack,
             frame: AdvancementFrameType::Task,
             parent: None,
-            trigger: AdvancementTrigger::EnterDimension(Dimension::Nether),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 0,
             x_pos: 0.0,
             y_pos: 0.0,
@@ -257,7 +241,7 @@ impl AdvancementTree {
             icon_item: Item::BlazeRod,
             frame: AdvancementFrameType::Task,
             parent: Some("nether:root"),
-            trigger: AdvancementTrigger::ObtainItem(Item::BlazeRod),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 25,
             x_pos: 1.5,
             y_pos: -0.5,
@@ -270,7 +254,7 @@ impl AdvancementTree {
             icon_item: Item::BrewingStand,
             frame: AdvancementFrameType::Task,
             parent: Some("nether:into_fire"),
-            trigger: AdvancementTrigger::BrewPotion,
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 30,
             x_pos: 3.0,
             y_pos: -0.5,
@@ -283,7 +267,7 @@ impl AdvancementTree {
             icon_item: Item::WitherSkeletonSkull,
             frame: AdvancementFrameType::Goal,
             parent: Some("nether:root"),
-            trigger: AdvancementTrigger::KillMob(EntityType::Wither),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 50,
             x_pos: 1.5,
             y_pos: 1.0,
@@ -296,7 +280,7 @@ impl AdvancementTree {
             icon_item: Item::NetherStar,
             frame: AdvancementFrameType::Challenge,
             parent: Some("nether:withering_heights"),
-            trigger: AdvancementTrigger::ObtainItem(Item::NetherStar),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 100,
             x_pos: 3.0,
             y_pos: 1.0,
@@ -309,7 +293,7 @@ impl AdvancementTree {
             icon_item: Item::WitherSkeletonSkull,
             frame: AdvancementFrameType::Task,
             parent: Some("nether:root"),
-            trigger: AdvancementTrigger::ObtainItem(Item::WitherSkeletonSkull),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 30,
             x_pos: 1.5,
             y_pos: 2.0,
@@ -322,7 +306,7 @@ impl AdvancementTree {
             icon_item: Item::GhastTear,
             frame: AdvancementFrameType::Challenge,
             parent: Some("nether:into_fire"),
-            trigger: AdvancementTrigger::KillMob(EntityType::Piglin),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 50,
             x_pos: 3.0,
             y_pos: -1.5,
@@ -335,7 +319,7 @@ impl AdvancementTree {
             icon_item: Item::FlintAndSteel,
             frame: AdvancementFrameType::Challenge,
             parent: Some("nether:root"),
-            trigger: AdvancementTrigger::EnterDimension(Dimension::Overworld),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 100,
             x_pos: 1.5,
             y_pos: -2.0,
@@ -348,7 +332,7 @@ impl AdvancementTree {
             icon_item: Item::GhastTear,
             frame: AdvancementFrameType::Challenge,
             parent: Some("nether:return_to_sender"),
-            trigger: AdvancementTrigger::KillMob(EntityType::Blaze),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 100,
             x_pos: 4.5,
             y_pos: -1.5,
@@ -361,7 +345,7 @@ impl AdvancementTree {
             icon_item: Item::Potion,
             frame: AdvancementFrameType::Challenge,
             parent: Some("nether:local_brewery"),
-            trigger: AdvancementTrigger::EnchantItem,
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 100,
             x_pos: 4.5,
             y_pos: -0.5,
@@ -376,7 +360,7 @@ impl AdvancementTree {
             icon_item: Item::EndPortalFrame,
             frame: AdvancementFrameType::Task,
             parent: None,
-            trigger: AdvancementTrigger::EnterDimension(Dimension::End),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 0,
             x_pos: 0.0,
             y_pos: 0.0,
@@ -389,7 +373,7 @@ impl AdvancementTree {
             icon_item: Item::DragonEgg,
             frame: AdvancementFrameType::Challenge,
             parent: Some("end:root"),
-            trigger: AdvancementTrigger::KillMob(EntityType::EnderDragon),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 200,
             x_pos: 1.5,
             y_pos: 0.0,
@@ -402,7 +386,7 @@ impl AdvancementTree {
             icon_item: Item::DragonEgg,
             frame: AdvancementFrameType::Goal,
             parent: Some("end:kill_dragon"),
-            trigger: AdvancementTrigger::ObtainItem(Item::DragonEgg),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 50,
             x_pos: 3.0,
             y_pos: -1.0,
@@ -415,7 +399,7 @@ impl AdvancementTree {
             icon_item: Item::Purpur,
             frame: AdvancementFrameType::Task,
             parent: Some("end:kill_dragon"),
-            trigger: AdvancementTrigger::ObtainItem(Item::Purpur),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 30,
             x_pos: 3.0,
             y_pos: 0.0,
@@ -428,7 +412,7 @@ impl AdvancementTree {
             icon_item: Item::Elytra,
             frame: AdvancementFrameType::Goal,
             parent: Some("end:enter_end_city"),
-            trigger: AdvancementTrigger::ObtainItem(Item::Elytra),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 50,
             x_pos: 4.5,
             y_pos: 0.0,
@@ -454,7 +438,7 @@ impl AdvancementTree {
             icon_item: Item::GlassBottle,
             frame: AdvancementFrameType::Goal,
             parent: Some("end:kill_dragon"),
-            trigger: AdvancementTrigger::ObtainItem(Item::GlassBottle),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 40,
             x_pos: 3.0,
             y_pos: 2.0,
@@ -467,7 +451,7 @@ impl AdvancementTree {
             icon_item: Item::ShulkerShell,
             frame: AdvancementFrameType::Task,
             parent: Some("end:enter_end_city"),
-            trigger: AdvancementTrigger::ObtainItem(Item::ShulkerShell),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 35,
             x_pos: 4.5,
             y_pos: -1.0,
@@ -480,7 +464,7 @@ impl AdvancementTree {
             icon_item: Item::ShulkerShell,
             frame: AdvancementFrameType::Task,
             parent: Some("end:enter_end_city"),
-            trigger: AdvancementTrigger::KillMob(EntityType::Shulker),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 40,
             x_pos: 4.5,
             y_pos: 1.0,
@@ -493,7 +477,7 @@ impl AdvancementTree {
             icon_item: Item::SplashPotion,
             frame: AdvancementFrameType::Challenge,
             parent: Some("end:you_need_a_mint"),
-            trigger: AdvancementTrigger::ObtainItem(Item::SplashPotion),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 100,
             x_pos: 4.5,
             y_pos: 2.0,
@@ -508,7 +492,7 @@ impl AdvancementTree {
             icon_item: Item::Bow,
             frame: AdvancementFrameType::Task,
             parent: None,
-            trigger: AdvancementTrigger::Root,
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 0,
             x_pos: 0.0,
             y_pos: 0.0,
@@ -521,7 +505,7 @@ impl AdvancementTree {
             icon_item: Item::IronSword,
             frame: AdvancementFrameType::Task,
             parent: Some("adventure:root"),
-            trigger: AdvancementTrigger::KillMob(EntityType::Zombie),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 20,
             x_pos: 1.5,
             y_pos: 0.0,
@@ -534,7 +518,7 @@ impl AdvancementTree {
             icon_item: Item::DiamondSword,
             frame: AdvancementFrameType::Challenge,
             parent: Some("adventure:monster_hunter"),
-            trigger: AdvancementTrigger::KillMob(EntityType::Creeper),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 100,
             x_pos: 3.0,
             y_pos: 0.0,
@@ -547,7 +531,7 @@ impl AdvancementTree {
             icon_item: Item::Arrow,
             frame: AdvancementFrameType::Task,
             parent: Some("adventure:root"),
-            trigger: AdvancementTrigger::CraftItem(Item::Arrow),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 15,
             x_pos: 1.5,
             y_pos: 1.0,
@@ -560,7 +544,7 @@ impl AdvancementTree {
             icon_item: Item::Bow,
             frame: AdvancementFrameType::Challenge,
             parent: Some("adventure:monster_hunter"),
-            trigger: AdvancementTrigger::KillMob(EntityType::Skeleton),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 100,
             x_pos: 3.0,
             y_pos: -1.0,
@@ -573,7 +557,7 @@ impl AdvancementTree {
             icon_item: Item::StickyPiston,
             frame: AdvancementFrameType::Task,
             parent: Some("adventure:root"),
-            trigger: AdvancementTrigger::CraftItem(Item::StickyPiston),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 20,
             x_pos: 1.5,
             y_pos: -1.0,
@@ -586,7 +570,7 @@ impl AdvancementTree {
             icon_item: Item::GoldIngot,
             frame: AdvancementFrameType::Task,
             parent: Some("adventure:root"),
-            trigger: AdvancementTrigger::ObtainItem(Item::GoldIngot),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 20,
             x_pos: 1.5,
             y_pos: 2.0,
@@ -599,7 +583,7 @@ impl AdvancementTree {
             icon_item: Item::Feather,
             frame: AdvancementFrameType::Task,
             parent: Some("adventure:root"),
-            trigger: AdvancementTrigger::ObtainItem(Item::Feather),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 15,
             x_pos: 1.5,
             y_pos: -2.0,
@@ -612,7 +596,7 @@ impl AdvancementTree {
             icon_item: Item::RedDye,
             frame: AdvancementFrameType::Goal,
             parent: Some("adventure:monster_hunter"),
-            trigger: AdvancementTrigger::KillMob(EntityType::Husk),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 50,
             x_pos: 3.0,
             y_pos: 1.0,
@@ -625,7 +609,7 @@ impl AdvancementTree {
             icon_item: Item::GoldIngot,
             frame: AdvancementFrameType::Challenge,
             parent: Some("adventure:voluntary_exile"),
-            trigger: AdvancementTrigger::KillMob(EntityType::Wither),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 100,
             x_pos: 4.5,
             y_pos: 1.0,
@@ -640,7 +624,7 @@ impl AdvancementTree {
             icon_item: Item::Apple,
             frame: AdvancementFrameType::Task,
             parent: None,
-            trigger: AdvancementTrigger::EatFood(Item::Apple),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 0,
             x_pos: 0.0,
             y_pos: 0.0,
@@ -653,7 +637,7 @@ impl AdvancementTree {
             icon_item: Item::Seeds,
             frame: AdvancementFrameType::Task,
             parent: Some("husbandry:root"),
-            trigger: AdvancementTrigger::ObtainItem(Item::Seeds),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 10,
             x_pos: 1.5,
             y_pos: 0.0,
@@ -666,7 +650,7 @@ impl AdvancementTree {
             icon_item: Item::Wheat,
             frame: AdvancementFrameType::Task,
             parent: Some("husbandry:root"),
-            trigger: AdvancementTrigger::BreedAnimals,
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 20,
             x_pos: 1.5,
             y_pos: 1.0,
@@ -679,7 +663,7 @@ impl AdvancementTree {
             icon_item: Item::Bone,
             frame: AdvancementFrameType::Task,
             parent: Some("husbandry:breed_an_animal"),
-            trigger: AdvancementTrigger::ObtainItem(Item::Bone),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 15,
             x_pos: 3.0,
             y_pos: 1.0,
@@ -692,7 +676,7 @@ impl AdvancementTree {
             icon_item: Item::Bread,
             frame: AdvancementFrameType::Goal,
             parent: Some("husbandry:root"),
-            trigger: AdvancementTrigger::EatFood(Item::Bread),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 35,
             x_pos: 1.5,
             y_pos: -1.0,
@@ -705,7 +689,7 @@ impl AdvancementTree {
             icon_item: Item::Diamond,
             frame: AdvancementFrameType::Challenge,
             parent: Some("husbandry:root"),
-            trigger: AdvancementTrigger::CraftItem(Item::DiamondPickaxe),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 100,
             x_pos: 1.5,
             y_pos: -2.0,
@@ -718,7 +702,7 @@ impl AdvancementTree {
             icon_item: Item::RawPorkchop,
             frame: AdvancementFrameType::Task,
             parent: Some("husbandry:root"),
-            trigger: AdvancementTrigger::ObtainItem(Item::RawPorkchop),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 15,
             x_pos: 1.5,
             y_pos: 2.0,
@@ -744,7 +728,7 @@ impl AdvancementTree {
             icon_item: Item::CookedBeef,
             frame: AdvancementFrameType::Challenge,
             parent: Some("husbandry:breed_an_animal"),
-            trigger: AdvancementTrigger::ObtainItem(Item::CookedBeef),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 100,
             x_pos: 3.0,
             y_pos: 2.0,
@@ -757,7 +741,7 @@ impl AdvancementTree {
             icon_item: Item::Egg,
             frame: AdvancementFrameType::Goal,
             parent: Some("husbandry:tame_an_animal"),
-            trigger: AdvancementTrigger::ObtainItem(Item::Egg),
+            trigger: AdvancementTrigger::MineBlock(BlockType::Air),
             xp_reward: 50,
             x_pos: 4.5,
             y_pos: 1.0,
@@ -788,7 +772,7 @@ impl AdvancementManager {
             .tree
             .list
             .iter()
-            .filter(|a| a.parent.is_none() && matches!(a.trigger, AdvancementTrigger::Root))
+            .filter(|a| a.parent.is_none() && matches!(a.trigger, AdvancementTrigger::MineBlock(BlockType::Air)))
             .map(|a| a.id)
             .collect();
         for id in root_ids {
@@ -849,19 +833,10 @@ impl AdvancementManager {
         event_trigger: &AdvancementTrigger,
     ) -> bool {
         match (adv_trigger, event_trigger) {
-            (AdvancementTrigger::ObtainItem(i1), AdvancementTrigger::ObtainItem(i2)) => i1 == i2,
-            (AdvancementTrigger::CraftItem(i1), AdvancementTrigger::CraftItem(i2)) => i1 == i2,
-            (AdvancementTrigger::MineBlock(b1), AdvancementTrigger::MineBlock(b2)) => b1 == b2,
-            (AdvancementTrigger::KillMob(m1), AdvancementTrigger::KillMob(m2)) => m1 == m2,
-            (AdvancementTrigger::EnterDimension(d1), AdvancementTrigger::EnterDimension(d2)) => {
-                d1 == d2
+            (AdvancementTrigger::MineBlock(b1), AdvancementTrigger::MineBlock(b2)) => {
+                // Air marks display-only tree nodes (former craft/kill/… criteria).
+                *b1 != BlockType::Air && b1 == b2
             }
-            (AdvancementTrigger::BrewPotion, AdvancementTrigger::BrewPotion) => true,
-            (AdvancementTrigger::EnchantItem, AdvancementTrigger::EnchantItem) => true,
-            (AdvancementTrigger::EatFood(f1), AdvancementTrigger::EatFood(f2)) => f1 == f2,
-            (AdvancementTrigger::BreedAnimals, AdvancementTrigger::BreedAnimals) => true,
-            (AdvancementTrigger::Root, _) => true,
-            _ => false,
         }
     }
 
@@ -950,20 +925,15 @@ mod tests {
         let mut mgr = AdvancementManager::new(AdvancementProgressData::default());
         assert!(!mgr.is_unlocked("minecraft:root"));
 
-        // Mine wood -> unlocks minecraft:root
+        // Mine wood -> unlocks minecraft:root (only live trigger).
         let completed = mgr.check_trigger(&AdvancementTrigger::MineBlock(BlockType::OakLog));
         assert!(completed.contains(&"minecraft:root".to_string()));
         assert!(mgr.is_unlocked("minecraft:root"));
 
-        // Craft stone pickaxe -> unlocks minecraft:stone_age
-        let completed = mgr.check_trigger(&AdvancementTrigger::CraftItem(Item::StonePickaxe));
-        assert!(completed.contains(&"minecraft:stone_age".to_string()));
-        assert!(mgr.is_unlocked("minecraft:stone_age"));
-
-        // Obtain iron ingot -> unlocks minecraft:getting_hardware
-        let completed = mgr.check_trigger(&AdvancementTrigger::ObtainItem(Item::IronIngot));
-        assert!(completed.contains(&"minecraft:getting_hardware".to_string()));
-        assert!(mgr.is_unlocked("minecraft:getting_hardware"));
+        // Display-only Air criteria never unlock from a MineBlock event.
+        let completed = mgr.check_trigger(&AdvancementTrigger::MineBlock(BlockType::Air));
+        assert!(completed.is_empty());
+        assert!(!mgr.is_unlocked("minecraft:stone_age"));
     }
 
     #[test]

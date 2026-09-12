@@ -5,10 +5,12 @@
 //! snapshot path used by the dedicated/listen compositions without involving
 //! a renderer or a network client.
 
+mod common;
+
+use common::authority_harness::authority_request;
+use common::tcp_harness::{session_slot, source};
 use glam::Vec3;
-use icraft::authority::contract::{
-    AuthorityTopology, SessionContract, SessionGameplayState, SessionInventorySlot,
-};
+use icraft::authority::contract::SessionContract;
 use icraft::authority::fishing::water_probe_position;
 use icraft::authority::transactions::BREW_TICKS;
 use icraft::authority::{AuthorityConfig, AuthorityCore};
@@ -17,15 +19,14 @@ use icraft::dimension::Dimension;
 use icraft::entity::EntityType;
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::protocol::{
-    GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse, ItemWire, RejectReason,
-    SlotRefWire,
+    GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse, RejectReason,
 };
 use icraft::world::BlockType;
 
 const SESSION_ID: u64 = 7;
 
 fn new_core() -> AuthorityCore {
-    let mut core = AuthorityCore::new(AuthorityConfig::default(), AuthorityTopology::Dedicated);
+    let mut core = AuthorityCore::new(AuthorityConfig::default());
     core.register_session(SessionContract::new(
         SESSION_ID,
         "headless",
@@ -38,47 +39,13 @@ fn new_core() -> AuthorityCore {
     core
 }
 
-fn session_slot(stack: ItemStack) -> SessionInventorySlot {
-    SessionInventorySlot::from_wire(
-        ItemWire::from_stack(&stack),
-        stack.can_break,
-        stack.can_place_on,
-    )
-}
-
-fn source(state: &SessionGameplayState, index: u8, count: u16) -> SlotRefWire {
-    SlotRefWire {
-        index,
-        count,
-        expected: state.inventory[usize::from(index)]
-            .expect("source slot is present")
-            .into(),
-    }
-}
-
-fn request(
-    core: &AuthorityCore,
-    request_id: u128,
-    client_sequence: u64,
-    operation: GameplayOperation,
-) -> GameplayRequest {
-    GameplayRequest {
-        request_id,
-        client_sequence,
-        session_id: SESSION_ID,
-        dimension: Dimension::Overworld as u8,
-        client_revision: core.revision_for_dimension(Dimension::Overworld),
-        operation,
-    }
-}
-
 fn submit(
     core: &mut AuthorityCore,
     request_id: u128,
     client_sequence: u64,
     operation: GameplayOperation,
 ) -> GameplayResponse {
-    let request = request(core, request_id, client_sequence, operation);
+    let request = authority_request(core, SESSION_ID, request_id, client_sequence, operation);
     core.submit_request(request)
 }
 
@@ -94,7 +61,7 @@ fn rejected(response: &GameplayResponse, reason: RejectReason) {
 }
 
 fn put_block(core: &mut AuthorityCore, position: [i32; 3], block: BlockType) {
-    core.world
+    core.world_mut(Dimension::Overworld).unwrap()
         .set_block(position[0], position[1], position[2], block, 0)
         .unwrap();
 }
@@ -178,7 +145,7 @@ fn fishing_fixed_tick_reel_is_atomic_and_idempotent() {
             probe[1].div_euclid(1_000),
             probe[2].div_euclid(1_000),
         ];
-        if core.world.get_block(block[0], block[1], block[2]) != BlockType::Water {
+        if core.world(Dimension::Overworld).get_block(block[0], block[1], block[2]) != BlockType::Water {
             put_block(&mut core, block, BlockType::Water);
         }
         core.tick();
@@ -213,7 +180,11 @@ fn fishing_fixed_tick_reel_is_atomic_and_idempotent() {
     assert!(after_reel.fishing_hook.is_none());
     assert!(after_reel.inventory[0].unwrap().item.durability < before_rod);
     assert!(after_reel.experience > before_experience);
-    assert!(core.world.entities.get_by_id(hook_id).is_none());
+    assert!(core
+        .world_mut(Dimension::Overworld).unwrap()
+        .entities
+        .get_by_id(hook_id)
+        .is_none());
 
     // Duplicate reel cannot grant a second catch, and stale revisions are
     // rejected before the domain seam is entered.
@@ -264,7 +235,7 @@ fn workstation_transactions_cover_brew_ready_take_and_exact_sources() {
     let mut furnace = FurnaceBlockEntity::new();
     furnace.slots[2] = Some(ItemStack::new(Item::IronIngot, 2));
     furnace.accumulated_xp = 4.0;
-    core.world.chunks.set_block_entity(
+    core.world_mut(Dimension::Overworld).unwrap().chunks.set_block_entity(
         furnace_position[0],
         furnace_position[1],
         furnace_position[2],
@@ -300,7 +271,7 @@ fn workstation_transactions_cover_brew_ready_take_and_exact_sources() {
     assert_eq!(furnace_state.experience_level, 30);
     assert_eq!(furnace_state.experience, 4);
     assert_eq!(
-        core.world
+        core.world(Dimension::Overworld)
             .get_block_entity(
                 furnace_position[0],
                 furnace_position[1],
@@ -522,10 +493,15 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
     assert!(core.set_session_gameplay(SESSION_ID, attacker));
 
     let target = core
-        .world
+        .world_mut(Dimension::Overworld).unwrap()
         .entities
         .spawn(EntityType::Zombie, Vec3::new(8.0, 80.0, 9.0));
-    let before = core.world.entities.get_by_id(target).unwrap().health;
+    let before = core
+        .world_mut(Dimension::Overworld).unwrap()
+        .entities
+        .get_by_id(target)
+        .unwrap()
+        .health;
     let hit = submit(
         &mut core,
         30,
@@ -533,7 +509,7 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
         GameplayOperation::Combat { target, action: 0 },
     );
     accepted(&hit);
-    let entity = core.world.entities.get_by_id(target).unwrap();
+    let entity = core.world_mut(Dimension::Overworld).unwrap().entities.get_by_id(target).unwrap();
     assert!(entity.health < before);
     assert!(entity.velocity.length_squared() > 0.0);
     assert_eq!(
@@ -549,10 +525,10 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
     // A lethal entity hit removes the target and emits exactly one drop/xp
     // vector.  The cached duplicate cannot emit another pair.
     let lethal_target = core
-        .world
+        .world_mut(Dimension::Overworld).unwrap()
         .entities
         .spawn(EntityType::Zombie, Vec3::new(8.0, 80.0, 9.0));
-    core.world
+    core.world_mut(Dimension::Overworld).unwrap()
         .entities
         .get_by_id_mut(lethal_target)
         .unwrap()
@@ -571,9 +547,13 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
         },
     );
     accepted(&lethal);
-    assert!(core.world.entities.get_by_id(lethal_target).is_none());
+    assert!(core
+        .world_mut(Dimension::Overworld).unwrap()
+        .entities
+        .get_by_id(lethal_target)
+        .is_none());
     let drops_after_lethal = core
-        .world
+        .world(Dimension::Overworld)
         .entities
         .entities
         .iter()
@@ -598,7 +578,7 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
         lethal
     );
     assert_eq!(
-        core.world
+        core.world(Dimension::Overworld)
             .entities
             .entities
             .iter()
@@ -687,14 +667,19 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
     assert!(alive.last_revision > before_victim_revision);
 
     let far_target = core
-        .world
+        .world_mut(Dimension::Overworld).unwrap()
         .entities
         .spawn(EntityType::Zombie, Vec3::new(20.0, 80.0, 8.0));
     core.session_mut(SESSION_ID)
         .unwrap()
         .gameplay
         .attack_cooldown_ticks = 5;
-    let far_before = core.world.entities.get_by_id(far_target).unwrap().health;
+    let far_before = core
+        .world_mut(Dimension::Overworld).unwrap()
+        .entities
+        .get_by_id(far_target)
+        .unwrap()
+        .health;
     let far_response = submit(
         &mut core,
         35,
@@ -706,7 +691,11 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
     );
     rejected(&far_response, RejectReason::TooFar);
     assert_eq!(
-        core.world.entities.get_by_id(far_target).unwrap().health,
+        core.world_mut(Dimension::Overworld).unwrap()
+            .entities
+            .get_by_id(far_target)
+            .unwrap()
+            .health,
         far_before
     );
 
@@ -760,7 +749,7 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
 
     // keepInventory retains exact rich slots and emits no death drops.
     let mut keep_core = new_core();
-    let mut keep_rules = keep_core.world.rules;
+    let mut keep_rules = keep_core.world_mut(Dimension::Overworld).unwrap().rules;
     keep_rules.keep_inventory = true;
     keep_core.set_rules(keep_rules);
     keep_core
@@ -795,12 +784,17 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
     let kept_dead = keep_core.session(target_id).unwrap().gameplay;
     assert!(kept_dead.is_dead);
     assert_eq!(kept_dead.count_item(Item::Diamond.to_u32()), 1);
-    assert!(keep_core.world.entities.entities.iter().all(|entity| {
-        !matches!(
-            entity.entity_type,
-            EntityType::DroppedItem | EntityType::ExperienceOrb
-        )
-    }));
+    assert!(keep_core
+        .world_mut(Dimension::Overworld).unwrap()
+        .entities
+        .entities
+        .iter()
+        .all(|entity| {
+            !matches!(
+                entity.entity_type,
+                EntityType::DroppedItem | EntityType::ExperienceOrb
+            )
+        }));
 
     // A stale revision cannot replay combat after the authoritative death and
     // respawn transition.
@@ -816,4 +810,32 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
         },
     };
     rejected(&core.submit_request(stale), RejectReason::InvalidRevision);
+}
+
+#[test]
+fn consecutive_sleep_requests_are_not_invalid_state() {
+    let mut core = new_core();
+    put_block(&mut core, [8, 80, 8], BlockType::Bed);
+    let first = submit(
+        &mut core,
+        1,
+        1,
+        GameplayOperation::Sleep {
+            x: 8,
+            y: 80,
+            z: 8,
+        },
+    );
+    accepted(&first);
+    let second = submit(
+        &mut core,
+        2,
+        2,
+        GameplayOperation::Sleep {
+            x: 8,
+            y: 80,
+            z: 8,
+        },
+    );
+    accepted(&second);
 }

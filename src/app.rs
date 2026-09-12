@@ -89,6 +89,11 @@ fn frame_delta(last_render_time: Instant, now: Instant) -> f32 {
     now.duration_since(last_render_time).as_secs_f32()
 }
 
+fn presentable_window_size(window: &Window) -> winit::dpi::PhysicalSize<u32> {
+    let size = window.inner_size();
+    winit::dpi::PhysicalSize::new(size.width.max(1), size.height.max(1))
+}
+
 fn next_game_mode_command(mode: crate::inventory::GameMode) -> &'static str {
     match mode {
         crate::inventory::GameMode::Creative => "survival",
@@ -136,8 +141,12 @@ impl App {
                 let Some(window) = self.window.clone() else {
                     return;
                 };
-                self.runtime.take();
-                let mut state = pollster::block_on(State::new(window, launch, settings));
+                let Some(Runtime::Menu(menu)) = self.runtime.take() else {
+                    return;
+                };
+                let gpu = menu.into_gpu_context();
+                let mut state =
+                    pollster::block_on(State::new(window, launch, settings, gpu));
                 state.set_paused(false);
                 self.runtime = Some(Runtime::Game(state));
                 self.last_render_time = Instant::now();
@@ -150,9 +159,13 @@ impl App {
         let Some(window) = self.window.clone() else {
             return;
         };
-        self.runtime.take();
+        let Some(Runtime::Game(mut state)) = self.runtime.take() else {
+            return;
+        };
+        state.shutdown_network();
+        let gpu = state.into_gpu_context();
         let settings = GameSettings::load();
-        let menu = pollster::block_on(Menu::new(window, settings));
+        let menu = pollster::block_on(Menu::from_gpu(window, settings, gpu));
         self.runtime = Some(Runtime::Menu(menu));
         self.last_render_time = Instant::now();
         self.frame_deadline = None;
@@ -202,7 +215,10 @@ impl ApplicationHandler for App {
             window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
         }
         let settings = GameSettings::load();
-        let menu = pollster::block_on(Menu::new(window.clone(), settings));
+        let gpu = pollster::block_on(crate::presentation::bootstrap::create_gpu_context(
+            &window, &settings,
+        ));
+        let menu = pollster::block_on(Menu::from_gpu(window.clone(), settings, gpu));
         self.window = Some(window);
         self.runtime = Some(Runtime::Menu(menu));
         self.last_render_time = Instant::now();
@@ -342,7 +358,11 @@ impl ApplicationHandler for App {
                             if pressed
                                 && (button == MouseButton::Left || button == MouseButton::Right)
                             {
+                                let writeback = state.should_writeback_after_inventory_click();
                                 state.handle_inventory_click(button == MouseButton::Left);
+                                if writeback {
+                                    state.sync_authority_gameplay_from_local();
+                                }
                             }
                         } else {
                             match button {
@@ -404,9 +424,10 @@ impl ApplicationHandler for App {
                                 state.inventory.scroll_creative(scroll_dir);
                             }
                             GameWheelTarget::Hotbar if scroll_dir != 0 => {
-                                state.inventory.selected =
-                                    (state.inventory.selected as i32 + scroll_dir).rem_euclid(9)
-                                        as usize;
+                                let selected = (state.inventory.selected as i32 + scroll_dir)
+                                    .rem_euclid(9)
+                                    as usize;
+                                state.select_hotbar_slot(selected);
                             }
                             GameWheelTarget::CreativeCatalog
                             | GameWheelTarget::Hotbar
@@ -440,9 +461,11 @@ impl ApplicationHandler for App {
                         }
                         match menu.render() {
                             Ok(()) => {}
-                            Err(wgpu::SurfaceError::Lost) => menu.resize(menu.window.inner_size()),
+                            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                                menu.resize(presentable_window_size(&menu.window))
+                            }
+                            Err(wgpu::SurfaceError::Timeout) => {}
                             Err(wgpu::SurfaceError::OutOfMemory) => event_loop.exit(),
-                            Err(error) => eprintln!("{error:?}"),
                         }
                     }
                     Some(Runtime::Game(state)) => {
@@ -452,9 +475,11 @@ impl ApplicationHandler for App {
                         }
                         match state.render() {
                             Ok(()) => {}
-                            Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
+                            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                                state.resize(presentable_window_size(&state.window))
+                            }
+                            Err(wgpu::SurfaceError::Timeout) => {}
                             Err(wgpu::SurfaceError::OutOfMemory) => event_loop.exit(),
-                            Err(error) => eprintln!("{error:?}"),
                         }
                     }
                     None => {}
@@ -610,21 +635,6 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent, shift_held: bool) -
         state.camera_perspective = state.camera_perspective.next();
         return false;
     }
-    // Q throws items onto the ground: the held hotbar stack while playing, or
-    // the stack under the mouse cursor while the inventory is open. Holding
-    // Shift throws the whole stack instead of a single item. This runs before
-    // the gameplay gate below so it stays reachable with the inventory open.
-    if code == KeyCode::KeyQ && pressed && !event.repeat {
-        if state.is_paused || state.player_state.is_dead {
-            return false;
-        }
-        if state.inventory.is_open {
-            state.drop_hovered_item(shift_held);
-        } else if !state.advancement_gui.is_open {
-            state.drop_held_item(shift_held);
-        }
-        return false;
-    }
     if code == state.settings.controls.chat && pressed && !event.repeat {
         if !state.is_paused
             && !state.inventory.is_open
@@ -663,29 +673,30 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent, shift_held: bool) -
     } else if code == controls.sneak {
         state.keys.shift = pressed;
     } else if code == controls.time_speed {
+        // F remains the offhand-swap binding; production no longer multiplies
+        // local world time by 60× while the key is held.
         if pressed && !event.repeat {
             state.handle_swap_offhand_pressed();
         }
-        state.keys.f = pressed;
     } else if pressed {
         if code == controls.hotbar_1 {
-            state.inventory.selected = 0;
+            state.select_hotbar_slot(0);
         } else if code == controls.hotbar_2 {
-            state.inventory.selected = 1;
+            state.select_hotbar_slot(1);
         } else if code == controls.hotbar_3 {
-            state.inventory.selected = 2;
+            state.select_hotbar_slot(2);
         } else if code == controls.hotbar_4 {
-            state.inventory.selected = 3;
+            state.select_hotbar_slot(3);
         } else if code == controls.hotbar_5 {
-            state.inventory.selected = 4;
+            state.select_hotbar_slot(4);
         } else if code == controls.hotbar_6 {
-            state.inventory.selected = 5;
+            state.select_hotbar_slot(5);
         } else if code == controls.hotbar_7 {
-            state.inventory.selected = 6;
+            state.select_hotbar_slot(6);
         } else if code == controls.hotbar_8 {
-            state.inventory.selected = 7;
+            state.select_hotbar_slot(7);
         } else if code == controls.hotbar_9 {
-            state.inventory.selected = 8;
+            state.select_hotbar_slot(8);
         } else if code == controls.gamemode && !event.repeat {
             state.chat_input = format!("/gamemode {}", next_game_mode_command(state.game_mode));
             // Reuse the same authority, cheats/operator, and Hardcore checks

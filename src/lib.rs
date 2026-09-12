@@ -1,66 +1,95 @@
 //! iCraft shared library.
 //!
-//! The desktop binary still owns the winit/wgpu application loop in
-//! `main.rs`.  Keeping the simulation/network modules in a library target lets
-//! the dedicated server reuse the authoritative code without constructing a
-//! window, audio device, or GPU surface.
+//! The desktop binary owns the winit/wgpu application loop in `main.rs`
+//! and re-exports these modules (`pub use icraft::{world, …}`) so existing
+//! `crate::world` paths in the desktop tree still resolve. Shared source
+//! therefore compiles once, through this library.
+//!
+//! # Server / tests contract
+//!
+//! `icraft-server` and `tests/` may `use icraft::…` only the contract
+//! modules below: authority, world, network, persistence, and the thin
+//! `presentation_inventory_policy` cut. That set is the live server API.
+//!
+//! # Desktop-shared modules
+//!
+//! Additional modules are `pub` so the desktop binary crate can re-export
+//! them. They are not a dedicated-server or integration-test API.
+//!
+//! GPU frame pooling (`gpu_frame_resources`) and presentation click policy
+//! (`presentation_click`) are desktop binary modules in `main.rs`. Do not
+//! add them here — that would compile them into `icraft-server`.
+//! Desktop `--microbench` is `src/main.rs`'s own `mod` behind feature
+//! `microbench`; it is not compiled into this library.
+//!
+//! `src/presentation/` is the Plan 10 desktop fence and **must not** be
+//! added to this library. GPU menu, terrain arenas, and frame encode stay
+//! out of `icraft-server`.
 
-pub mod accessibility;
-pub mod advancements;
-pub mod ai;
-pub mod audio;
+// Server / tests contract. Keep this set aligned with `tests/` and
+// `src/bin/icraft-server.rs` `use icraft::…` imports.
 pub mod authority;
 pub mod block_entity;
-pub mod block_model;
-pub mod boss;
 pub mod brewing;
-pub mod camera;
 pub mod chunk_manager;
-pub mod chunk_render;
-pub mod chunk_schedule;
-pub mod commands;
-pub mod container_sessions;
-pub mod crafting;
-pub mod culling;
+/// Former presentation container session shell. Authority owns viewers in
+/// `ServerWorld`; this module is test-only after Wave 10 Plan 02.
+#[cfg(test)]
+mod container_sessions;
 pub mod dimension;
 pub mod enchantment;
 pub mod entity;
-pub mod final_acceptance;
 pub mod fishing;
-pub mod fluid;
 pub mod game_rules;
-pub mod gpu_frame_resources;
-pub mod interaction;
 pub mod inventory;
-pub mod lighting;
-pub mod localization;
-pub mod loot;
-pub mod menu;
-pub mod microbench;
-pub mod mob;
-pub mod navigation;
 pub mod network;
 pub mod passive_mob;
+pub mod player;
+pub mod presentation_inventory_policy;
+pub mod redstone;
+pub mod save;
+pub mod server_runtime;
+pub mod server_world;
+pub mod structure;
+pub mod world;
+
+// Desktop-shared. `pub` so `src/main.rs` can `pub use icraft::…` without
+// compiling these files a second time into the binary crate.
+//
+// Wave 10 Plan 06: `accessibility`, `localization`, `advancements`, and
+// `weather` are desktop `mod`s in `main.rs` (not listed here). Desktop
+// section-visibility traversal stays out of this library — see `main.rs`'s
+// `culling` facade. Save keeps `AdvancementProgressData` only.
+pub mod block_model;
+pub mod boss;
+pub mod chunk_render;
+pub mod chunk_schedule;
+pub mod commands;
+pub mod culling;
+pub mod interaction;
+pub mod lighting;
+pub mod navigation;
 pub mod perf;
 pub mod physics;
-pub mod player;
-pub mod rail;
-pub mod recipes;
-pub mod redstone;
 pub mod resources;
-pub mod save;
-pub mod server_world;
-pub mod sim_harness;
-pub mod spawning;
-pub mod structure;
-pub mod texture;
+#[cfg(test)]
 pub mod vehicle;
 pub mod village;
-pub mod voxel_shape;
-pub mod weather;
-pub mod world;
-pub mod world_mutation;
-pub mod world_tick;
-pub mod worldgen;
 
-pub mod server_runtime;
+// Shared simulation used by authority / ServerWorld. Not a dedicated-server
+// or integration-test import; desktop files do not `use crate::` these.
+pub(crate) mod fluid;
+pub(crate) mod mob;
+/// Minecart/rail presentation tick was only driven by deleted SimHarness.
+#[cfg(test)]
+pub(crate) mod rail;
+/// Shared FNV-1a / LCG helpers (desktop texture/weather re-export via `main`).
+pub mod rng;
+pub(crate) mod world_tick;
+
+// Still crate-internal. Desktop-only files do not `use crate::` these.
+pub(crate) mod loot;
+// `pub` because desktop `State` and `ServerWorld` expose `RecipeManager`.
+pub mod recipes;
+pub(crate) mod voxel_shape;
+pub(crate) mod worldgen;

@@ -1,34 +1,78 @@
-//! Contracts shared by every authority topology.
+//! Contracts shared by every authority runtime.
 //!
 //! The contract deliberately contains no transport or presentation types.  A
 //! single-player in-process runtime, a listen server and the dedicated binary
-//! all use these same revision/session rules and request vectors.
+//! all use these same revision/session rules and request vectors. Listen vs
+//! embedded is `TransportMode`; join vs in-process is `PresentationTopology`.
 
-use crate::inventory::GameMode;
+use crate::inventory::{GameMode, ItemStack};
 use crate::network::protocol::{
-    GameplayOperation, GameplayRequest, GameplayResponse, ItemWire, MiningProgressWire, PlayerId,
-    RejectReason, SessionBrewWire, SessionFishingHookWire, SessionGameplayWire, SessionSlotWire,
-    SlotRefWire,
+    BlockActionKind, ContainerAction, GameplayOperation, GameplayRequest, GameplayResponse,
+    ItemWire, MiningProgressWire, PlayerId, RejectReason, SessionBrewWire,
+    SessionFishingHookWire, SessionGameplayWire, SessionSlotWire, SlotRefWire,
 };
 use std::collections::VecDeque;
 
-/// Bump this when the authoritative request/session semantics change.
-pub const AUTHORITY_CONTRACT_VERSION: u16 = 2;
 pub const FIXED_TICK_HZ: u32 = 20;
 pub const RESPONSE_CACHE_CAPACITY: usize = 128;
 
-/// The composition root is allowed to choose a transport, never a second
-/// authority implementation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthorityTopology {
-    Singleplayer,
-    ListenServer,
-    Dedicated,
+/// Absolute world-unit bound for float→milli conversion. Values beyond this
+/// are rejected before they can overflow the milli domain.
+pub const POSITION_ABS_LIMIT: f32 = 2_000_000.0;
+/// Absolute milli bound matching `POSITION_ABS_LIMIT * 1_000`.
+pub const POSITION_MILLI_ABS_LIMIT: i32 = 2_000_000_000;
+
+/// Convert a world-space pose to milli units used by fishing / combat domains.
+pub fn position_to_milli(position: [f32; 3]) -> Result<[i32; 3], RejectReason> {
+    let mut result = [0; 3];
+    for (index, value) in position.into_iter().enumerate() {
+        if !value.is_finite() || value.abs() > POSITION_ABS_LIMIT {
+            return Err(RejectReason::InvalidState);
+        }
+        result[index] = (value * 1_000.0).round() as i32;
+    }
+    Ok(result)
 }
 
-impl AuthorityTopology {
-    pub const fn is_headless(self) -> bool {
-        matches!(self, Self::Dedicated)
+/// Same conversion as [`position_to_milli`], returning `None` on reject.
+pub fn position_to_milli_opt(position: [f32; 3]) -> Option<[i32; 3]> {
+    position_to_milli(position).ok()
+}
+
+/// True when a milli coordinate is inside [`POSITION_MILLI_ABS_LIMIT`].
+pub fn milli_within_abs_limit(value: i32) -> bool {
+    value.unsigned_abs() <= POSITION_MILLI_ABS_LIMIT as u32
+}
+
+/// Inverse of pose milli encoding (no abs-limit check — callers already gated).
+pub fn milli_to_vec3(position: [i32; 3]) -> glam::Vec3 {
+    glam::Vec3::new(
+        position[0] as f32 / 1_000.0,
+        position[1] as f32 / 1_000.0,
+        position[2] as f32 / 1_000.0,
+    )
+}
+
+/// Non-negative scalar → milli. Non-finite values become `0`.
+pub fn scalar_to_milli(value: f32) -> u32 {
+    if !value.is_finite() {
+        return 0;
+    }
+    (value.max(0.0) * 1_000.0).round() as u32
+}
+
+/// Milli → non-negative scalar.
+pub fn milli_to_scalar(value: u32) -> f32 {
+    value as f32 / 1_000.0
+}
+
+/// Health / combat milli. Non-finite values become `u32::MAX` (distinct from
+/// [`scalar_to_milli`]'s zero — invalid health must not look like death).
+pub fn quantize_health(health: f32) -> u32 {
+    if health.is_finite() {
+        (health.max(0.0) * 1_000.0).round().min(u32::MAX as f32) as u32
+    } else {
+        u32::MAX
     }
 }
 
@@ -88,6 +132,32 @@ impl SessionInventorySlot {
             can_break,
             can_place_on,
         }
+    }
+
+    /// Map a live stack into the compact session wire form.
+    ///
+    /// Empty stacks and counts above `u16::MAX` (ItemWire capacity) become
+    /// `None` so runtime / desktop / harness share one count-cap policy.
+    pub fn from_stack(stack: &ItemStack) -> Option<Self> {
+        if stack.count == 0 || stack.count > u32::from(u16::MAX) {
+            return None;
+        }
+        Some(Self::from_wire(
+            ItemWire::from_stack(stack),
+            stack.can_break,
+            stack.can_place_on,
+        ))
+    }
+
+    pub fn from_stack_opt(stack: Option<&ItemStack>) -> Option<Self> {
+        stack.and_then(Self::from_stack)
+    }
+
+    pub fn to_stack(&self) -> Option<ItemStack> {
+        let mut stack = self.item.to_stack()?;
+        stack.can_break = self.can_break;
+        stack.can_place_on = self.can_place_on;
+        Some(stack)
     }
 
     pub fn same_identity(self, other: Self) -> bool {
@@ -210,6 +280,10 @@ pub struct SessionGameplayState {
     pub fishing_hook: Option<SessionFishingHookState>,
     pub brew: Option<SessionBrewState>,
     pub mining: Option<MiningProgressState>,
+    /// Authority-owned dragged stack for container clicks. Not projected
+    /// through `SessionGameplayWire`; `ContainerClickResult.dragged` and the
+    /// persisted player `Inventory.dragged` field carry it across the runtime.
+    pub cursor: Option<SessionInventorySlot>,
     pub revision: u64,
 }
 
@@ -236,6 +310,7 @@ impl Default for SessionGameplayState {
             fishing_hook: None,
             brew: None,
             mining: None,
+            cursor: None,
             revision: 0,
         }
     }
@@ -354,6 +429,7 @@ impl From<SessionGameplayWire> for SessionGameplayState {
             fishing_hook: state.fishing_hook.map(Into::into),
             brew: state.brew.map(Into::into),
             mining: state.mining.map(Into::into),
+            cursor: None,
             revision: state.revision,
         }
     }
@@ -523,29 +599,6 @@ impl SessionGameplayState {
         true
     }
 
-    pub fn add_item(&mut self, item: u32, count: u32) -> bool {
-        if count == 0 {
-            return true;
-        }
-        if count > u32::from(u16::MAX) {
-            return false;
-        }
-        self.add_slot(SessionInventorySlot::from_wire(
-            ItemWire {
-                item,
-                count: count as u16,
-                durability: 0,
-                enchantments: [0; 6],
-                potion: None,
-                custom_name: [0; 24],
-                can_break: 0,
-                can_place_on: 0,
-            },
-            0,
-            0,
-        ))
-    }
-
     pub fn add_slot(&mut self, slot: SessionInventorySlot) -> bool {
         let count = u32::from(slot.item.count);
         if count == 0 {
@@ -594,6 +647,21 @@ pub struct SessionGameplayUpdate {
     pub player_id: PlayerId,
     pub dimension: u8,
     pub state: SessionGameplayState,
+}
+
+/// Compact `Copy` snapshot for block / combat handlers that must not clone the
+/// 128-deep response cache on `SessionContract`.
+#[derive(Debug, Clone, Copy)]
+pub struct SessionActionView {
+    pub position: [f32; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    pub dimension: u8,
+    pub game_mode: GameMode,
+    pub portal_contact_time: f32,
+    pub portal_cooldown: f32,
+    pub portal_requested: bool,
+    pub gameplay: SessionGameplayState,
 }
 
 /// Transport-independent authenticated session state used by AuthorityCore.
@@ -652,6 +720,20 @@ impl SessionContract {
         }
     }
 
+    pub fn action_view(&self) -> SessionActionView {
+        SessionActionView {
+            position: self.position,
+            yaw: self.yaw,
+            pitch: self.pitch,
+            dimension: self.dimension,
+            game_mode: self.game_mode,
+            portal_contact_time: self.portal_contact_time,
+            portal_cooldown: self.portal_cooldown,
+            portal_requested: self.portal_requested,
+            gameplay: self.gameplay,
+        }
+    }
+
     pub fn cached_response(&self, request_id: u128) -> Option<GameplayResponse> {
         self.response_cache
             .iter()
@@ -664,10 +746,6 @@ impl SessionContract {
             self.response_cache.pop_front();
         }
         self.response_cache.push_back(response);
-    }
-
-    pub fn cache_len(&self) -> usize {
-        self.response_cache.len()
     }
 
     pub fn validate_sequence(&self, request: &GameplayRequest) -> Result<(), RejectReason> {
@@ -728,11 +806,16 @@ pub fn common_gameplay_vectors() -> Vec<GameplayRequest> {
             session_id: 7,
             dimension: 0,
             client_revision: 0,
-            operation: GameplayOperation::BlockUse {
+            operation: GameplayOperation::BlockAction {
+                action: BlockActionKind::Place,
                 x: 8,
                 y: 80,
                 z: 8,
+                face: [0, 1, 0],
+                hand: 0,
+                held: None,
                 block: 3,
+                look_milli: [0, 0, 1000],
             },
         },
         GameplayRequest {
@@ -742,7 +825,7 @@ pub fn common_gameplay_vectors() -> Vec<GameplayRequest> {
             dimension: 0,
             client_revision: 1,
             operation: GameplayOperation::Container {
-                action: 0,
+                action: ContainerAction::Open,
                 x: 8,
                 y: 80,
                 z: 8,
@@ -763,7 +846,7 @@ pub fn common_gameplay_vectors() -> Vec<GameplayRequest> {
             session_id: 7,
             dimension: 0,
             client_revision: 3,
-            operation: GameplayOperation::ItemUse { item: 1, count: 1 },
+            operation: GameplayOperation::ItemUse { item: crate::inventory::Item::Bread as u32, count: 1 },
         },
         GameplayRequest {
             request_id: 0x1005,
@@ -834,11 +917,11 @@ mod tests {
                 },
             });
         }
-        assert_eq!(session.cache_len(), RESPONSE_CACHE_CAPACITY);
         assert!(session.cached_response(0).is_none());
         assert!(session
             .cached_response(RESPONSE_CACHE_CAPACITY as u128)
             .is_some());
+        assert!(session.cached_response(1).is_some());
         let vectors = common_gameplay_vectors();
         assert_eq!(vectors.len(), 8);
         assert_eq!(vectors[0].request_id, 0x1001);

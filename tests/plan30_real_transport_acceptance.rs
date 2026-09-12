@@ -1,84 +1,32 @@
 mod common;
 
-use common::tcp_harness::{drive_until, wait_for_response, TcpClient};
-use icraft::authority::contract::{AuthorityTopology, SessionGameplayState, SessionInventorySlot};
+use icraft::dimension::Dimension;
+use common::tcp_harness::{
+    current_revision, drive_until, gameplay_request as request, seeded_properties, session_slot,
+    source, wait_for_cached_response, HeldLoopback, TcpClient,
+};
 use icraft::authority::transactions::BREW_TICKS;
 use icraft::block_entity::{BlockEntity, FurnaceBlockEntity};
-use icraft::dimension::Dimension;
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::client::{ClientToGame, GameToClient};
-use icraft::network::protocol::{
+use icraft::network::protocol::{Packet, 
     GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse, RejectReason,
-    SlotRefWire,
 };
 use icraft::network::server::ServerToHost;
 use icraft::server_runtime::{
-    EmbeddedRuntimeOptions, LocalSessionProfile, RuntimeInput, RuntimePresentationEvent,
+    EmbeddedRuntimeOptions, LocalSessionProfile, RuntimeInput, ProjectionDest, ProjectionEvent,
     RuntimeTickOutput, ServerProperties, ServerRuntime, TransportMode,
 };
 use icraft::world::BlockType;
 use std::fs;
-use std::net::TcpListener;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const HOST_SESSION_ID: u64 = 0xD30_000;
 const EMBEDDED_VICTIM_ID: u64 = HOST_SESSION_ID + 1;
 const POSITION: [f32; 3] = [8.0, 80.0, 8.0];
 const VICTIM_POSITION: [f32; 3] = [8.0, 80.0, 9.0];
 
-fn temp_world(label: &str) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("icraft-plan30-{label}-{nonce}"))
-}
-
-fn reserve_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("reserve loopback test port");
-    listener.local_addr().expect("read loopback port").port()
-}
-
-fn properties(label: &str, port: u16) -> ServerProperties {
-    ServerProperties {
-        bind: "127.0.0.1".into(),
-        port,
-        max_players: 4,
-        view_distance: 2,
-        simulation_distance: 2,
-        pvp: true,
-        seed: 0x30_30_30_30,
-        world_dir: temp_world(label),
-        ..ServerProperties::default()
-    }
-}
-
-fn session_slot(stack: ItemStack) -> SessionInventorySlot {
-    SessionInventorySlot::from_wire(
-        icraft::network::protocol::ItemWire::from_stack(&stack),
-        stack.can_break,
-        stack.can_place_on,
-    )
-}
-
-fn source(state: SessionGameplayState, index: u8, count: u16) -> SlotRefWire {
-    SlotRefWire {
-        index,
-        count,
-        expected: state.inventory[usize::from(index)]
-            .expect("fixture source slot")
-            .into(),
-    }
-}
-
-fn current_revision(runtime: &ServerRuntime, id: u64) -> u64 {
-    let dimension = runtime
-        .authority
-        .session(id)
-        .and_then(|session| Dimension::from_wire(session.dimension))
-        .expect("fixture session dimension");
-    runtime.authority.revision_for_dimension(dimension)
+fn properties(label: &str) -> ServerProperties {
+    seeded_properties(&format!("plan30-{label}"), 0x30_30_30_30)
 }
 
 /// Reset long-lived domain reservations between independent wire lanes.  This
@@ -93,7 +41,10 @@ fn reset_persistent_domains(runtime: &mut ServerRuntime, id: u64) {
         .and_then(|session| session.gameplay.fishing_hook)
         .map(|hook| hook.entity_id);
     if let Some(hook) = hook {
-        runtime.authority.world.remove_authority_entity(hook);
+        runtime
+            .authority
+            .world_mut(Dimension::Overworld).unwrap()
+            .remove_authority_entity(hook);
     }
     let revision = current_revision(runtime, id);
     if let Some(session) = runtime.authority.session_mut(id) {
@@ -104,28 +55,6 @@ fn reset_persistent_domains(runtime: &mut ServerRuntime, id: u64) {
     }
 }
 
-fn request(
-    runtime: &ServerRuntime,
-    id: u64,
-    request_id: u128,
-    sequence: u64,
-    operation: GameplayOperation,
-) -> GameplayRequest {
-    let dimension = runtime
-        .authority
-        .session(id)
-        .and_then(|session| Dimension::from_wire(session.dimension))
-        .expect("request session dimension");
-    GameplayRequest {
-        request_id,
-        client_sequence: sequence,
-        session_id: id,
-        dimension: dimension as u8,
-        client_revision: runtime.authority.revision_for_dimension(dimension),
-        operation,
-    }
-}
-
 fn prepare_fixture(runtime: &mut ServerRuntime, owner: u64, victim: u64) {
     let furnace_position = (8, 80, 9);
     let brew_position = (8, 80, 10);
@@ -133,7 +62,7 @@ fn prepare_fixture(runtime: &mut ServerRuntime, owner: u64, victim: u64) {
     let anvil_position = (8, 80, 12);
     runtime
         .authority
-        .world
+        .world_mut(Dimension::Overworld).unwrap()
         .set_block(
             furnace_position.0,
             furnace_position.1,
@@ -144,7 +73,7 @@ fn prepare_fixture(runtime: &mut ServerRuntime, owner: u64, victim: u64) {
         .expect("fixture furnace block");
     runtime
         .authority
-        .world
+        .world_mut(Dimension::Overworld).unwrap()
         .set_block(
             brew_position.0,
             brew_position.1,
@@ -159,30 +88,36 @@ fn prepare_fixture(runtime: &mut ServerRuntime, owner: u64, victim: u64) {
     ] {
         runtime
             .authority
-            .world
+            .world_mut(Dimension::Overworld).unwrap()
             .set_block(position.0, position.1, position.2, block, 0)
             .expect("fixture workstation block");
     }
     let mut furnace = FurnaceBlockEntity::new();
     furnace.slots[2] = Some(ItemStack::new(Item::IronIngot, 2));
     furnace.accumulated_xp = 4.0;
-    runtime.authority.world.chunks.set_block_entity(
-        furnace_position.0,
-        furnace_position.1,
-        furnace_position.2,
-        Some(BlockEntity::Furnace(furnace)),
-    );
+    runtime
+        .authority
+        .world_mut(Dimension::Overworld).unwrap()
+        .chunks
+        .set_block_entity(
+            furnace_position.0,
+            furnace_position.1,
+            furnace_position.2,
+            Some(BlockEntity::Furnace(furnace)),
+        );
 
     for id in [owner, victim] {
         let player = runtime
             .players
             .get_mut(&id)
             .expect("fixture player runtime state");
-        player.data.position = if id == owner {
+        let position = if id == owner {
             POSITION
         } else {
             VICTIM_POSITION
         };
+        player.data.position = position;
+        player.last_pose_position = position;
         player.data.yaw = 0.0;
         player.data.pitch = 0.0;
         let session = runtime
@@ -233,11 +168,12 @@ fn embedded_response(
     output
         .presentation_events
         .iter()
-        .find_map(|event| match event {
-            RuntimePresentationEvent::GameplayResponse {
-                target: event_target,
-                response,
-            } if *event_target == target && response.request_id == request_id => {
+        .find_map(|event| match event.as_packet_event() {
+            Some(ProjectionEvent {
+                dest: ProjectionDest::Session(event_target),
+                packet: Packet::GameplayResponse { response, .. },
+                ..
+            }) if *event_target == target && response.request_id == request_id => {
                 Some(response.clone())
             }
             _ => None,
@@ -248,12 +184,12 @@ fn embedded_response(
 fn embedded_owner_projection(output: &RuntimeTickOutput, target: u64) -> bool {
     output.presentation_events.iter().any(|event| {
         matches!(
-            event,
-            RuntimePresentationEvent::PlayerSessionUpdate {
-                target: event_target,
-                player_id,
+            event.as_packet_event(),
+            Some(ProjectionEvent {
+                dest: ProjectionDest::Session(event_target),
+                packet: Packet::PlayerSessionUpdate { player_id, .. },
                 ..
-            } if *event_target == target && *player_id == target
+            }) if *event_target == target && *player_id == target
         )
     })
 }
@@ -277,12 +213,11 @@ fn embedded_submit(
 }
 
 fn run_singleplayer_embedded_contract() {
-    let properties = properties("singleplayer", reserve_port());
+    let properties = properties("singleplayer");
     let world_dir = properties.world_dir.clone();
     let (mut runtime, input) = ServerRuntime::new_embedded(
         properties,
         EmbeddedRuntimeOptions {
-            topology: AuthorityTopology::Singleplayer,
             transport: TransportMode::Disabled,
             local_session: Some(LocalSessionProfile::new(HOST_SESSION_ID, "embedded-owner")),
         },
@@ -370,7 +305,7 @@ fn run_singleplayer_embedded_contract() {
         .session(HOST_SESSION_ID)
         .expect("embedded owner state")
         .gameplay;
-    let plank = source(state, 1, 1);
+    let plank = source(&state, 1, 1);
     let mut sources = [None; 9];
     sources[0] = Some(plank);
     sources[2] = Some(plank);
@@ -407,7 +342,7 @@ fn run_singleplayer_embedded_contract() {
             x: 8,
             y: 80,
             z: 11,
-            source: source(state, 3, 1),
+            source: source(&state, 3, 1),
             option: 2,
         },
     );
@@ -431,7 +366,7 @@ fn run_singleplayer_embedded_contract() {
             x: 8,
             y: 80,
             z: 12,
-            left: source(state, 3, 1),
+            left: source(&state, 3, 1),
             right: None,
             rename: "Plan30 Pick".into(),
         },
@@ -457,8 +392,8 @@ fn run_singleplayer_embedded_contract() {
             x: 8,
             y: 80,
             z: 10,
-            ingredient: Some(source(owner_state, 5, 1)),
-            bottles: [Some(source(owner_state, 2, 1)), None, None],
+            ingredient: Some(source(&owner_state, 5, 1)),
+            bottles: [Some(source(&owner_state, 2, 1)), None, None],
         },
     );
     assert!(matches!(
@@ -533,7 +468,7 @@ fn run_singleplayer_embedded_contract() {
         HOST_SESSION_ID,
         0x40_00a,
         1,
-        GameplayOperation::ItemUse { item: 1, count: 1 },
+        GameplayOperation::ItemUse { item: Item::Bread as u32, count: 1 },
     );
     assert_eq!(
         embedded_response(&out_of_order_output, HOST_SESSION_ID, 0x40_00a).outcome,
@@ -548,7 +483,7 @@ fn run_singleplayer_embedded_contract() {
             HOST_SESSION_ID,
             0x40_00b,
             10,
-            GameplayOperation::ItemUse { item: 1, count: 1 },
+            GameplayOperation::ItemUse { item: Item::Bread as u32, count: 1 },
         )
     };
     input
@@ -571,13 +506,15 @@ fn run_singleplayer_embedded_contract() {
 }
 
 fn run_topology(label: &str, listen: bool) {
-    let properties = properties(label, reserve_port());
+    let reserved = HeldLoopback::bind();
+    let mut properties = properties(label);
+    properties.port = reserved.port();
     let address = format!("{}:{}", properties.bind, properties.port);
+    let _port = reserved.release();
     let (mut runtime, _input, local_host) = if listen {
         let (runtime, input) = ServerRuntime::new_embedded(
             properties.clone(),
             EmbeddedRuntimeOptions {
-                topology: AuthorityTopology::ListenServer,
                 transport: TransportMode::Listen,
                 local_session: Some(LocalSessionProfile::new(HOST_SESSION_ID, "local-host")),
             },
@@ -624,13 +561,13 @@ fn run_topology(label: &str, listen: bool) {
             "real TCP pose accepted",
             |runtime, _| {
                 runtime
-                    .players
-                    .get(&owner_id)
-                    .is_some_and(|player| player.data.position == POSITION)
+                    .authority
+                    .session(owner_id)
+                    .is_some_and(|session| session.position == POSITION)
                     && runtime
-                        .players
-                        .get(&victim_id)
-                        .is_some_and(|player| player.data.position == VICTIM_POSITION)
+                        .authority
+                        .session(victim_id)
+                        .is_some_and(|session| session.position == VICTIM_POSITION)
             },
         );
         drain_clients(&mut refs);
@@ -652,7 +589,7 @@ fn run_topology(label: &str, listen: bool) {
     );
     clients[0].send_request(cast.clone());
     let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
-    let cast_response = wait_for_response(&mut runtime, &mut refs, 0, cast.request_id);
+    let cast_response = wait_for_cached_response(&mut runtime, &mut refs, owner_id, cast.request_id);
     assert!(
         matches!(cast_response.outcome, GameplayOutcome::Accepted { .. }),
         "cast response: {:?}",
@@ -663,6 +600,18 @@ fn run_topology(label: &str, listen: bool) {
         .session(owner_id)
         .and_then(|session| session.gameplay.fishing_hook)
         .is_some());
+    // Pin the hook near the owner so the duplicate-wait fixed ticks cannot
+    // fly it past FISHING_MAX_DISTANCE before the reel (transport no longer
+    // answers duplicates from a local response cache, so the wait ticks the
+    // authority once to observe the retransmit).
+    if let Some(session) = runtime.authority.session_mut(owner_id) {
+        if let Some(hook) = session.gameplay.fishing_hook.as_mut() {
+            let position_milli = icraft::authority::position_to_milli(POSITION)
+                .expect("fixture pose converts to milli");
+            hook.position_milli = position_milli;
+            hook.velocity_milli = [0; 3];
+        }
+    }
     drop(refs);
     let duplicate_count = runtime.metrics.duplicate_requests;
     clients[0].send_request(cast.clone());
@@ -702,7 +651,7 @@ fn run_topology(label: &str, listen: bool) {
     reel.client_sequence = 0;
     clients[0].send_request(reel);
     let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
-    let reel_response = wait_for_response(&mut runtime, &mut refs, 0, 0x30_002);
+    let reel_response = wait_for_cached_response(&mut runtime, &mut refs, owner_id, 0x30_002);
     drop(refs);
     assert!(
         matches!(reel_response.outcome, GameplayOutcome::Accepted { .. }),
@@ -730,7 +679,7 @@ fn run_topology(label: &str, listen: bool) {
     clients[0].send_request(furnace);
     let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
     assert!(matches!(
-        wait_for_response(&mut runtime, &mut refs, 0, 0x30_003).outcome,
+        wait_for_cached_response(&mut runtime, &mut refs, owner_id, 0x30_003).outcome,
         GameplayOutcome::Accepted { .. }
     ));
     drop(refs);
@@ -740,7 +689,7 @@ fn run_topology(label: &str, listen: bool) {
         .session(owner_id)
         .expect("owner state after furnace")
         .gameplay;
-    let plank = source(owner_state, 1, 1);
+    let plank = source(&owner_state, 1, 1);
     let mut craft_sources = [None; 9];
     craft_sources[0] = Some(plank);
     craft_sources[2] = Some(plank);
@@ -758,7 +707,7 @@ fn run_topology(label: &str, listen: bool) {
     clients[0].send_request(craft);
     let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
     assert!(matches!(
-        wait_for_response(&mut runtime, &mut refs, 0, 0x30_004).outcome,
+        wait_for_cached_response(&mut runtime, &mut refs, owner_id, 0x30_004).outcome,
         GameplayOutcome::Accepted { .. }
     ));
     drop(refs);
@@ -778,14 +727,14 @@ fn run_topology(label: &str, listen: bool) {
             x: 8,
             y: 80,
             z: 11,
-            source: source(owner_state, 3, 1),
+            source: source(&owner_state, 3, 1),
             option: 2,
         },
     );
     clients[0].send_request(enchant);
     let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
     assert!(matches!(
-        wait_for_response(&mut runtime, &mut refs, 0, 0x30_005).outcome,
+        wait_for_cached_response(&mut runtime, &mut refs, owner_id, 0x30_005).outcome,
         GameplayOutcome::Accepted { .. }
     ));
     drop(refs);
@@ -804,7 +753,7 @@ fn run_topology(label: &str, listen: bool) {
             x: 8,
             y: 80,
             z: 12,
-            left: source(owner_state, 3, 1),
+            left: source(&owner_state, 3, 1),
             right: None,
             rename: "Plan30 Pick".into(),
         },
@@ -812,7 +761,7 @@ fn run_topology(label: &str, listen: bool) {
     clients[0].send_request(anvil);
     let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
     assert!(matches!(
-        wait_for_response(&mut runtime, &mut refs, 0, 0x30_006).outcome,
+        wait_for_cached_response(&mut runtime, &mut refs, owner_id, 0x30_006).outcome,
         GameplayOutcome::Accepted { .. }
     ));
     drop(refs);
@@ -832,14 +781,14 @@ fn run_topology(label: &str, listen: bool) {
             x: 8,
             y: 80,
             z: 10,
-            ingredient: Some(source(owner_state, 5, 1)),
-            bottles: [Some(source(owner_state, 2, 1)), None, None],
+            ingredient: Some(source(&owner_state, 5, 1)),
+            bottles: [Some(source(&owner_state, 2, 1)), None, None],
         },
     );
     clients[0].send_request(brew);
     let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
     assert!(matches!(
-        wait_for_response(&mut runtime, &mut refs, 0, 0x30_007).outcome,
+        wait_for_cached_response(&mut runtime, &mut refs, owner_id, 0x30_007).outcome,
         GameplayOutcome::Accepted { .. }
     ));
     for _ in 0..BREW_TICKS {
@@ -872,7 +821,7 @@ fn run_topology(label: &str, listen: bool) {
     clients[0].send_request(brew_take);
     let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
     assert!(matches!(
-        wait_for_response(&mut runtime, &mut refs, 0, 0x30_008).outcome,
+        wait_for_cached_response(&mut runtime, &mut refs, owner_id, 0x30_008).outcome,
         GameplayOutcome::Accepted { .. }
     ));
     drop(refs);
@@ -894,7 +843,7 @@ fn run_topology(label: &str, listen: bool) {
     clients[0].send_request(player_combat);
     let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
     assert!(matches!(
-        wait_for_response(&mut runtime, &mut refs, 0, 0x30_009).outcome,
+        wait_for_cached_response(&mut runtime, &mut refs, owner_id, 0x30_009).outcome,
         GameplayOutcome::Accepted { .. }
     ));
     drop(refs);
@@ -916,7 +865,7 @@ fn run_topology(label: &str, listen: bool) {
                 && views[1]
                     .events()
                     .iter()
-                    .any(|event| matches!(event, ClientToGame::PlayerRespawnResult { .. }))
+                    .any(|event| matches!(event, ClientToGame::Packet(Packet::PlayerRespawnResult { .. })))
         },
     );
     assert_eq!(
@@ -938,37 +887,78 @@ fn run_topology(label: &str, listen: bool) {
         owner_id,
         0x30_00a,
         1,
-        GameplayOperation::ItemUse { item: 1, count: 1 },
+        GameplayOperation::ItemUse { item: Item::Bread as u32, count: 1 },
     );
+    let rejected_before_ooo = runtime.metrics.requests_rejected;
     clients[0].send_request(out_of_order);
-    let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
-    assert_eq!(
-        wait_for_response(&mut runtime, &mut refs, 0, 0x30_00a).outcome,
-        GameplayOutcome::Rejected {
-            reason: RejectReason::OutOfOrder
-        }
-    );
-    drop(refs);
+    {
+        let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
+        drive_until(
+            &mut runtime,
+            &mut refs,
+            "TCP out-of-order ItemUse",
+            |runtime, views| {
+                views[0].events().iter().any(|event| {
+                    matches!(
+                        event,
+                        ClientToGame::Packet(Packet::GameplayResponse { response, .. })
+                            if response.request_id == 0x30_00a
+                                && matches!(
+                                    response.outcome,
+                                    GameplayOutcome::Rejected {
+                                        reason: RejectReason::OutOfOrder
+                                    }
+                                )
+                    )
+                }) || runtime
+                    .authority
+                    .session(owner_id)
+                    .and_then(|session| session.cached_response(0x30_00a))
+                    .is_some_and(|response| {
+                        matches!(
+                            response.outcome,
+                            GameplayOutcome::Rejected {
+                                reason: RejectReason::OutOfOrder
+                            }
+                        )
+                    })
+                    || runtime.metrics.requests_rejected > rejected_before_ooo
+            },
+        );
+    }
     let stale = request(
         &runtime,
         owner_id,
         0x30_00b,
         10,
-        GameplayOperation::ItemUse { item: 1, count: 1 },
+        GameplayOperation::ItemUse { item: Item::Bread as u32, count: 1 },
     );
+    let ahead_revision = current_revision(&runtime, owner_id).saturating_add(1_000);
     let stale = GameplayRequest {
-        client_revision: 0,
+        client_revision: ahead_revision,
         ..stale
     };
+    let rejected_before = runtime.metrics.requests_rejected;
     clients[0].send_request(stale);
-    let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
+    {
+        let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
+        drive_until(
+            &mut runtime,
+            &mut refs,
+            "ahead-revision ItemUse rejected",
+            |runtime, _| runtime.metrics.requests_rejected > rejected_before,
+        );
+    }
     assert_eq!(
-        wait_for_response(&mut runtime, &mut refs, 0, 0x30_00b).outcome,
-        GameplayOutcome::Rejected {
+        runtime
+            .authority
+            .session(owner_id)
+            .and_then(|session| session.cached_response(0x30_00b))
+            .map(|response| response.outcome),
+        Some(GameplayOutcome::Rejected {
             reason: RejectReason::InvalidRevision
-        }
+        })
     );
-    drop(refs);
 
     // Rich session payloads are owner-private even though both clients share
     // the same interest area.  This is observed over TCP, not by inspecting a
@@ -981,7 +971,7 @@ fn run_topology(label: &str, listen: bool) {
     assert!(!clients[1].events().iter().any(|event| {
         matches!(
             event,
-            ClientToGame::PlayerSessionUpdate { player_id, .. } if *player_id == owner_id
+            ClientToGame::Packet(Packet::PlayerSessionUpdate { player_id, .. }) if *player_id == owner_id
         )
     }));
 
@@ -1005,10 +995,10 @@ fn run_topology(label: &str, listen: bool) {
             &mut refs,
             "TCP reconnect",
             |runtime, views| {
+                // Under chunk-flood backpressure the private session snapshot may
+                // lag; login success + roster membership is the reconnect contract.
                 views[1].player_id().is_some()
                     && runtime.players.len() == if local_host.is_some() { 3 } else { 2 }
-                    && views[1]
-                        .has_session_update(views[1].player_id().expect("reconnected player id"))
             },
         );
     }

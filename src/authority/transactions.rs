@@ -10,24 +10,13 @@ use crate::block_entity::FurnaceBlockEntity;
 use crate::brewing::brew;
 use crate::enchantment::{can_enchant, generate_options, AnvilState, EnchantmentSet};
 use crate::inventory::{Item, ItemStack};
-use crate::network::protocol::{ItemWire, SessionSlotWire, SlotRefWire, MAX_ANVIL_RENAME_BYTES};
+use crate::network::protocol::{ItemWire, RejectReason, SessionSlotWire, SlotRefWire, MAX_ANVIL_RENAME_BYTES};
 use crate::recipes::RecipeManager;
 use crate::world::BlockType;
 
 pub const BREW_TICKS: u16 = 200;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransactionError {
-    InvalidStation,
-    InvalidSource,
-    InvalidRecipe,
-    InventoryFull,
-    InsufficientItems,
-    InsufficientLevels,
-    Busy,
-    NotReady,
-    InvalidOperation,
-}
+// Transaction domain errors collapse to RejectReason::InvalidState (Wave 10 Plan 10).
 
 /// Small caller-built proof of the authoritative block at an already-gated
 /// position.  Bookshelf power is clamped here so downstream offer generation
@@ -79,10 +68,10 @@ impl WorkstationContext {
     fn require_block(
         self,
         expected: impl FnOnce(BlockType) -> bool,
-    ) -> Result<(), TransactionError> {
+    ) -> Result<(), RejectReason> {
         match self.block {
             Some(block) if self.position.is_some() && expected(block) => Ok(()),
-            _ => Err(TransactionError::InvalidStation),
+            _ => Err(RejectReason::InvalidState),
         }
     }
 }
@@ -119,15 +108,15 @@ pub enum BrewTick {
     Ready,
 }
 
-fn stack_from_source(source: SlotRefWire) -> Result<ItemStack, TransactionError> {
+fn stack_from_source(source: SlotRefWire) -> Result<ItemStack, RejectReason> {
     source
         .validate_bounds()
-        .map_err(|_| TransactionError::InvalidSource)?;
+        .map_err(|_| RejectReason::InvalidState)?;
     let mut stack = source
         .expected
         .item
         .to_stack()
-        .ok_or(TransactionError::InvalidSource)?;
+        .ok_or(RejectReason::InvalidState)?;
     stack.count = u32::from(source.count);
     stack.can_break = source.expected.can_break;
     stack.can_place_on = source.expected.can_place_on;
@@ -135,11 +124,9 @@ fn stack_from_source(source: SlotRefWire) -> Result<ItemStack, TransactionError>
 }
 
 fn slot_from_stack(stack: ItemStack) -> SessionInventorySlot {
-    SessionInventorySlot::from_wire(
-        ItemWire::from_stack(&stack),
-        stack.can_break,
-        stack.can_place_on,
-    )
+    SessionInventorySlot::from_stack(&stack).unwrap_or_else(|| {
+        SessionInventorySlot::from_wire(ItemWire::from_stack(&stack), stack.can_break, stack.can_place_on)
+    })
 }
 
 fn wire_from_stack(stack: ItemStack) -> SessionSlotWire {
@@ -153,14 +140,14 @@ fn wire_from_stack(stack: ItemStack) -> SessionSlotWire {
 fn exact_source(
     session: &SessionGameplayState,
     source: SlotRefWire,
-) -> Result<(), TransactionError> {
+) -> Result<(), RejectReason> {
     source
         .validate_bounds()
-        .map_err(|_| TransactionError::InvalidSource)?;
+        .map_err(|_| RejectReason::InvalidState)?;
     if session.slot_matches(source) {
         Ok(())
     } else {
-        Err(TransactionError::InvalidSource)
+        Err(RejectReason::InvalidState)
     }
 }
 
@@ -188,17 +175,17 @@ pub fn execute_craft(
     context: WorkstationContext,
     grid_size: u8,
     sources: [Option<SlotRefWire>; 9],
-) -> Result<CraftReceipt, TransactionError> {
+) -> Result<CraftReceipt, RejectReason> {
     let active_len = match grid_size {
         2 if context == WorkstationContext::personal_crafting() => 4,
         3 => {
             context.require_block(|block| block == BlockType::CraftingTable)?;
             9
         }
-        _ => return Err(TransactionError::InvalidStation),
+        _ => return Err(RejectReason::InvalidState),
     };
     if sources[active_len..].iter().any(Option::is_some) {
-        return Err(TransactionError::InvalidSource);
+        return Err(RejectReason::InvalidState);
     }
 
     let mut grid = [None; 9];
@@ -208,7 +195,7 @@ pub fn execute_craft(
             continue;
         };
         if source.count != 1 {
-            return Err(TransactionError::InvalidSource);
+            return Err(RejectReason::InvalidState);
         }
         exact_source(session, source)?;
         grid[index] = Some(stack_from_source(source)?);
@@ -216,15 +203,15 @@ pub fn execute_craft(
     }
 
     let output = recipes
-        .match_recipe(&grid[..active_len], usize::from(grid_size))
-        .ok_or(TransactionError::InvalidRecipe)?;
+        .match_crafting_recipe(&grid[..active_len], usize::from(grid_size))
+        .ok_or(RejectReason::InvalidState)?;
     let output_slot = slot_from_stack(output);
     let mut candidate = *session;
     if !candidate.consume_slots_exact(&debits) {
-        return Err(TransactionError::InvalidSource);
+        return Err(RejectReason::InvalidState);
     }
     if !candidate.add_slot(output_slot) {
-        return Err(TransactionError::InventoryFull);
+        return Err(RejectReason::InvalidState);
     }
     *session = candidate;
     Ok(CraftReceipt {
@@ -242,16 +229,16 @@ pub fn execute_furnace_take_output(
     furnace: &mut FurnaceBlockEntity,
     context: WorkstationContext,
     count: u16,
-) -> Result<FurnaceReceipt, TransactionError> {
-    context.require_block(|block| matches!(block, BlockType::Furnace | BlockType::FurnaceLit))?;
+) -> Result<FurnaceReceipt, RejectReason> {
+    context.require_block(|block| matches!(block, BlockType::Furnace))?;
     if count == 0 {
-        return Err(TransactionError::InvalidOperation);
+        return Err(RejectReason::InvalidState);
     }
     let Some(current_output) = furnace.slots[2] else {
-        return Err(TransactionError::InsufficientItems);
+        return Err(RejectReason::InvalidState);
     };
     if u32::from(count) > current_output.count {
-        return Err(TransactionError::InsufficientItems);
+        return Err(RejectReason::InvalidState);
     }
 
     let mut taken = current_output;
@@ -266,10 +253,10 @@ pub fn execute_furnace_take_output(
     let mut next_session = *session;
     let mut next_furnace = furnace.clone();
     if !next_session.add_slot(output_slot) {
-        return Err(TransactionError::InventoryFull);
+        return Err(RejectReason::InvalidState);
     }
     if !next_session.grant_experience(experience) {
-        return Err(TransactionError::InvalidOperation);
+        return Err(RejectReason::InvalidState);
     }
     let remaining = current_output.count - u32::from(count);
     next_furnace.slots[2] = (remaining > 0).then_some(ItemStack {
@@ -294,16 +281,16 @@ pub fn execute_enchant(
     context: WorkstationContext,
     source: SlotRefWire,
     option_index: u8,
-) -> Result<EnchantReceipt, TransactionError> {
+) -> Result<EnchantReceipt, RejectReason> {
     context.require_block(|block| block == BlockType::EnchantingTable)?;
     let option = usize::from(option_index);
     if option >= 3 || source.count != 1 {
-        return Err(TransactionError::InvalidOperation);
+        return Err(RejectReason::InvalidState);
     }
     exact_source(session, source)?;
     let mut input = stack_from_source(source)?;
     if !can_enchant(input.item) {
-        return Err(TransactionError::InvalidSource);
+        return Err(RejectReason::InvalidState);
     }
 
     let offers = generate_options(input.item, context.bookshelves, session.enchant_seed as u32);
@@ -313,13 +300,13 @@ pub fn execute_enchant(
 
     let mut candidate = *session;
     if !candidate.spend_levels(u32::from(selected.cost)) {
-        return Err(TransactionError::InsufficientLevels);
+        return Err(RejectReason::InvalidState);
     }
     if !candidate.remove_item(Item::LapisLazuli.to_u32(), u32::from(selected.lapis_cost)) {
-        return Err(TransactionError::InsufficientItems);
+        return Err(RejectReason::InvalidState);
     }
     if !candidate.replace_slot_exact(source, Some(replacement)) {
-        return Err(TransactionError::InvalidSource);
+        return Err(RejectReason::InvalidState);
     }
     candidate.enchant_seed = candidate.enchant_seed.wrapping_add(0x9E37_79B9);
     *session = candidate;
@@ -339,14 +326,14 @@ pub fn start_brew(
     context: WorkstationContext,
     ingredient: SlotRefWire,
     bottles: [Option<SlotRefWire>; 3],
-) -> Result<(), TransactionError> {
+) -> Result<(), RejectReason> {
     context.require_block(|block| block == BlockType::BrewingStand)?;
-    let station = context.position.ok_or(TransactionError::InvalidStation)?;
+    let station = context.position.ok_or(RejectReason::InvalidState)?;
     if session.brew.is_some() {
-        return Err(TransactionError::Busy);
+        return Err(RejectReason::InvalidState);
     }
     if ingredient.count != 1 {
-        return Err(TransactionError::InvalidSource);
+        return Err(RejectReason::InvalidState);
     }
     exact_source(session, ingredient)?;
     let ingredient_item = stack_from_source(ingredient)?.item;
@@ -356,13 +343,13 @@ pub fn start_brew(
     seen[usize::from(ingredient.index)] = true;
     for bottle in bottles.iter().flatten().copied() {
         if bottle.count != 1 || seen[usize::from(bottle.index)] {
-            return Err(TransactionError::InvalidSource);
+            return Err(RejectReason::InvalidState);
         }
         seen[usize::from(bottle.index)] = true;
         exact_source(session, bottle)?;
         let stack = stack_from_source(bottle)?;
         if !matches!(stack.item, Item::Potion | Item::SplashPotion) {
-            return Err(TransactionError::InvalidSource);
+            return Err(RejectReason::InvalidState);
         }
         any_brewable |= stack
             .potion
@@ -370,7 +357,7 @@ pub fn start_brew(
             .is_some();
     }
     if !any_brewable {
-        return Err(TransactionError::InvalidRecipe);
+        return Err(RejectReason::InvalidState);
     }
 
     session.brew = Some(SessionBrewState {
@@ -387,14 +374,14 @@ pub fn start_brew(
 pub fn tick_brew(
     session: &mut SessionGameplayState,
     context: WorkstationContext,
-) -> Result<BrewTick, TransactionError> {
+) -> Result<BrewTick, RejectReason> {
     context.require_block(|block| block == BlockType::BrewingStand)?;
-    let station = context.position.ok_or(TransactionError::InvalidStation)?;
+    let station = context.position.ok_or(RejectReason::InvalidState)?;
     let Some(mut pending) = session.brew else {
-        return Err(TransactionError::InvalidOperation);
+        return Err(RejectReason::InvalidState);
     };
     if pending.station != station {
-        return Err(TransactionError::InvalidStation);
+        return Err(RejectReason::InvalidState);
     }
     if pending.remaining_ticks == 0 {
         return Ok(BrewTick::Ready);
@@ -415,15 +402,15 @@ pub fn tick_brew(
 pub fn take_brew(
     session: &mut SessionGameplayState,
     context: WorkstationContext,
-) -> Result<[Option<SessionInventorySlot>; 3], TransactionError> {
+) -> Result<[Option<SessionInventorySlot>; 3], RejectReason> {
     context.require_block(|block| block == BlockType::BrewingStand)?;
-    let station = context.position.ok_or(TransactionError::InvalidStation)?;
-    let pending = session.brew.ok_or(TransactionError::InvalidOperation)?;
+    let station = context.position.ok_or(RejectReason::InvalidState)?;
+    let pending = session.brew.ok_or(RejectReason::InvalidState)?;
     if pending.station != station {
-        return Err(TransactionError::InvalidStation);
+        return Err(RejectReason::InvalidState);
     }
     if pending.remaining_ticks != 0 {
-        return Err(TransactionError::NotReady);
+        return Err(RejectReason::InvalidState);
     }
 
     exact_source(session, pending.ingredient)?;
@@ -450,16 +437,16 @@ pub fn take_brew(
         outputs[index] = Some(SessionInventorySlot::from(replacement));
     }
     if outputs.iter().all(Option::is_none) {
-        return Err(TransactionError::InvalidRecipe);
+        return Err(RejectReason::InvalidState);
     }
 
     let mut candidate = *session;
     if !candidate.consume_slot_exact(pending.ingredient) {
-        return Err(TransactionError::InvalidSource);
+        return Err(RejectReason::InvalidState);
     }
     for replacement in replacements.into_iter().flatten() {
         if !candidate.replace_slot_exact(replacement.0, Some(replacement.1)) {
-            return Err(TransactionError::InvalidSource);
+            return Err(RejectReason::InvalidState);
         }
     }
     candidate.brew = None;
@@ -470,12 +457,12 @@ pub fn take_brew(
 pub fn cancel_brew(
     session: &mut SessionGameplayState,
     context: WorkstationContext,
-) -> Result<(), TransactionError> {
+) -> Result<(), RejectReason> {
     context.require_block(|block| block == BlockType::BrewingStand)?;
-    let station = context.position.ok_or(TransactionError::InvalidStation)?;
-    let pending = session.brew.ok_or(TransactionError::InvalidOperation)?;
+    let station = context.position.ok_or(RejectReason::InvalidState)?;
+    let pending = session.brew.ok_or(RejectReason::InvalidState)?;
     if pending.station != station {
-        return Err(TransactionError::InvalidStation);
+        return Err(RejectReason::InvalidState);
     }
     session.brew = None;
     Ok(())
@@ -489,16 +476,16 @@ pub fn execute_anvil(
     left: SlotRefWire,
     right: Option<SlotRefWire>,
     rename: &str,
-) -> Result<AnvilReceipt, TransactionError> {
+) -> Result<AnvilReceipt, RejectReason> {
     context.require_block(|block| block == BlockType::Anvil)?;
     if rename.as_bytes().len() > MAX_ANVIL_RENAME_BYTES || left.count != 1 {
-        return Err(TransactionError::InvalidOperation);
+        return Err(RejectReason::InvalidState);
     }
     if right.is_some_and(|source| source.count != 1) {
-        return Err(TransactionError::InvalidOperation);
+        return Err(RejectReason::InvalidState);
     }
     if right.is_some_and(|source| source.index == left.index) {
-        return Err(TransactionError::InvalidSource);
+        return Err(RejectReason::InvalidState);
     }
     exact_source(session, left)?;
     if let Some(source) = right {
@@ -512,21 +499,21 @@ pub fn execute_anvil(
         ..Default::default()
     };
     anvil.refresh();
-    let output = anvil.output.ok_or(TransactionError::InvalidRecipe)?;
+    let output = anvil.output.ok_or(RejectReason::InvalidState)?;
     let output_slot = slot_from_stack(output);
 
     let mut candidate = *session;
     if !candidate.spend_levels(u32::from(anvil.cost)) {
-        return Err(TransactionError::InsufficientLevels);
+        return Err(RejectReason::InvalidState);
     }
     let mut sources = Vec::with_capacity(2);
     sources.push(left);
     sources.extend(right);
     if !candidate.consume_slots_exact(&sources) {
-        return Err(TransactionError::InvalidSource);
+        return Err(RejectReason::InvalidState);
     }
     if !candidate.add_slot(output_slot) {
-        return Err(TransactionError::InventoryFull);
+        return Err(RejectReason::InvalidState);
     }
     *session = candidate;
     Ok(AnvilReceipt {
@@ -593,7 +580,7 @@ mod tests {
                 2,
                 grid,
             ),
-            Err(TransactionError::InventoryFull)
+            Err(RejectReason::InvalidState)
         );
         assert_eq!(session, before);
     }
@@ -618,7 +605,7 @@ mod tests {
                 2,
                 grid,
             ),
-            Err(TransactionError::InvalidSource)
+            Err(RejectReason::InvalidState)
         );
         assert_eq!(session, before);
     }
@@ -639,7 +626,7 @@ mod tests {
                 WorkstationContext::at([1, 2, 3], BlockType::CraftingTable),
                 2,
             ),
-            Err(TransactionError::InvalidStation)
+            Err(RejectReason::InvalidState)
         );
         assert_eq!(session, invalid_session);
         assert_eq!(furnace, invalid_furnace);
@@ -684,7 +671,7 @@ mod tests {
         let poor_source = source(&poor, 0, 1);
         assert_eq!(
             execute_enchant(&mut poor, context, poor_source, 2),
-            Err(TransactionError::InsufficientLevels)
+            Err(RejectReason::InvalidState)
         );
         assert_eq!(poor, before);
 
@@ -695,7 +682,7 @@ mod tests {
         let no_lapis_source = source(&no_lapis, 0, 1);
         assert_eq!(
             execute_enchant(&mut no_lapis, context, no_lapis_source, 2),
-            Err(TransactionError::InsufficientItems)
+            Err(RejectReason::InvalidState)
         );
         assert_eq!(no_lapis, before);
     }
@@ -746,7 +733,7 @@ mod tests {
         let before = stale;
         assert_eq!(
             take_brew(&mut stale, context),
-            Err(TransactionError::InvalidSource)
+            Err(RejectReason::InvalidState)
         );
         assert_eq!(stale, before);
     }
@@ -787,7 +774,7 @@ mod tests {
         let before = session;
         assert_eq!(
             execute_anvil(&mut session, context, aliased, Some(aliased), "Miner",),
-            Err(TransactionError::InvalidSource)
+            Err(RejectReason::InvalidState)
         );
         assert_eq!(session, before);
     }
@@ -808,7 +795,7 @@ mod tests {
                 None,
                 "1234567890123456789012345",
             ),
-            Err(TransactionError::InvalidOperation)
+            Err(RejectReason::InvalidState)
         );
         assert_eq!(session, before);
 

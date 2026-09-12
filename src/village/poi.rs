@@ -1,5 +1,9 @@
+#[cfg(test)]
 use crate::dimension::Dimension;
+use crate::world::chunk_xz;
+#[cfg(test)]
 use crate::world::BlockType;
+#[cfg(test)]
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -43,6 +47,8 @@ impl VillagerProfession {
     }
 }
 
+/// Presentation/test-only POI types. Authority never registers or claims POIs.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum PoiType {
     Bed,
@@ -50,12 +56,13 @@ pub enum PoiType {
     MeetingPoint,
 }
 
+#[cfg(test)]
 impl PoiType {
     pub fn from_block_type(block: BlockType) -> Option<Self> {
         match block {
             BlockType::Bed => Some(Self::Bed),
             BlockType::BrewingStand => Some(Self::JobSite(VillagerProfession::Cleric)),
-            BlockType::Furnace | BlockType::FurnaceLit | BlockType::Anvil => {
+            BlockType::Furnace | BlockType::Anvil => {
                 Some(Self::JobSite(VillagerProfession::Armorer))
             }
             BlockType::Bookshelf => Some(Self::JobSite(VillagerProfession::Librarian)),
@@ -67,6 +74,7 @@ impl PoiType {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PoiEntry {
     pub pos: (i32, i32, i32),
@@ -74,6 +82,7 @@ pub struct PoiEntry {
     pub owner_entity_id: Option<u64>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Village {
     pub id: u64,
@@ -84,6 +93,8 @@ pub struct Village {
     pub villager_ids: Vec<u64>,
 }
 
+/// Dead outside tests: constructed only on former State shells; ServerWorld never ticks it.
+#[cfg(test)]
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PoiManager {
     /// Maps (Dimension, (x, y, z)) -> PoiEntry
@@ -95,6 +106,7 @@ pub struct PoiManager {
     pub next_village_id: u64,
 }
 
+#[cfg(test)]
 impl PoiManager {
     pub fn new() -> Self {
         Self::default()
@@ -108,8 +120,7 @@ impl PoiManager {
         };
         self.pois.insert((dimension, pos), entry);
 
-        let cx = pos.0 >> 4;
-        let cz = pos.2 >> 4;
+        let (cx, cz) = chunk_xz(pos.0, pos.2);
         let positions = self.chunk_pois.entry((dimension, cx, cz)).or_default();
         if !positions.contains(&pos) {
             positions.push(pos);
@@ -119,8 +130,7 @@ impl PoiManager {
     pub fn remove_poi(&mut self, dimension: Dimension, pos: (i32, i32, i32)) -> Option<PoiEntry> {
         let removed = self.pois.remove(&(dimension, pos));
         if removed.is_some() {
-            let cx = pos.0 >> 4;
-            let cz = pos.2 >> 4;
+            let (cx, cz) = chunk_xz(pos.0, pos.2);
             if let Some(list) = self.chunk_pois.get_mut(&(dimension, cx, cz)) {
                 list.retain(|p| *p != pos);
             }

@@ -1,74 +1,53 @@
+mod common;
+
+use common::rejected_place::rejected_place;
+use common::tcp_harness::{session_slot, temp_world, HeldLoopback};
 use glam::Vec3;
-use icraft::authority::contract::{AuthorityTopology, SessionGameplayState, SessionInventorySlot};
+use icraft::authority::contract::SessionGameplayState;
 use icraft::authority::transactions::BREW_TICKS;
 use icraft::block_entity::{BlockEntity, FurnaceBlockEntity};
 use icraft::dimension::Dimension;
 use icraft::entity::EntityType;
 use icraft::inventory::{GameMode, Inventory};
-use icraft::network::protocol::{
-    GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse, ItemWire, RejectReason,
-    SlotRefWire,
+use icraft::network::protocol::{Packet, 
+    GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse,
+    ItemWire, RejectReason, SlotRefWire,
 };
 use icraft::server_runtime::{
-    EmbeddedRuntimeOptions, LocalSessionProfile, LocalSessionStorage, RuntimeInput,
-    RuntimePresentationEvent, RuntimeTickOutput, ServerProperties, ServerRuntime, TransportMode,
+    EmbeddedRuntimeOptions, LocalSessionProfile, LocalSessionStorage, ProjectionDest,
+    ProjectionEvent, RuntimeInput, RuntimeTickOutput, ServerProperties, ServerRuntime,
+    TransportMode,
 };
 use icraft::{
     player::PlayerState, save::LevelData, save::PlayerData, save::SaveManager, world::BlockType,
 };
 use std::fs;
-use std::net::TcpListener;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-fn temp_world(label: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("icraft_runtime_topology_{label}_{unique}"))
-}
-
-fn available_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("reserve an ephemeral test port");
-    listener.local_addr().unwrap().port()
-}
 
 fn properties(label: &str) -> ServerProperties {
     ServerProperties {
         bind: "127.0.0.1".into(),
-        port: available_port(),
-        world_dir: temp_world(label),
+        world_dir: temp_world(&format!("runtime-topology-{label}")),
         ..ServerProperties::default()
     }
 }
 
-fn block_request(session_id: u64, client_revision: u64, request_id: u128) -> GameplayRequest {
-    GameplayRequest {
-        request_id,
-        client_sequence: 1,
-        session_id,
-        dimension: Dimension::Overworld as u8,
-        client_revision,
-        operation: GameplayOperation::BlockUse {
-            x: 8,
-            y: 80,
-            z: 8,
-            block: 1,
-        },
-    }
+fn listen_properties(label: &str) -> ServerProperties {
+    let mut properties = properties(label);
+    properties.port = HeldLoopback::bind().release();
+    properties
 }
 
 fn response_for(
-    events: &[RuntimePresentationEvent],
+    events: &[icraft::server_runtime::PresentationEvent],
     target: u64,
     request_id: u128,
 ) -> Option<&GameplayResponse> {
-    events.iter().find_map(|event| match event {
-        RuntimePresentationEvent::GameplayResponse {
-            target: event_target,
-            response,
-        } if *event_target == target && response.request_id == request_id => Some(response),
+    events.iter().find_map(|event| match event.as_packet_event() {
+        Some(ProjectionEvent {
+            dest: ProjectionDest::Session(event_target),
+            packet: Packet::GameplayResponse { response, .. },
+            ..
+        }) if *event_target == target && response.request_id == request_id => Some(response),
         _ => None,
     })
 }
@@ -76,7 +55,7 @@ fn response_for(
 const TOPOLOGY_SESSION_ID: u64 = u64::MAX - 20;
 const TOPOLOGY_VICTIM_ID: u64 = u64::MAX - 21;
 
-struct TopologyHarness {
+struct EmbeddedVectorHarness {
     runtime: ServerRuntime,
     input: RuntimeInput,
     session_id: u64,
@@ -84,21 +63,14 @@ struct TopologyHarness {
     next_sequence: u64,
 }
 
-impl TopologyHarness {
-    fn new(label: &str, topology: AuthorityTopology, transport: TransportMode) -> Self {
+impl EmbeddedVectorHarness {
+    fn new(label: &str) -> Self {
         let mut properties = properties(label);
         properties.pvp = true;
-        // The network thread is part of the listen topology even though this
-        // vector drives the local session through the same bounded runtime
-        // input FIFO.  A reserved ephemeral port keeps parallel runs isolated.
-        if transport == TransportMode::Listen {
-            properties.port = available_port();
-        }
         let (mut runtime, input) = ServerRuntime::new_embedded(
             properties,
             EmbeddedRuntimeOptions {
-                topology,
-                transport,
+                transport: TransportMode::Disabled,
                 local_session: Some(LocalSessionProfile::new(TOPOLOGY_SESSION_ID, "vector")),
             },
         )
@@ -175,15 +147,7 @@ impl TopologyHarness {
     }
 }
 
-fn session_slot(stack: icraft::inventory::ItemStack) -> SessionInventorySlot {
-    SessionInventorySlot::from_wire(
-        ItemWire::from_stack(&stack),
-        stack.can_break,
-        stack.can_place_on,
-    )
-}
-
-fn prepare_topology_fixture(harness: &mut TopologyHarness) {
+fn prepare_topology_fixture(harness: &mut EmbeddedVectorHarness) {
     let furnace_position = [8, 80, 9];
     let brew_position = [8, 80, 10];
     let enchanting_position = [8, 80, 11];
@@ -197,7 +161,7 @@ fn prepare_topology_fixture(harness: &mut TopologyHarness) {
         harness
             .runtime
             .authority
-            .world
+            .world_mut(Dimension::Overworld).unwrap()
             .set_block(position[0], position[1], position[2], block, 0)
             .unwrap();
     }
@@ -207,12 +171,17 @@ fn prepare_topology_fixture(harness: &mut TopologyHarness) {
         2,
     ));
     furnace.accumulated_xp = 4.0;
-    harness.runtime.authority.world.chunks.set_block_entity(
-        furnace_position[0],
-        furnace_position[1],
-        furnace_position[2],
-        Some(BlockEntity::Furnace(furnace)),
-    );
+    harness
+        .runtime
+        .authority
+        .world_mut(Dimension::Overworld).unwrap()
+        .chunks
+        .set_block_entity(
+            furnace_position[0],
+            furnace_position[1],
+            furnace_position[2],
+            Some(BlockEntity::Furnace(furnace)),
+        );
 
     let mut gameplay = harness.session_state();
     gameplay.inventory[0] = Some(session_slot(icraft::inventory::ItemStack::new(
@@ -285,27 +254,31 @@ fn prepare_topology_fixture(harness: &mut TopologyHarness) {
         .set_session_gameplay(TOPOLOGY_VICTIM_ID, victim_gameplay));
 }
 
-fn prepare_dispenser_fixture(harness: &mut TopologyHarness) -> ItemWire {
+fn prepare_dispenser_fixture(harness: &mut EmbeddedVectorHarness) -> ItemWire {
     let source = (8, 80, 8);
     let front = (9, 80, 8);
     let lever = (7, 80, 8);
     harness
         .runtime
         .authority
-        .world
+        .world_mut(Dimension::Overworld).unwrap()
         .set_block(source.0, source.1, source.2, BlockType::Dispenser, 0)
         .unwrap();
     harness
         .runtime
         .authority
-        .world
+        .world_mut(Dimension::Overworld).unwrap()
         .set_block(front.0, front.1, front.2, BlockType::Air, 0)
         .unwrap();
     harness
         .runtime
         .authority
-        .world
-        .set_block(lever.0, lever.1, lever.2, BlockType::LeverOn, 0)
+        .world_mut(Dimension::Overworld).unwrap()
+        .set_block(lever.0, lever.1, lever.2, BlockType::Lever, {
+            let mut state = icraft::world::BlockState::default();
+            state.is_open = true;
+            state.encode()
+        })
         .unwrap();
 
     let mut stack = icraft::inventory::ItemStack::new(icraft::inventory::Item::Stone, 2)
@@ -315,7 +288,7 @@ fn prepare_dispenser_fixture(harness: &mut TopologyHarness) -> ItemWire {
     if let Some(BlockEntity::Dispenser(dispenser)) = harness
         .runtime
         .authority
-        .world
+        .world_mut(Dimension::Overworld).unwrap()
         .chunks
         .get_block_entity_mut(source.0, source.1, source.2)
     {
@@ -325,16 +298,18 @@ fn prepare_dispenser_fixture(harness: &mut TopologyHarness) -> ItemWire {
     } else {
         panic!("dispenser block entity fixture is missing");
     }
-    harness.runtime.authority.world.redstone.on_block_changed(
-        &harness.runtime.authority.world.chunks,
-        lever,
-        icraft::redstone::Direction::East,
-    );
-    harness.runtime.authority.world.redstone.on_block_changed(
-        &harness.runtime.authority.world.chunks,
-        source,
-        icraft::redstone::Direction::East,
-    );
+    {
+        let world = harness.runtime.authority.world_mut(Dimension::Overworld).unwrap();
+        world
+            .redstone
+            .on_block_changed(&world.chunks, lever, icraft::redstone::Direction::East);
+    }
+    {
+        let world = harness.runtime.authority.world_mut(Dimension::Overworld).unwrap();
+        world
+            .redstone
+            .on_block_changed(&world.chunks, source, icraft::redstone::Direction::East);
+    }
     assert!(harness
         .runtime
         .teleport_session(harness.session_id, [8.0, 80.0, 8.0]));
@@ -377,13 +352,12 @@ fn owner_session_update(
     output
         .presentation_events
         .iter()
-        .find_map(|event| match event {
-            RuntimePresentationEvent::PlayerSessionUpdate {
-                target,
-                player_id,
-                state,
+        .find_map(|event| match event.as_packet_event() {
+            Some(ProjectionEvent {
+                dest: ProjectionDest::Session(target),
+                packet: Packet::PlayerSessionUpdate { player_id, state, .. },
                 ..
-            } if *target == session_id && *player_id == session_id => Some(*state),
+            }) if *target == session_id && *player_id == session_id => Some(*state),
             _ => None,
         })
         .unwrap_or_else(|| panic!("missing owner PlayerSessionUpdate for {session_id}"))
@@ -391,26 +365,8 @@ fn owner_session_update(
 
 #[test]
 fn plan24_plan22_gameplay_vectors_match_all_runtime_topologies() {
-    for (label, topology, transport) in [
-        (
-            "vector_singleplayer",
-            AuthorityTopology::Singleplayer,
-            TransportMode::Disabled,
-        ),
-        (
-            "vector_listen",
-            AuthorityTopology::ListenServer,
-            TransportMode::Listen,
-        ),
-        (
-            "vector_dedicated",
-            AuthorityTopology::Dedicated,
-            TransportMode::Disabled,
-        ),
-    ] {
-        let mut harness = TopologyHarness::new(label, topology, transport);
-        prepare_topology_fixture(&mut harness);
-        assert_eq!(harness.runtime.authority.topology, topology);
+    let mut harness = EmbeddedVectorHarness::new("vector_embedded");
+    prepare_topology_fixture(&mut harness);
 
         // Fishing uses the offhand rod, so the combat sword remains selected.
         // The fixed-tick path owns hook creation and reel cleanup; a replay is
@@ -457,7 +413,10 @@ fn plan24_plan22_gameplay_vectors_match_all_runtime_topologies() {
         assert!(furnace_output
             .presentation_events
             .iter()
-            .any(|event| matches!(event, RuntimePresentationEvent::BlockEntityDelta { .. })));
+            .any(|event| matches!(
+                event.as_packet_event(),
+                Some(ProjectionEvent { packet: Packet::BlockEntityDelta { .. }, .. })
+            )));
 
         let plank = harness.source(1, 1);
         let mut craft_sources = [None; 9];
@@ -575,13 +534,13 @@ fn plan24_plan22_gameplay_vectors_match_all_runtime_topologies() {
         let target_entity = harness
             .runtime
             .authority
-            .world
+            .world_mut(Dimension::Overworld).unwrap()
             .entities
             .spawn(EntityType::Zombie, Vec3::new(8.0, 80.0, 9.0));
         harness
             .runtime
             .authority
-            .world
+            .world_mut(Dimension::Overworld).unwrap()
             .entities
             .get_by_id_mut(target_entity)
             .unwrap()
@@ -594,7 +553,7 @@ fn plan24_plan22_gameplay_vectors_match_all_runtime_topologies() {
         assert!(harness
             .runtime
             .authority
-            .world
+            .world_mut(Dimension::Overworld).unwrap()
             .entities
             .get_by_id(target_entity)
             .is_none());
@@ -718,9 +677,12 @@ fn plan24_plan22_gameplay_vectors_match_all_runtime_topologies() {
         let dimension_output = harness.runtime.tick_with_output().unwrap();
         assert!(dimension_output.presentation_events.iter().all(|event| {
             !matches!(
-                event,
-                RuntimePresentationEvent::PlayerSessionUpdate { target, dimension, .. }
-                    if *target == harness.session_id && *dimension != Dimension::Nether as u8
+                event.as_packet_event(),
+                Some(ProjectionEvent {
+                    dest: ProjectionDest::Session(target),
+                    packet: Packet::PlayerSessionUpdate { dimension, .. },
+                    ..
+                }) if *target == harness.session_id && *dimension != Dimension::Nether as u8
             )
         }));
 
@@ -740,82 +702,64 @@ fn plan24_plan22_gameplay_vectors_match_all_runtime_topologies() {
             .unwrap();
         let reconnect_output = harness.runtime.tick_with_output().unwrap();
         assert_eq!(
-            harness.runtime.players[&TOPOLOGY_VICTIM_ID].dimension,
+            harness.runtime.players[&TOPOLOGY_VICTIM_ID]
+                .interest
+                .dimension,
             Dimension::Nether
         );
         assert!(reconnect_output.presentation_events.iter().all(|event| {
             !matches!(
-                event,
-                RuntimePresentationEvent::PlayerSessionUpdate { target, player_id, .. }
-                    if *target == harness.session_id && *player_id == TOPOLOGY_VICTIM_ID
+                event.as_packet_event(),
+                Some(ProjectionEvent {
+                    dest: ProjectionDest::Session(target),
+                    packet: Packet::PlayerSessionUpdate { player_id, .. },
+                    ..
+                }) if *target == harness.session_id && *player_id == TOPOLOGY_VICTIM_ID
             )
         }));
-        harness.shutdown();
-    }
+    harness.shutdown();
 }
 
 #[test]
-fn plan28_dispenser_item_projection_matches_all_runtime_topologies() {
-    let mut baseline: Option<(u64, ItemWire)> = None;
-    for (label, topology, transport) in [
-        (
-            "dispenser_singleplayer",
-            AuthorityTopology::Singleplayer,
-            TransportMode::Disabled,
-        ),
-        (
-            "dispenser_listen",
-            AuthorityTopology::ListenServer,
-            TransportMode::Listen,
-        ),
-        (
-            "dispenser_dedicated",
-            AuthorityTopology::Dedicated,
-            TransportMode::Disabled,
-        ),
-    ] {
-        let mut harness = TopologyHarness::new(label, topology, transport);
-        let expected = prepare_dispenser_fixture(&mut harness);
-        let mut projection = None;
-        for _ in 0..8 {
-            let output = harness.runtime.tick_with_output().unwrap();
-            projection = output.presentation_events.into_iter().find_map(|event| {
-                let state = match event {
-                    RuntimePresentationEvent::EntitySpawn { target, state, .. }
-                    | RuntimePresentationEvent::EntityState { target, state, .. }
-                        if target == harness.session_id
-                            && state.entity_type == EntityType::DroppedItem.to_wire() =>
-                    {
-                        state
-                    }
-                    _ => return None,
-                };
-                state.item.map(|item| (state.entity_id, item))
-            });
-            if projection.is_some() {
-                break;
-            }
+fn plan28_dispenser_item_projection_matches_embedded_runtime() {
+    let mut harness = EmbeddedVectorHarness::new("dispenser_embedded");
+    let expected = prepare_dispenser_fixture(&mut harness);
+    let mut projection = None;
+    for _ in 0..8 {
+        let output = harness.runtime.tick_with_output().unwrap();
+        projection = output.presentation_events.into_iter().find_map(|event| {
+            let state = match event.as_packet_event() {
+                Some(ProjectionEvent {
+                    dest: ProjectionDest::Session(target),
+                    packet: Packet::EntitySpawn { state, .. } | Packet::EntityState { state, .. },
+                    ..
+                }) if *target == harness.session_id
+                    && state.entity_type == EntityType::DroppedItem.to_wire() =>
+                {
+                    *state
+                }
+                _ => return None,
+            };
+            state.item.map(|item| (state.entity_id, item))
+        });
+        if projection.is_some() {
+            break;
         }
-        let projection = projection
-            .unwrap_or_else(|| panic!("{topology:?} did not project dispenser output in {label}"));
-        assert_eq!(projection.1, expected);
-        if let Some(previous) = baseline {
-            assert_eq!(projection, previous, "topology projection diverged");
-        } else {
-            baseline = Some(projection);
-        }
-        let source_count = match harness.runtime.authority.world.get_block_entity(8, 80, 8) {
-            Some(BlockEntity::Dispenser(dispenser)) => {
-                dispenser.slots[0].map_or(0, |stack| stack.count)
-            }
-            _ => 0,
-        };
-        assert_eq!(
-            source_count, 1,
-            "powered edge must consume exactly one item"
-        );
-        harness.shutdown();
     }
+    let projection =
+        projection.unwrap_or_else(|| panic!("embedded runtime did not project dispenser output"));
+    assert_eq!(projection.1, expected);
+    let source_count = match harness.runtime.authority.world(Dimension::Overworld).get_block_entity(8, 80, 8) {
+        Some(BlockEntity::Dispenser(dispenser)) => {
+            dispenser.slots[0].map_or(0, |stack| stack.count)
+        }
+        _ => 0,
+    };
+    assert_eq!(
+        source_count, 1,
+        "powered edge must consume exactly one item"
+    );
+    harness.shutdown();
 }
 
 #[test]
@@ -829,27 +773,32 @@ fn disabled_singleplayer_drains_local_request_through_fixed_tick_fifo() {
     )
     .unwrap();
 
-    assert_eq!(runtime.authority.topology, AuthorityTopology::Singleplayer);
     assert_eq!(runtime.transport_mode(), TransportMode::Disabled);
     let revision = runtime
         .authority
         .revision_for_dimension(Dimension::Overworld);
+    let before = runtime.authority.world(Dimension::Overworld).get_block(8, 80, 8);
     input
-        .submit_request(local_id, block_request(local_id, revision, 41))
+        .submit_request(local_id, rejected_place(local_id, 41, 1, revision))
         .unwrap();
 
     // Publication is queued: authority state cannot change before the fixed
     // tick consumes the same bounded FIFO used by listen transport events.
-    assert_ne!(runtime.authority.world.get_block(8, 80, 8).to_wire(), 1);
+    assert_eq!(runtime.authority.world(Dimension::Overworld).get_block(8, 80, 8), before);
     let output = runtime.tick_with_output().unwrap();
     let response = response_for(&output.presentation_events, local_id, 41).unwrap();
-    assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
-    assert!(output
+    assert!(matches!(
+        response.outcome,
+        GameplayOutcome::Rejected {
+            reason: RejectReason::InvalidState
+        }
+    ));
+    assert!(!output
         .snapshot
         .mutations
         .iter()
-        .any(|mutation| mutation.position == (8, 80, 8) && mutation.block == 1));
-    assert_eq!(runtime.authority.world.get_block(8, 80, 8).to_wire(), 1);
+        .any(|mutation| mutation.position == (8, 80, 8)));
+    assert_eq!(runtime.authority.world(Dimension::Overworld).get_block(8, 80, 8), before);
     assert_eq!(runtime.metrics().queue_depth, 0);
     assert_eq!(runtime.metrics().queue_full, 0);
     assert_eq!(runtime.metrics().outbound_packets, 0);
@@ -861,7 +810,7 @@ fn disabled_singleplayer_drains_local_request_through_fixed_tick_fifo() {
 
 #[test]
 fn listen_runtime_routes_local_response_to_tick_output() {
-    let properties = properties("listen");
+    let properties = listen_properties("listen");
     let world_dir = properties.world_dir.clone();
     let local_id = u64::MAX - 2;
     let (mut runtime, input) = ServerRuntime::new_embedded(
@@ -870,22 +819,31 @@ fn listen_runtime_routes_local_response_to_tick_output() {
     )
     .unwrap();
 
-    assert_eq!(runtime.authority.topology, AuthorityTopology::ListenServer);
     assert_eq!(runtime.transport_mode(), TransportMode::Listen);
     let revision = runtime
         .authority
         .revision_for_dimension(Dimension::Overworld);
+    let before = runtime.authority.world(Dimension::Overworld).get_block(8, 80, 8);
     input
-        .submit_request(local_id, block_request(local_id, revision, 42))
+        .submit_request(local_id, rejected_place(local_id, 42, 1, revision))
         .unwrap();
     let output = runtime.tick_with_output().unwrap();
-    assert!(response_for(&output.presentation_events, local_id, 42)
-        .is_some_and(|response| matches!(response.outcome, GameplayOutcome::Accepted { .. })));
-    assert!(output
+    assert!(
+        response_for(&output.presentation_events, local_id, 42).is_some_and(|response| {
+            matches!(
+                response.outcome,
+                GameplayOutcome::Rejected {
+                    reason: RejectReason::InvalidState
+                }
+            )
+        })
+    );
+    assert!(!output
         .snapshot
         .mutations
         .iter()
         .any(|mutation| mutation.position == (8, 80, 8)));
+    assert_eq!(runtime.authority.world(Dimension::Overworld).get_block(8, 80, 8), before);
 
     runtime.shutdown().unwrap();
     drop(runtime);
@@ -894,10 +852,9 @@ fn listen_runtime_routes_local_response_to_tick_output() {
 
 #[test]
 fn legacy_constructor_remains_dedicated_listen_runtime() {
-    let properties = properties("dedicated");
+    let properties = listen_properties("dedicated");
     let world_dir = properties.world_dir.clone();
     let mut runtime = ServerRuntime::new(properties).unwrap();
-    assert_eq!(runtime.authority.topology, AuthorityTopology::Dedicated);
     assert_eq!(runtime.transport_mode(), TransportMode::Listen);
 
     runtime.tick().unwrap();
@@ -939,7 +896,7 @@ fn world_player_storage_loads_and_rewrites_legacy_player_dat() {
     .unwrap();
     let session = &runtime.players[&local_id];
     assert_eq!(session.storage, LocalSessionStorage::WorldPlayer);
-    assert_eq!(session.dimension, Dimension::Nether);
+    assert_eq!(session.interest.dimension, Dimension::Nether);
     assert_eq!(session.data.position, [13.0, 72.0, -9.0]);
     assert_eq!(
         runtime.authority.session(local_id).unwrap().game_mode,
@@ -962,7 +919,10 @@ fn world_player_storage_loads_and_rewrites_legacy_player_dat() {
         EmbeddedRuntimeOptions::singleplayer(LocalSessionProfile::new(restart_id, "legacy")),
     )
     .unwrap();
-    assert_eq!(restored.players[&restart_id].dimension, Dimension::End);
+    assert_eq!(
+        restored.players[&restart_id].interest.dimension,
+        Dimension::End
+    );
     assert_eq!(
         restored
             .authority

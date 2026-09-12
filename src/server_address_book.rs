@@ -5,7 +5,6 @@
 //! normal multiplayer client remains responsible for login.
 
 use crate::network::protocol::{Packet, PROTOCOL_VERSION};
-use crate::network::transport::Connection;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs;
@@ -248,40 +247,7 @@ impl ServerAddressBook {
                 limit: MAX_FILE_BYTES,
             });
         }
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(parent)?;
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| AddressBookError::Invalid("address book path has no filename".into()))?;
-        let temporary = parent.join(format!(".{file_name}.tmp-{}", std::process::id()));
-        // Refuse a pre-existing temporary symlink rather than following it.
-        if let Ok(metadata) = fs::symlink_metadata(&temporary) {
-            if metadata.file_type().is_symlink() {
-                return Err(AddressBookError::Invalid(
-                    "temporary address book path must not be a symlink".into(),
-                ));
-            }
-        }
-        fs::write(&temporary, bytes)?;
-        if let Err(error) = fs::rename(&temporary, path) {
-            if error.kind() == io::ErrorKind::AlreadyExists {
-                // Windows does not replace an existing file with rename.  The
-                // temporary file is complete before this fallback, so a
-                // failed remove/rename still leaves the prior book intact.
-                if let Err(remove_error) = fs::remove_file(path) {
-                    let _ = fs::remove_file(&temporary);
-                    return Err(remove_error.into());
-                }
-                if let Err(rename_error) = fs::rename(&temporary, path) {
-                    let _ = fs::remove_file(&temporary);
-                    return Err(rename_error.into());
-                }
-            } else {
-                let _ = fs::remove_file(&temporary);
-                return Err(error.into());
-            }
-        }
+        crate::save::atomic_write(path, &bytes)?;
         Ok(())
     }
 
@@ -396,6 +362,10 @@ fn valid_result(result: &ServerPingResult) -> bool {
 }
 
 fn ping_once(address: &str, timeout: Duration) -> ServerPingResult {
+    use crate::network::protocol::{Packet, MAX_PACKET_SIZE, PROTOCOL_VERSION};
+    use std::io::{Read, Write};
+    use std::net::{TcpStream, ToSocketAddrs};
+
     let timeout = timeout.clamp(Duration::from_millis(1), Duration::from_secs(5));
     let mut result = ServerPingResult {
         address: address.to_string(),
@@ -409,33 +379,57 @@ fn ping_once(address: &str, timeout: Duration) -> ServerPingResult {
         result.error = Some("address is empty or invalid".into());
         return result;
     }
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            result.error = Some(format!("runtime: {error}"));
-            return result;
+
+    let ping_helper = || -> io::Result<ServerPingResult> {
+        let addrs = address.to_socket_addrs()?;
+        let mut stream = None;
+        let mut last_err = None;
+        for addr in addrs {
+            match TcpStream::connect_timeout(&addr, timeout) {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(err) => last_err = Some(err),
+            }
         }
-    };
-    match runtime.block_on(async {
-        let stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(address))
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "connection timed out"))??;
-        let mut connection = Connection::new(stream);
-        tokio::time::timeout(
-            timeout,
-            connection.send(&Packet::ServerListPingRequest {
-                protocol_version: PROTOCOL_VERSION,
-            }),
-        )
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "ping send timed out"))??;
-        let packet = tokio::time::timeout(timeout, connection.recv())
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "ping response timed out"))??;
+        let mut stream = match stream {
+            Some(s) => s,
+            None => {
+                return Err(last_err.unwrap_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "could not resolve address")
+                }));
+            }
+        };
+
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        let _ = stream.set_nodelay(true);
+
+        let req_packet = Packet::ServerListPingRequest {
+            protocol_version: PROTOCOL_VERSION,
+        };
+        let frame = req_packet
+            .encode_frame()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        stream.write_all(&frame)?;
+
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf)?;
+        let frame_len = u32::from_be_bytes(len_buf) as usize;
+        if frame_len > MAX_PACKET_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("packet length {frame_len} exceeds maximum {MAX_PACKET_SIZE}"),
+            ));
+        }
+
+        let mut body = vec![0u8; frame_len];
+        stream.read_exact(&mut body)?;
+
+        let packet =
+            Packet::decode(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
         match packet {
             Packet::ServerListPingResponse {
                 protocol_version,
@@ -462,7 +456,9 @@ fn ping_once(address: &str, timeout: Duration) -> ServerPingResult {
                 format!("unexpected ping response: {packet:?}"),
             )),
         }
-    }) {
+    };
+
+    match ping_helper() {
         Ok(success) => success,
         Err(error) => {
             result.error = Some(error.to_string());
@@ -474,6 +470,7 @@ fn ping_once(address: &str, timeout: Duration) -> ServerPingResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::transport::Connection;
     use std::net::TcpListener;
     use std::thread;
 

@@ -1,6 +1,6 @@
 # Multiplayer Sub-task 2: Integrated Server Core
 
-> **Parent task:** [plans/p3/25_multiplayer.md](../../../plans/p3/25_multiplayer.md) (任務 25 - 多人遊戲)
+> **Parent task:** [plans/01_basic_gameplay/p3/25_multiplayer.md](../../../plans/01_basic_gameplay/p3/25_multiplayer.md) (任務 25 - 多人遊戲)
 > **Sub-task:** 2 of 6 - the authority/host side.
 > **Depends on:** Sub-task 1 (Protocol & Transport). **Blocks:** Sub-tasks 4, 5.
 >

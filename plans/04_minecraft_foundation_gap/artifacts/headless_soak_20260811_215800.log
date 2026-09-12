@@ -1,0 +1,118 @@
+warning: function `sound_bytes_are_decodable` is never used
+   --> src\audio.rs:158:4
+    |
+158 | fn sound_bytes_are_decodable(bytes: &[u8]) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: function `load_or_synthesize_sound` is never used
+   --> src\audio.rs:162:4
+    |
+162 | fn load_or_synthesize_sound(file_path: &Path, sound_id: SoundId) -> (Vec<u8>, bool) {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `surrounding_chunk_coords` is never used
+  --> src\chunk_manager.rs:91:15
+   |
+91 | pub(crate) fn surrounding_chunk_coords(cx: i32, cz: i32) -> [(i32, i32); 8] {
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `acknowledge_mesh_invalidation`, `drain_mesh_invalidations`, `acknowledge_section_mesh_invalidation`, and `drain_section_mesh_invalidations` are never used
+   --> src\chunk_manager.rs:165:19
+    |
+141 | impl ChunkManager {
+    | ----------------- methods in this implementation
+...
+165 |     pub(crate) fn acknowledge_mesh_invalidation(&mut self, coord: &(i32, i32)) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+169 |     pub(crate) fn drain_mesh_invalidations(&mut self) -> HashSet<(i32, i32)> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+173 |     pub(crate) fn acknowledge_section_mesh_invalidation(&mut self, key: &SectionKey) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+177 |     pub(crate) fn drain_section_mesh_invalidations(&mut self) -> HashSet<SectionKey> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `END_CITY_BASE_Y` is never used
+  --> src\dimension.rs:12:7
+   |
+12 | const END_CITY_BASE_Y: i32 = 71;
+   |       ^^^^^^^^^^^^^^^
+
+warning: associated function `broadcast_pose` is never used
+    --> src\network\server.rs:2969:14
+     |
+2966 | impl NetworkServer<std_mpsc::Sender<ServerToHost>> {
+     | -------------------------------------------------- associated function in this implementation
+...
+2969 |     async fn broadcast_pose(sessions: &Sessions, packet: Packet) {
+     |              ^^^^^^^^^^^^^^
+
+warning: method `record_cancel` is never used
+    --> src\save.rs:1633:19
+     |
+1604 | impl SaveQueueStats {
+     | ------------------- method in this implementation
+...
+1633 |     pub(crate) fn record_cancel(&self) {
+     |                   ^^^^^^^^^^^^^
+
+warning: function `get_interpolated_height` is never used
+   --> src\world.rs:135:4
+    |
+135 | fn get_interpolated_height(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `place_oak_tree` is never used
+   --> src\world.rs:173:4
+    |
+173 | fn place_oak_tree(
+    |    ^^^^^^^^^^^^^^
+
+warning: function `place_birch_tree` is never used
+   --> src\world.rs:224:4
+    |
+224 | fn place_birch_tree(
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `place_spruce_tree` is never used
+   --> src\world.rs:268:4
+    |
+268 | fn place_spruce_tree(
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: associated items `mesh_l0_volume`, `mesh_section_lod_from_halo`, and `generate_surface_mesh` are never used
+    --> src\world.rs:4082:8
+     |
+3527 | impl Chunk {
+     | ---------- associated items in this implementation
+...
+4082 |     fn mesh_l0_volume<F>(
+     |        ^^^^^^^^^^^^^^
+...
+4903 |     fn mesh_section_lod_from_halo(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+4996 |     fn generate_surface_mesh<F>(&self, get_block_at: F, step: usize) -> ChunkLodMeshData
+     |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `continent_noise` is never read
+ --> src\worldgen\density.rs:9:5
+  |
+7 | pub struct DensityField {
+  |            ------------ field in this struct
+8 |     /// Low-frequency continent/landmass noise.
+9 |     continent_noise: Perlin,
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `DensityField` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: `icraft` (lib) generated 13 warnings
+    Finished `release` profile [optimized] target(s) in 0.41s
+     Running `target\release\icraft-server.exe --config plans\04_minecraft_foundation_gap\artifacts\server.properties --world plans\04_minecraft_foundation_gap\artifacts\headless_soak_20260811_215800_world --bind 127.0.0.1 --port 56535 --ticks 36000`
+[icraft-server] starting 127.0.0.1:56535 world=plans\04_minecraft_foundation_gap\artifacts\headless_soak_20260811_215800_world seed=0 difficulty=normal pvp=true motd="iCraft server" max_players=20 view_distance=10 simulation_distance=8 whitelist=0 operators=0 online_mode=false
+[NetworkServer] Listening on 127.0.0.1:56535 (Seed: 0, Gamemode: 0)
+[icraft-server] metrics ticks=36000 players_online=0 loaded_chunks=1 entities=0 inbound_packets=0 inbound_bytes=0 outbound_packets=0 outbound_bytes=0 queue_depth=0 queue_full=0 requests_accepted=0 requests_rejected=0 duplicate_requests=0 saves=7 last_tick_us=25587 max_tick_us=26287 last_save_ms=25

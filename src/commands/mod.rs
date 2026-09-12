@@ -1,11 +1,16 @@
-//! Small, typed command surface used by the in-game chat dispatcher.
+//! Small, typed command surface used by session chat.
 //!
 //! This deliberately is not a Brigadier clone: parsing is deterministic,
 //! bounded, and produces typed arguments before any world mutation is
-//! attempted.  The executor in `State` remains the authority gate.
+//! attempted.
+//!
+//! Session commands are executed by `AuthorityCore::apply_command`. `State`
+//! chat is leftover / presentation-layer feedback and may still parse the same
+//! strings locally. The dedicated-server console is a separate admin surface
+//! and does not go through `commands::parse`. These three parsers stay distinct.
 
+use crate::game_rules::Difficulty;
 use crate::inventory::{GameMode, Item};
-use crate::menu::Difficulty;
 
 pub const MAX_COMMAND_BYTES: usize = 256;
 pub const MAX_COMMAND_ARGS: usize = 16;
@@ -69,6 +74,15 @@ pub enum WeatherCommand {
     Thunder(Option<u32>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandSurface {
+    /// Implemented by `AuthorityCore::apply_command` for session chat.
+    GameplayAllowed,
+    /// Parsed for desktop Help UI / dedicated console, but never executed on
+    /// the gameplay request path (always Reject Unsupported).
+    ConsoleOnly,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Help(Option<String>),
@@ -122,6 +136,27 @@ impl Command {
             Self::SaveAll => "save-all",
         }
     }
+
+    /// Whether session `GameplayOperation::Command` may execute this parse.
+    /// Desktop Help UI and dedicated console keep their own surfaces.
+    pub fn surface(&self) -> CommandSurface {
+        match self {
+            Self::GameMode { .. }
+            | Self::GameRule { .. }
+            | Self::Time(_)
+            | Self::Teleport { .. }
+            | Self::Give { .. } => CommandSurface::GameplayAllowed,
+            Self::Help(_)
+            | Self::Difficulty(_)
+            | Self::Weather(_)
+            | Self::Kill(_)
+            | Self::SpawnPoint { .. }
+            | Self::SetWorldSpawn(_)
+            | Self::Locate(_)
+            | Self::Seed
+            | Self::SaveAll => CommandSurface::ConsoleOnly,
+        }
+    }
 }
 
 fn parse_mode(token: &str, pos: usize) -> Result<GameMode, CommandError> {
@@ -138,13 +173,7 @@ fn parse_mode(token: &str, pos: usize) -> Result<GameMode, CommandError> {
 }
 
 fn parse_difficulty(token: &str, pos: usize) -> Result<Difficulty, CommandError> {
-    match token.to_ascii_lowercase().as_str() {
-        "peaceful" | "0" => Ok(Difficulty::Peaceful),
-        "easy" | "1" => Ok(Difficulty::Easy),
-        "normal" | "2" => Ok(Difficulty::Normal),
-        "hard" | "3" => Ok(Difficulty::Hard),
-        _ => Err(CommandError::new(pos, "unknown difficulty")),
-    }
+    Difficulty::parse_strict(token).ok_or_else(|| CommandError::new(pos, "unknown difficulty"))
 }
 
 fn parse_coordinate(token: &str, pos: usize) -> Result<i32, CommandError> {
@@ -408,6 +437,30 @@ pub fn help_text(command: Option<&str>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parser_marks_console_only_vs_gameplay_allowed() {
+        assert_eq!(
+            parse("/gamemode creative").unwrap().surface(),
+            CommandSurface::GameplayAllowed
+        );
+        assert_eq!(
+            parse("/give @s diamond 1").unwrap().surface(),
+            CommandSurface::GameplayAllowed
+        );
+        assert_eq!(
+            parse("/help").unwrap().surface(),
+            CommandSurface::ConsoleOnly
+        );
+        assert_eq!(
+            parse("/weather clear").unwrap().surface(),
+            CommandSurface::ConsoleOnly
+        );
+        assert_eq!(
+            parse("/kill @s").unwrap().surface(),
+            CommandSurface::ConsoleOnly
+        );
+    }
 
     #[test]
     fn parser_covers_typed_commands() {

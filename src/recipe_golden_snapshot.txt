@@ -1,0 +1,198 @@
+craft|crafting/anvil|3x3|0|Anvil|1
+  pattern|IronIngot,IronIngot,IronIngot;.,IronIngot,.;IronIngot,IronIngot,IronIngot
+craft|crafting/arrow|1x3|0|Arrow|4
+  pattern|Gravel;Stick;Feather
+craft|crafting/bed|3x2|0|Bed|1
+  pattern|Wool,Wool,Wool;OakPlanks,OakPlanks,OakPlanks
+craft|crafting/birch_planks|1x1|0|BirchPlanks|4
+  pattern|BirchLog
+craft|crafting/blaze_powder|0x0|1|BlazePowder|2
+  pattern|shapeless:BlazeRod
+craft|crafting/bone_meal|0x0|1|BoneMeal|3
+  pattern|shapeless:Bone
+craft|crafting/bread|3x1|0|Bread|1
+  pattern|Wheat,Wheat,Wheat
+craft|crafting/brewing_stand|3x2|0|BrewingStand|1
+  pattern|.,BlazePowder,.;Cobblestone,Cobblestone,Cobblestone
+craft|crafting/brick|2x2|0|Brick|4
+  pattern|Clay,Clay;Clay,Clay
+craft|crafting/chest_birch|3x3|0|Chest|1
+  pattern|BirchPlanks,BirchPlanks,BirchPlanks;BirchPlanks,.,BirchPlanks;BirchPlanks,BirchPlanks,BirchPlanks
+craft|crafting/chest_oak|3x3|0|Chest|1
+  pattern|OakPlanks,OakPlanks,OakPlanks;OakPlanks,.,OakPlanks;OakPlanks,OakPlanks,OakPlanks
+craft|crafting/chest_spruce|3x3|0|Chest|1
+  pattern|SprucePlanks,SprucePlanks,SprucePlanks;SprucePlanks,.,SprucePlanks;SprucePlanks,SprucePlanks,SprucePlanks
+craft|crafting/cobblestone_slab|3x1|0|CobblestoneSlab|6
+  pattern|Cobblestone,Cobblestone,Cobblestone
+craft|crafting/cobblestone_stair|3x3|0|CobblestoneStair|4
+  pattern|Cobblestone,.,.;Cobblestone,Cobblestone,.;Cobblestone,Cobblestone,Cobblestone
+craft|crafting/cobblestone_wall|3x2|0|CobblestoneWall|6
+  pattern|Cobblestone,Cobblestone,Cobblestone;Cobblestone,Cobblestone,Cobblestone
+craft|crafting/comparator|3x3|0|Comparator|1
+  pattern|.,RedstoneTorch,.;RedstoneTorch,RedstoneDust,RedstoneTorch;Stone,Stone,Stone
+craft|crafting/crafting_table_birch|2x2|0|CraftingTable|1
+  pattern|BirchPlanks,BirchPlanks;BirchPlanks,BirchPlanks
+craft|crafting/crafting_table_oak|2x2|0|CraftingTable|1
+  pattern|OakPlanks,OakPlanks;OakPlanks,OakPlanks
+craft|crafting/crafting_table_spruce|2x2|0|CraftingTable|1
+  pattern|SprucePlanks,SprucePlanks;SprucePlanks,SprucePlanks
+craft|crafting/diamond_axe|3x3|0|DiamondAxe|1
+  pattern|Diamond,Diamond,.;Diamond,Stick,.;.,Stick,.
+craft|crafting/diamond_boots|3x2|0|DiamondBoots|1
+  pattern|Diamond,.,Diamond;Diamond,.,Diamond
+craft|crafting/diamond_chestplate|3x3|0|DiamondChestplate|1
+  pattern|Diamond,.,Diamond;Diamond,Diamond,Diamond;Diamond,Diamond,Diamond
+craft|crafting/diamond_helmet|3x2|0|DiamondHelmet|1
+  pattern|Diamond,Diamond,Diamond;Diamond,.,Diamond
+craft|crafting/diamond_hoe|2x3|0|DiamondHoe|1
+  pattern|Diamond,Diamond;.,Stick;.,Stick
+craft|crafting/diamond_leggings|3x3|0|DiamondLeggings|1
+  pattern|Diamond,Diamond,Diamond;Diamond,.,Diamond;Diamond,.,Diamond
+craft|crafting/diamond_pickaxe|3x3|0|DiamondPickaxe|1
+  pattern|Diamond,Diamond,Diamond;.,Stick,.;.,Stick,.
+craft|crafting/diamond_shovel|1x3|0|DiamondShovel|1
+  pattern|Diamond;Stick;Stick
+craft|crafting/diamond_sword|1x3|0|DiamondSword|1
+  pattern|Diamond;Diamond;Stick
+craft|crafting/dispenser|3x3|0|Dispenser|1
+  pattern|Cobblestone,Cobblestone,Cobblestone;Cobblestone,Bow,Cobblestone;Cobblestone,RedstoneDust,Cobblestone
+craft|crafting/dropper|3x3|0|Dropper|1
+  pattern|Cobblestone,Cobblestone,Cobblestone;Cobblestone,.,Cobblestone;Cobblestone,RedstoneDust,Cobblestone
+craft|crafting/enchanting_table|3x3|0|EnchantingTable|1
+  pattern|.,Bookshelf,.;Diamond,.,Diamond;Obsidian,Obsidian,Obsidian
+craft|crafting/end_crystal|3x3|0|EndCrystal|1
+  pattern|Glass,Glass,Glass;Glass,EyeOfEnder,Glass;Glass,GhastTear,Glass
+craft|crafting/eye_of_ender|0x0|1|EyeOfEnder|1
+  pattern|shapeless:Diamond,BlazePowder
+craft|crafting/flint_and_steel|0x0|1|FlintAndSteel|1
+  pattern|shapeless:Gravel,IronIngot
+craft|crafting/furnace|3x3|0|Furnace|1
+  pattern|Cobblestone,Cobblestone,Cobblestone;Cobblestone,.,Cobblestone;Cobblestone,Cobblestone,Cobblestone
+craft|crafting/glass_bottle|3x2|0|GlassBottle|3
+  pattern|Glass,.,Glass;.,Glass,.
+craft|crafting/glass_pane|3x2|0|GlassPane|16
+  pattern|Glass,Glass,Glass;Glass,Glass,Glass
+craft|crafting/glowstone|2x2|0|Glowstone|1
+  pattern|GlowstoneDust,GlowstoneDust;GlowstoneDust,GlowstoneDust
+craft|crafting/golden_hoe|2x3|0|GoldenHoe|1
+  pattern|GoldIngot,GoldIngot;.,Stick;.,Stick
+craft|crafting/iron_axe|3x3|0|IronAxe|1
+  pattern|IronIngot,IronIngot,.;IronIngot,Stick,.;.,Stick,.
+craft|crafting/iron_boots|3x2|0|IronBoots|1
+  pattern|IronIngot,.,IronIngot;IronIngot,.,IronIngot
+craft|crafting/iron_chestplate|3x3|0|IronChestplate|1
+  pattern|IronIngot,.,IronIngot;IronIngot,IronIngot,IronIngot;IronIngot,IronIngot,IronIngot
+craft|crafting/iron_helmet|3x2|0|IronHelmet|1
+  pattern|IronIngot,IronIngot,IronIngot;IronIngot,.,IronIngot
+craft|crafting/iron_hoe|2x3|0|IronHoe|1
+  pattern|IronIngot,IronIngot;.,Stick;.,Stick
+craft|crafting/iron_leggings|3x3|0|IronLeggings|1
+  pattern|IronIngot,IronIngot,IronIngot;IronIngot,.,IronIngot;IronIngot,.,IronIngot
+craft|crafting/iron_pickaxe|3x3|0|IronPickaxe|1
+  pattern|IronIngot,IronIngot,IronIngot;.,Stick,.;.,Stick,.
+craft|crafting/iron_shovel|1x3|0|IronShovel|1
+  pattern|IronIngot;Stick;Stick
+craft|crafting/iron_sword|1x3|0|IronSword|1
+  pattern|IronIngot;IronIngot;Stick
+craft|crafting/leather_boots|3x2|0|LeatherBoots|1
+  pattern|Leather,.,Leather;Leather,.,Leather
+craft|crafting/leather_chestplate|3x3|0|LeatherChestplate|1
+  pattern|Leather,.,Leather;Leather,Leather,Leather;Leather,Leather,Leather
+craft|crafting/leather_helmet|3x2|0|LeatherHelmet|1
+  pattern|Leather,Leather,Leather;Leather,.,Leather
+craft|crafting/leather_leggings|3x3|0|LeatherLeggings|1
+  pattern|Leather,Leather,Leather;Leather,.,Leather;Leather,.,Leather
+craft|crafting/lever|1x2|0|Lever|1
+  pattern|Stick;Cobblestone
+craft|crafting/note_block|3x3|0|NoteBlock|1
+  pattern|OakPlanks,OakPlanks,OakPlanks;OakPlanks,RedstoneDust,OakPlanks;OakPlanks,OakPlanks,OakPlanks
+craft|crafting/oak_door|2x3|0|OakDoor|3
+  pattern|OakPlanks,OakPlanks;OakPlanks,OakPlanks;OakPlanks,OakPlanks
+craft|crafting/oak_fence|3x2|0|OakFence|3
+  pattern|OakPlanks,Stick,OakPlanks;OakPlanks,Stick,OakPlanks
+craft|crafting/oak_fence_gate|3x2|0|OakFenceGate|1
+  pattern|Stick,OakPlanks,Stick;Stick,OakPlanks,Stick
+craft|crafting/oak_ladder|3x3|0|OakLadder|3
+  pattern|Stick,.,Stick;Stick,Stick,Stick;Stick,.,Stick
+craft|crafting/oak_planks|1x1|0|OakPlanks|4
+  pattern|OakLog
+craft|crafting/oak_sign|3x3|0|OakSign|3
+  pattern|OakPlanks,OakPlanks,OakPlanks;OakPlanks,OakPlanks,OakPlanks;.,Stick,.
+craft|crafting/oak_slab|3x1|0|OakSlab|6
+  pattern|OakPlanks,OakPlanks,OakPlanks
+craft|crafting/oak_stair|3x3|0|OakStair|4
+  pattern|OakPlanks,.,.;OakPlanks,OakPlanks,.;OakPlanks,OakPlanks,OakPlanks
+craft|crafting/oak_trapdoor|3x2|0|OakTrapdoor|2
+  pattern|OakPlanks,OakPlanks,OakPlanks;OakPlanks,OakPlanks,OakPlanks
+craft|crafting/piston|3x3|0|Piston|1
+  pattern|OakPlanks,OakPlanks,OakPlanks;Cobblestone,IronIngot,Cobblestone;Cobblestone,RedstoneDust,Cobblestone
+craft|crafting/pressure_plate|2x1|0|PressurePlate|1
+  pattern|Stone,Stone
+craft|crafting/redstone_lamp|3x3|0|RedstoneLamp|1
+  pattern|.,RedstoneDust,.;RedstoneDust,GlowstoneDust,RedstoneDust;.,RedstoneDust,.
+craft|crafting/redstone_torch|1x2|0|RedstoneTorch|1
+  pattern|RedstoneDust;Stick
+craft|crafting/redstone_wire|0x0|1|RedstoneWire|1
+  pattern|shapeless:RedstoneDust
+craft|crafting/repeater|3x2|0|Repeater|1
+  pattern|RedstoneTorch,RedstoneDust,RedstoneTorch;Stone,Stone,Stone
+craft|crafting/sandstone|2x2|0|Sandstone|4
+  pattern|Sand,Sand;Sand,Sand
+craft|crafting/shield|3x3|0|Shield|1
+  pattern|OakPlanks,IronIngot,OakPlanks;OakPlanks,OakPlanks,OakPlanks;.,OakPlanks,.
+craft|crafting/snow_block|2x2|0|Snow|1
+  pattern|Snow,Snow;Snow,Snow
+craft|crafting/spruce_planks|1x1|0|SprucePlanks|4
+  pattern|SpruceLog
+craft|crafting/stick_birch|1x2|0|Stick|4
+  pattern|BirchPlanks;BirchPlanks
+craft|crafting/stick_oak|1x2|0|Stick|4
+  pattern|OakPlanks;OakPlanks
+craft|crafting/stick_spruce|1x2|0|Stick|4
+  pattern|SprucePlanks;SprucePlanks
+craft|crafting/sticky_piston|0x0|1|StickyPiston|1
+  pattern|shapeless:SugarCane,Piston
+craft|crafting/stone_axe|3x3|0|StoneAxe|1
+  pattern|Cobblestone,Cobblestone,.;Cobblestone,Stick,.;.,Stick,.
+craft|crafting/stone_brick|2x2|0|StoneBrick|4
+  pattern|Stone,Stone;Stone,Stone
+craft|crafting/stone_button|0x0|1|StoneButton|1
+  pattern|shapeless:Stone
+craft|crafting/stone_hoe|2x3|0|StoneHoe|1
+  pattern|Cobblestone,Cobblestone;.,Stick;.,Stick
+craft|crafting/stone_pickaxe|3x3|0|StonePickaxe|1
+  pattern|Cobblestone,Cobblestone,Cobblestone;.,Stick,.;.,Stick,.
+craft|crafting/stone_shovel|1x3|0|StoneShovel|1
+  pattern|Cobblestone;Stick;Stick
+craft|crafting/stone_sword|1x3|0|StoneSword|1
+  pattern|Cobblestone;Cobblestone;Stick
+craft|crafting/sugar|0x0|1|Sugar|1
+  pattern|shapeless:SugarCane
+craft|crafting/tnt|3x3|0|TNT|1
+  pattern|Redstone,Sand,Redstone;Sand,Redstone,Sand;Redstone,Sand,Redstone
+craft|crafting/torch|1x2|0|Torch|4
+  pattern|Coal;Stick
+craft|crafting/wooden_axe|2x3|0|WoodenAxe|1
+  pattern|OakPlanks,OakPlanks;OakPlanks,Stick;.,Stick
+craft|crafting/wooden_hoe|2x3|0|WoodenHoe|1
+  pattern|OakPlanks,OakPlanks;.,Stick;.,Stick
+craft|crafting/wooden_pickaxe|3x3|0|WoodenPickaxe|1
+  pattern|OakPlanks,OakPlanks,OakPlanks;.,Stick,.;.,Stick,.
+craft|crafting/wooden_shovel|1x3|0|WoodenShovel|1
+  pattern|OakPlanks;Stick;Stick
+craft|crafting/wooden_sword|1x3|0|WoodenSword|1
+  pattern|OakPlanks;OakPlanks;Stick
+smelt|smelting/baked_potato|Potato|BakedPotato|1|200|0.350
+smelt|smelting/brick|Clay|Brick|1|200|0.300
+smelt|smelting/charcoal_birch|BirchLog|Coal|1|200|0.150
+smelt|smelting/charcoal_oak|OakLog|Coal|1|200|0.150
+smelt|smelting/charcoal_spruce|SpruceLog|Coal|1|200|0.150
+smelt|smelting/cooked_beef|RawBeef|CookedBeef|1|200|0.350
+smelt|smelting/cooked_chicken|RawChicken|CookedChicken|1|200|0.350
+smelt|smelting/cooked_mutton|RawMutton|CookedMutton|1|200|0.350
+smelt|smelting/cooked_porkchop|RawPorkchop|CookedPorkchop|1|200|0.350
+smelt|smelting/glass|Sand|Glass|1|200|0.100
+smelt|smelting/gold_ingot|GoldOre|GoldIngot|1|200|1.000
+smelt|smelting/iron_ingot|IronOre|IronIngot|1|200|0.700
+smelt|smelting/nether_brick|Netherrack|NetherBrick|1|200|0.100
+smelt|smelting/stone|Cobblestone|Stone|1|200|0.100

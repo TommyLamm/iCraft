@@ -46,67 +46,6 @@ impl Language {
     }
 }
 
-pub const REQUIRED_KEYS: &[&str] = &[
-    "menu.singleplayer",
-    "menu.multiplayer",
-    "menu.options",
-    "menu.quit_game",
-    "menu.select_world",
-    "menu.controls",
-    "menu.accessibility",
-    "menu.resource_packs",
-    "menu.done",
-    "menu.back",
-    "menu.apply",
-    "menu.reload",
-    "menu.create_world",
-    "menu.cancel",
-    "menu.enter_valid_multiplayer",
-    "menu.world_copied",
-    "menu.world_backed_up",
-    "menu.language",
-    "menu.ui_scale",
-    "menu.chat_scale",
-    "menu.chat_opacity",
-    "menu.subtitles",
-    "menu.high_contrast",
-    "menu.reduce_flashing",
-    "menu.toggle_sprint",
-    "menu.toggle_sneak",
-    "menu.camera_bobbing",
-    "menu.damage_tilt",
-    "hud.subtitle.direction_left",
-    "hud.subtitle.direction_right",
-    "hud.subtitle.direction_front",
-    "hud.subtitle.direction_back",
-    "hud.subtitle.center",
-    "sound.jump",
-    "sound.hurt",
-    "sound.death",
-    "sound.explosion",
-    "sound.thunder",
-    "sound.arrow",
-    "sound.creeper",
-    "sound.ui_click",
-    "sound.block",
-    "death.fall",
-    "death.void",
-    "death.starved",
-    "death.mob",
-    "death.explosion",
-    "death.drowned",
-    "death.lightning",
-    "death.generic",
-    "command.feedback",
-    "disconnect.generic",
-    "advancement.toast",
-];
-
-/// Stable player-facing labels covered by the catalog contract.  This list is
-/// intentionally bounded to interactive menu/HUD/inventory/station surfaces
-/// and stable command status templates; branding, diagnostics, command
-/// grammar/help, raw user input, and dynamic item/entity names remain outside
-/// the zero-literal goal.
 pub const VISIBLE_REQUIRED_KEYS: &[&str] = &[
     "menu.singleplayer",
     "menu.multiplayer",
@@ -175,6 +114,22 @@ pub const VISIBLE_REQUIRED_KEYS: &[&str] = &[
     "menu.control_sprint",
     "menu.control_sneak",
     "menu.control_inventory",
+    "menu.control_chat",
+    "menu.control_time_speed",
+    "menu.control_advancements",
+    "menu.control_debug",
+    "menu.control_perspective",
+    "menu.control_gamemode",
+    "menu.control_pause",
+    "menu.control_hotbar_1",
+    "menu.control_hotbar_2",
+    "menu.control_hotbar_3",
+    "menu.control_hotbar_4",
+    "menu.control_hotbar_5",
+    "menu.control_hotbar_6",
+    "menu.control_hotbar_7",
+    "menu.control_hotbar_8",
+    "menu.control_hotbar_9",
     "hud.save_failed",
     "hud.retry",
     "hud.quit_without_saving",
@@ -315,7 +270,7 @@ impl TranslationCatalog {
     }
 
     pub fn translate(&mut self, key: &str) -> String {
-        let value = self.lookup(key);
+        let value = self.lookup(key).to_string();
         if self.active.contains_key(key) {
             return value;
         }
@@ -341,7 +296,7 @@ impl TranslationCatalog {
         if value == key {
             display_name.to_string()
         } else {
-            value
+            value.to_string()
         }
     }
 
@@ -361,33 +316,23 @@ impl TranslationCatalog {
     /// Read a translated value without mutating missing-key diagnostics. UI
     /// render methods use this immutable view while the catalog remains
     /// owned by the menu/state runtime.
-    pub fn lookup(&self, key: &str) -> String {
+    pub fn lookup<'a>(&'a self, key: &'a str) -> &'a str {
         self.active
             .get(key)
             .or_else(|| self.english.get(key))
-            .cloned()
-            .unwrap_or_else(|| key.to_string())
+            .map(String::as_str)
+            .unwrap_or(key)
     }
 
     pub fn format(&mut self, key: &str, arguments: &[(&str, &str)]) -> String {
-        let mut value = self.translate(key);
-        for (name, replacement) in arguments {
-            let token = format!("{{{name}}}");
-            value = value.replace(&token, replacement);
-        }
-        value
+        replace_tokens(self.translate(key), arguments)
     }
 
     /// Format a visible UI string without mutating the missing-key diagnostic
     /// set. Render paths are called every frame, so they use this immutable
     /// helper while command/test paths may continue to use `format`.
     pub fn format_lookup(&self, key: &str, arguments: &[(&str, &str)]) -> String {
-        let mut value = self.lookup(key);
-        for (name, replacement) in arguments {
-            let token = format!("{{{name}}}");
-            value = value.replace(&token, replacement);
-        }
-        value
+        replace_tokens(self.lookup(key).to_string(), arguments)
     }
 
     pub fn plural(&mut self, key: &str, count: u64) -> String {
@@ -405,25 +350,6 @@ impl TranslationCatalog {
         let mut missing = self.missing.iter().cloned().collect::<Vec<_>>();
         missing.sort();
         missing
-    }
-
-    pub fn coverage(&self) -> f32 {
-        if REQUIRED_KEYS.is_empty() {
-            return 1.0;
-        }
-        REQUIRED_KEYS
-            .iter()
-            .filter(|key| self.active.contains_key(**key))
-            .count() as f32
-            / REQUIRED_KEYS.len() as f32
-    }
-
-    pub fn validate_required_keys(&self) -> Vec<String> {
-        REQUIRED_KEYS
-            .iter()
-            .filter(|key| !self.english.contains_key(**key))
-            .map(|key| (*key).to_string())
-            .collect()
     }
 
     pub fn visible_coverage(&self) -> f32 {
@@ -450,13 +376,13 @@ fn parse_map(json: &str) -> Result<HashMap<String, String>, serde_json::Error> {
     serde_json::from_str(json)
 }
 
-fn merge_locale_layers(layers: Vec<Vec<u8>>) -> HashMap<String, String> {
+fn merge_locale_layers(layers: Vec<std::sync::Arc<[u8]>>) -> HashMap<String, String> {
     let mut merged = HashMap::new();
     for bytes in layers.into_iter().rev() {
-        let Ok(text) = String::from_utf8(bytes) else {
+        let Ok(text) = std::str::from_utf8(&bytes) else {
             continue;
         };
-        let Ok(layer) = parse_map(&text) else {
+        let Ok(layer) = parse_map(text) else {
             continue;
         };
         merged.extend(layer);
@@ -466,24 +392,15 @@ fn merge_locale_layers(layers: Vec<Vec<u8>>) -> HashMap<String, String> {
 
 fn key_component(value: &str) -> String {
     let mut key = String::with_capacity(value.len());
-    let mut previous_separator = false;
     for ch in value.chars() {
         if ch.is_ascii_alphanumeric() {
-            if ch.is_ascii_uppercase()
-                && !key.is_empty()
-                && !previous_separator
-                && key
-                    .as_bytes()
-                    .last()
-                    .is_some_and(|byte| byte.is_ascii_lowercase())
+            if ch.is_ascii_uppercase() && key.chars().last().is_some_and(|c| c.is_ascii_lowercase())
             {
                 key.push('_');
             }
             key.push(ch.to_ascii_lowercase());
-            previous_separator = false;
-        } else if !previous_separator {
+        } else if !key.is_empty() && !key.ends_with('_') {
             key.push('_');
-            previous_separator = true;
         }
     }
     while key.ends_with('_') {
@@ -496,31 +413,28 @@ fn entity_debug_name(entity: EntityType) -> String {
     format!("{entity:?}")
 }
 
+fn replace_tokens(mut template: String, arguments: &[(&str, &str)]) -> String {
+    for (name, replacement) in arguments {
+        template = template.replace(&format!("{{{name}}}"), replacement);
+    }
+    template
+}
+
+fn builtin_catalog(language: Language) -> &'static TranslationCatalog {
+    static ENGLISH: OnceLock<TranslationCatalog> = OnceLock::new();
+    static GERMAN: OnceLock<TranslationCatalog> = OnceLock::new();
+    match language {
+        Language::English => ENGLISH.get_or_init(|| TranslationCatalog::builtin(Language::English)),
+        Language::German => GERMAN.get_or_init(|| TranslationCatalog::builtin(Language::German)),
+    }
+}
+
 pub fn translate(language: Language, key: &str) -> String {
-    static ENGLISH: OnceLock<HashMap<String, String>> = OnceLock::new();
-    static GERMAN: OnceLock<HashMap<String, String>> = OnceLock::new();
-    let english = ENGLISH
-        .get_or_init(|| parse_map(include_str!("../assets/lang/en_us.json")).unwrap_or_default());
-    let active = match language {
-        Language::English => english,
-        Language::German => GERMAN.get_or_init(|| {
-            parse_map(include_str!("../assets/lang/de_de.json")).unwrap_or_default()
-        }),
-    };
-    active
-        .get(key)
-        .or_else(|| english.get(key))
-        .cloned()
-        .unwrap_or_else(|| key.to_string())
+    builtin_catalog(language).lookup(key).to_string()
 }
 
 pub fn format(language: Language, key: &str, arguments: &[(&str, &str)]) -> String {
-    let mut value = translate(language, key);
-    for (name, replacement) in arguments {
-        let token = format!("{{{name}}}");
-        value = value.replace(&token, replacement);
-    }
-    value
+    builtin_catalog(language).format_lookup(key, arguments)
 }
 
 #[cfg(test)]
@@ -528,20 +442,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn english_required_keys_have_values_and_german_is_complete() {
-        let english = TranslationCatalog::builtin(Language::English);
-        let german = TranslationCatalog::builtin(Language::German);
-        assert!(english.validate_required_keys().is_empty());
-        assert!(german.validate_required_keys().is_empty());
-        assert!((english.coverage() - 1.0).abs() < f32::EPSILON);
-        assert!((german.coverage() - 1.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
     fn visible_keys_have_builtin_english_and_german_values() {
         let english = TranslationCatalog::builtin(Language::English);
         let german = TranslationCatalog::builtin(Language::German);
         assert!(english.validate_visible_keys().is_empty());
+        assert!(german.validate_visible_keys().is_empty());
         assert!((english.visible_coverage() - 1.0).abs() < f32::EPSILON);
         assert!((german.visible_coverage() - 1.0).abs() < f32::EPSILON);
     }
@@ -753,7 +658,7 @@ mod tests {
         assert_eq!(catalog.translate("hello"), "English");
         let count = manager.diagnostics().len();
         assert!(count >= 1);
-        manager.resolve_locale(Language::English.code());
+        let _ = manager.resolve_locale_layers(Language::English.code());
         assert_eq!(manager.diagnostics().len(), count);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -786,5 +691,29 @@ mod tests {
         assert_eq!(catalog.item_name(Item::Diamond), "Diamond");
         assert_eq!(catalog.block_name(BlockType::Stone), "Stone");
         assert_eq!(catalog.entity_name(EntityType::Zombie), "Zombie");
+    }
+
+    #[test]
+    fn top_level_translate_and_format_and_key_component() {
+        assert_eq!(
+            translate(Language::English, "menu.singleplayer"),
+            "SINGLEPLAYER"
+        );
+        assert_eq!(
+            translate(Language::German, "menu.singleplayer"),
+            "EINZELSPIELER"
+        );
+        assert_eq!(
+            format(Language::English, "hud.fov", &[("value", "90")]),
+            "FOV < 90 >"
+        );
+        assert_eq!(
+            format(Language::German, "hud.fov", &[("value", "90")]),
+            "SICHTFELD < 90 >"
+        );
+        assert_eq!(key_component("Diamond"), "diamond");
+        assert_eq!(key_component("Oak Planks"), "oak_planks");
+        assert_eq!(key_component("EnderDragon"), "ender_dragon");
+        assert_eq!(key_component("  Multiple   Spaces  "), "multiple_spaces");
     }
 }

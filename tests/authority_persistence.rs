@@ -1,3 +1,6 @@
+mod common;
+
+use common::tcp_harness::temp_world;
 use glam::Vec3;
 use icraft::authority::interest::{InterestKind, InterestSet};
 use icraft::dimension::Dimension;
@@ -5,21 +8,12 @@ use icraft::entity::EntityManager;
 use icraft::inventory::{GameMode, Inventory};
 use icraft::network::protocol::{
     GameplayOperation, GameplayOutcome, GameplayRequest, PlayerEffectWire,
+    BlockActionKind,
 };
 use icraft::save::{ChunkSaveData, EntitySaveData, PlayerData, SaveManager};
 use icraft::server_runtime::{ServerProperties, ServerRuntime};
 use icraft::world::{BlockType, Chunk};
 use std::fs;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-fn temp_dir(label: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("icraft_authority_c_{label}_{unique}"))
-}
 
 fn player_data() -> PlayerData {
     let state = icraft::player::PlayerState::new();
@@ -37,7 +31,7 @@ fn player_data() -> PlayerData {
 
 #[test]
 fn dedicated_player_file_roundtrips_current_dimension_and_effects() {
-    let world_dir = temp_dir("player");
+    let world_dir = temp_world("player");
     let manager = SaveManager::new(&world_dir);
     let mut data = player_data();
     data.health = 7.5;
@@ -60,17 +54,27 @@ fn dedicated_player_file_roundtrips_current_dimension_and_effects() {
     assert_eq!(loaded.effects, effects);
     assert!(manager
         .dedicated_player_file_path("Alice/../Alice")
-        .starts_with(world_dir.join("players")));
+        .is_err());
+    assert!(manager.dedicated_player_file_path("foo.bar").is_err());
+    assert!(manager.dedicated_player_file_path("CON").is_err());
+    assert_eq!(
+        manager.dedicated_player_file_path("foo_bar").unwrap(),
+        world_dir.join("players").join("foo_bar.dat")
+    );
+    assert_ne!(
+        manager.dedicated_player_file_path("Alice").unwrap(),
+        world_dir.join("players").join("foo_bar.dat")
+    );
     fs::remove_dir_all(world_dir).unwrap();
 }
 
 #[test]
 fn authoritative_chunks_and_entities_roundtrip_with_revisions() {
-    let world_dir = temp_dir("world");
+    let world_dir = temp_world("world");
     let mut manager = SaveManager::new(&world_dir);
     let mut chunk = Chunk::new(2, -1);
     chunk.set_block_local(1, 70, 1, BlockType::Brick);
-    let mut data = ChunkSaveData::from_chunk(&chunk);
+    let mut data = ChunkSaveData::from_chunk(&chunk).unwrap();
     data.mutation_revision = 37;
     manager
         .save_chunk_in(Dimension::Overworld, 2, -1, data)
@@ -79,7 +83,7 @@ fn authoritative_chunks_and_entities_roundtrip_with_revisions() {
     assert_eq!(saved_chunks.len(), 1);
     assert_eq!(saved_chunks[0].mutation_revision, 37);
     let mut restored = Chunk::new(2, -1);
-    saved_chunks[0].restore_to_chunk(&mut restored);
+    saved_chunks[0].restore_to_chunk(&mut restored).unwrap();
     assert_eq!(restored.get_block_local(1, 70, 1), BlockType::Brick);
 
     let mut entities = EntityManager::new();
@@ -98,7 +102,7 @@ fn authoritative_chunks_and_entities_roundtrip_with_revisions() {
 
 #[test]
 fn runtime_reconnects_dimension_and_routes_without_cross_dimension_leak() {
-    let world_dir = temp_dir("runtime");
+    let world_dir = temp_world("runtime");
     let mut properties = ServerProperties::default();
     properties.bind = "127.0.0.1".into();
     properties.port = 26000 + (std::process::id() as u16 % 500);
@@ -128,7 +132,7 @@ fn runtime_reconnects_dimension_and_routes_without_cross_dimension_leak() {
     let mut restarted = ServerRuntime::new(properties).unwrap();
     restarted.login_session(9, "ALICE").unwrap();
     let session = restarted.players.get(&9).unwrap();
-    assert_eq!(session.dimension, Dimension::Nether);
+    assert_eq!(session.interest.dimension, Dimension::Nether);
     assert_eq!(session.data.health, 6.0);
     assert_eq!(session.effects.len(), 1);
 
@@ -138,12 +142,7 @@ fn runtime_reconnects_dimension_and_routes_without_cross_dimension_leak() {
     restarted.login_session(10, "Bob").unwrap();
     restarted.set_session_dimension(10, Dimension::End);
     let _ = restarted.drain_routed_updates();
-    let old = restarted.authority.world.get_block(8, 80, 8);
-    let new_block = if old == BlockType::Air {
-        BlockType::Stone
-    } else {
-        BlockType::Air
-    };
+    let old = restarted.authority.world(Dimension::Overworld).get_block(8, 80, 8);
     let response = restarted
         .submit_request(
             9,
@@ -152,26 +151,59 @@ fn runtime_reconnects_dimension_and_routes_without_cross_dimension_leak() {
                 client_sequence: 1,
                 session_id: 9,
                 dimension: Dimension::Overworld as u8,
-                client_revision: restarted.authority.current_revision(),
-                operation: GameplayOperation::BlockUse {
+                client_revision: restarted.authority.current_revision(Dimension::Overworld),
+                operation: GameplayOperation::BlockAction {
+                    action: BlockActionKind::Place,
                     x: 8,
                     y: 80,
                     z: 8,
-                    block: new_block.to_wire(),
+                    face: [0, 1, 0],
+                    hand: 0,
+                    held: None,
+                    block: BlockType::DiamondOre.to_wire(),
+                    look_milli: [0, 0, 1000],
                 },
             },
         )
         .unwrap();
-    assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+    assert!(matches!(
+        response.outcome,
+        GameplayOutcome::Rejected {
+            reason: icraft::network::protocol::RejectReason::InvalidState
+        }
+    ));
+    assert_eq!(restarted.authority.world(Dimension::Overworld).get_block(8, 80, 8), old);
     let updates = restarted.drain_routed_updates();
-    assert!(updates.iter().all(|update| update.target == 9));
-    assert!(updates
-        .iter()
-        .all(|update| update.dimension == Dimension::Overworld));
+    assert!(updates.iter().all(|update| update.target != 10
+        || update.dimension != Dimension::Overworld
+        || update.kind != icraft::authority::interest::InterestKind::Block((8, 80, 8))));
 
     let mut overworld_interest = InterestSet::new(Dimension::Overworld, 4, 2);
     overworld_interest.update_position(Dimension::Overworld, [0.0, 64.0, 0.0]);
     assert!(!overworld_interest.wants(Dimension::Nether, InterestKind::Block((0, 64, 0)),));
     restarted.shutdown().unwrap();
+    fs::remove_dir_all(world_dir).unwrap();
+}
+
+#[test]
+fn mutating_identities_cannot_join_or_share_player_files() {
+    let world_dir = temp_world("identity");
+    let mut properties = ServerProperties::default();
+    properties.bind = "127.0.0.1".into();
+    properties.port = 26000 + (std::process::id() as u16 % 500);
+    properties.world_dir = world_dir.clone();
+    properties.view_distance = 4;
+    properties.simulation_distance = 2;
+    let mut runtime = ServerRuntime::new(properties).unwrap();
+    runtime.login_session(1, "foo_bar").unwrap();
+    assert!(runtime.login_session(2, "foo.bar").is_err());
+    assert!(runtime.login_session(3, "Alice/../Alice").is_err());
+    assert!(runtime.login_session(4, "CON").is_err());
+    assert!(runtime.login_session(5, "FOO_BAR").is_err());
+    assert_eq!(runtime.players.len(), 1);
+    runtime.logout_session(1).unwrap();
+    runtime.shutdown().unwrap();
+    assert!(world_dir.join("players").join("foo_bar.dat").exists());
+    assert!(!world_dir.join("players").join("foo.bar.dat").exists());
     fs::remove_dir_all(world_dir).unwrap();
 }

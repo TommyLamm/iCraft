@@ -51,4 +51,4 @@ This document provides a step-by-step implementation plan for introducing the **
 - **[MODIFY]** `src/enchantment.rs`
 - **[MODIFY]** `src/brewing.rs`
 - **[MODIFY]** `ARCHITECTURE.md`
-- **[MODIFY]** `plans/progress.md`
+- **[MODIFY]** `plans/01_basic_gameplay/progress.md`

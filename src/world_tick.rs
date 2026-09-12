@@ -1,7 +1,19 @@
-use crate::chunk_manager::ChunkManager;
+use crate::chunk_manager::WorldColumns;
+use crate::dimension::WorldHeight;
+use crate::entity::EntityType;
 use crate::inventory::ItemStack;
-use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
-use crate::world_mutation::{BlockMutationRequest, MutationCause};
+use crate::world::{section_and_local_y_to_world_y, BlockType, CHUNK_DEPTH, CHUNK_WIDTH};
+use glam::Vec3;
+use std::collections::BTreeSet;
+
+/// Block change requested by random ticks. Applied by `ServerWorld`, not by
+/// leftover presentation `apply_batch`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockMutationRequest {
+    pub pos: (i32, i32, i32),
+    pub new_block: BlockType,
+    pub new_state: u8,
+}
 
 /// Statistics for random tick sampling per frame.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -23,9 +35,15 @@ pub fn deterministic_rng(seed: u64, salt: u64) -> u64 {
     x
 }
 
+/// Advance a SplitMix64 state and return the next pseudo-random `u64`.
+pub fn next_splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    deterministic_rng(*state, 0)
+}
+
 /// Checks if a water block is within 4 blocks horizontally (x, z offset <= 4)
 /// and within -1..=1 vertically of the farmland block.
-pub fn is_water_nearby<F>(pos: (i32, i32, i32), mut get_block: F) -> bool
+pub fn is_water_nearby<F>(pos: (i32, i32, i32), height: WorldHeight, mut get_block: F) -> bool
 where
     F: FnMut(i32, i32, i32) -> Option<BlockType>,
 {
@@ -34,7 +52,7 @@ where
         for dz in -4..=4 {
             for dy in -1..=1 {
                 let target_y = fy + dy;
-                if target_y >= 0 && target_y < CHUNK_HEIGHT as i32 {
+                if height.contains_y(target_y) {
                     if let Some(BlockType::Water) = get_block(fx + dx, target_y, fz + dz) {
                         return true;
                     }
@@ -51,6 +69,7 @@ pub fn evaluate_random_tick_at<F>(
     block: BlockType,
     state: u8,
     rng_val: u64,
+    height: WorldHeight,
     mut get_block: F,
 ) -> Option<BlockMutationRequest>
 where
@@ -67,20 +86,16 @@ where
                     pos,
                     new_block: BlockType::Dirt,
                     new_state: 0,
-                    new_entity: None,
-                    cause: MutationCause::System,
                 });
             }
 
-            let water_near = is_water_nearby(pos, &mut get_block);
+            let water_near = is_water_nearby(pos, height, &mut get_block);
             if water_near {
                 if moisture < 7 {
                     return Some(BlockMutationRequest {
                         pos,
                         new_block: BlockType::Farmland,
                         new_state: moisture + 1,
-                        new_entity: None,
-                        cause: MutationCause::System,
                     });
                 }
             } else {
@@ -89,8 +104,6 @@ where
                         pos,
                         new_block: BlockType::Farmland,
                         new_state: moisture - 1,
-                        new_entity: None,
-                        cause: MutationCause::System,
                     });
                 } else if block_above == BlockType::Air {
                     // Dry farmland with no crop -> decay to Dirt
@@ -98,8 +111,6 @@ where
                         pos,
                         new_block: BlockType::Dirt,
                         new_state: 0,
-                        new_entity: None,
-                        cause: MutationCause::System,
                     });
                 }
             }
@@ -114,8 +125,6 @@ where
                     pos,
                     new_block: BlockType::Air,
                     new_state: 0,
-                    new_entity: None,
-                    cause: MutationCause::System,
                 });
             }
 
@@ -129,8 +138,6 @@ where
                         pos,
                         new_block: block,
                         new_state: age + 1,
-                        new_entity: None,
-                        cause: MutationCause::System,
                     });
                 }
             }
@@ -143,8 +150,6 @@ where
                     pos,
                     new_block: BlockType::Dirt,
                     new_state: 0,
-                    new_entity: None,
-                    cause: MutationCause::System,
                 });
             }
             // Grass spread to adjacent dirt block
@@ -161,8 +166,6 @@ where
                             pos: target_pos,
                             new_block: BlockType::Grass,
                             new_state: 0,
-                            new_entity: None,
-                            cause: MutationCause::System,
                         });
                     }
                 }
@@ -194,8 +197,6 @@ where
                     pos,
                     new_block: BlockType::Air,
                     new_state: 0,
-                    new_entity: None,
-                    cause: MutationCause::System,
                 })
             } else {
                 None
@@ -214,50 +215,14 @@ where
                         pos,
                         new_block: log_type,
                         new_state: 0,
-                        new_entity: None,
-                        cause: MutationCause::System,
                     });
                 }
             }
             None
         }
-        BlockType::Cactus => {
-            let mut height = 1;
-            let mut check_y = y - 1;
-            while get_block(x, check_y, z) == Some(BlockType::Cactus) {
-                height += 1;
-                check_y -= 1;
-            }
-            if height < 3 && get_block(x, y + 1, z) == Some(BlockType::Air) && rng_val % 3 == 0 {
-                Some(BlockMutationRequest {
-                    pos: (x, y + 1, z),
-                    new_block: BlockType::Cactus,
-                    new_state: 0,
-                    new_entity: None,
-                    cause: MutationCause::System,
-                })
-            } else {
-                None
-            }
-        }
+        BlockType::Cactus => try_grow_column(pos, BlockType::Cactus, 3, rng_val, &mut get_block),
         BlockType::SugarCane => {
-            let mut height = 1;
-            let mut check_y = y - 1;
-            while get_block(x, check_y, z) == Some(BlockType::SugarCane) {
-                height += 1;
-                check_y -= 1;
-            }
-            if height < 3 && get_block(x, y + 1, z) == Some(BlockType::Air) && rng_val % 3 == 0 {
-                Some(BlockMutationRequest {
-                    pos: (x, y + 1, z),
-                    new_block: BlockType::SugarCane,
-                    new_state: 0,
-                    new_entity: None,
-                    cause: MutationCause::System,
-                })
-            } else {
-                None
-            }
+            try_grow_column(pos, BlockType::SugarCane, 3, rng_val, &mut get_block)
         }
         BlockType::Ice => {
             if rng_val % 4 == 0 {
@@ -265,8 +230,6 @@ where
                     pos,
                     new_block: BlockType::Water,
                     new_state: 0,
-                    new_entity: None,
-                    cause: MutationCause::System,
                 })
             } else {
                 None
@@ -279,8 +242,6 @@ where
                     pos,
                     new_block: BlockType::Air,
                     new_state: 0,
-                    new_entity: None,
-                    cause: MutationCause::System,
                 })
             } else {
                 None
@@ -292,8 +253,6 @@ where
                     pos,
                     new_block: BlockType::Air,
                     new_state: 0,
-                    new_entity: None,
-                    cause: MutationCause::System,
                 })
             } else {
                 None
@@ -306,8 +265,6 @@ where
                     pos,
                     new_block: BlockType::Air,
                     new_state: 0,
-                    new_entity: None,
-                    cause: MutationCause::System,
                 })
             } else {
                 None
@@ -317,9 +274,41 @@ where
     }
 }
 
-/// Samples random ticks across loaded chunks in the ChunkManager.
-pub fn sample_random_ticks(
-    chunk_manager: &ChunkManager,
+fn try_grow_column<F>(
+    pos: (i32, i32, i32),
+    block: BlockType,
+    max_h: i32,
+    rng_val: u64,
+    mut get_block: F,
+) -> Option<BlockMutationRequest>
+where
+    F: FnMut(i32, i32, i32) -> Option<BlockType>,
+{
+    let (x, y, z) = pos;
+    let mut height = 1;
+    let mut check_y = y - 1;
+    while get_block(x, check_y, z) == Some(block) {
+        height += 1;
+        check_y -= 1;
+    }
+    if height < max_h && get_block(x, y + 1, z) == Some(BlockType::Air) && rng_val % 3 == 0 {
+        Some(BlockMutationRequest {
+            pos: (x, y + 1, z),
+            new_block: block,
+            new_state: 0,
+        })
+    } else {
+        None
+    }
+}
+
+/// Authority random-tick sampler. `columns` is the simulation-union residency
+/// set. Eligible sections come from each column's maintained
+/// [`crate::world::Chunk::random_tick_sections`] index — this path never
+/// rescans every section or sorts a freshly built list.
+pub fn sample_random_ticks_in_columns(
+    chunk_manager: &WorldColumns,
+    columns: &BTreeSet<(i32, i32)>,
     world_seed: u64,
     game_tick: u64,
     dimension: u8,
@@ -328,21 +317,17 @@ pub fn sample_random_ticks(
     let mut requests = Vec::new();
     let mut stats = RandomTickStats::default();
 
+    // Columns are a BTreeSet and each chunk keeps ascending section_y values,
+    // so the collected list is already ordered by (cx, cz, sec_y).
     let mut eligible_sections = Vec::new();
-    for (&(cx, cz), chunk) in &chunk_manager.chunks {
-        for (sec_idx, section_opt) in chunk.sections.iter().enumerate() {
-            let Some(section) = section_opt else {
-                continue;
-            };
-            if section.random_tick_count() > 0 {
-                let sec_y = chunk.section_y_at_index(sec_idx);
-                eligible_sections.push((cx, cz, sec_y));
-            }
+    for &(cx, cz) in columns {
+        let Some(chunk) = chunk_manager.chunks.get(&(cx, cz)) else {
+            continue;
+        };
+        for &sec_y in chunk.random_tick_sections() {
+            eligible_sections.push((cx, cz, sec_y));
         }
     }
-
-    // Sort deterministically to avoid HashMap order non-determinism
-    eligible_sections.sort_unstable();
 
     let total_eligible = eligible_sections.len();
     let process_count = total_eligible.min(max_sections_per_tick);
@@ -369,7 +354,7 @@ pub fn sample_random_ticks(
             let lz = ((rng_val >> 8) & 0xF) as i32;
 
             let world_x = cx * (CHUNK_WIDTH as i32) + lx;
-            let world_y = (sec_y as i32) * 16 + ly;
+            let world_y = section_and_local_y_to_world_y(sec_y, ly as u8);
             let world_z = cz * (CHUNK_DEPTH as i32) + lz;
 
             let block = chunk_manager.get_block(world_x, world_y, world_z);
@@ -380,6 +365,7 @@ pub fn sample_random_ticks(
                 block,
                 state,
                 rng_val,
+                chunk_manager.dimension.height(),
                 |x, y, z| Some(chunk_manager.get_block(x, y, z)),
             ) {
                 requests.push(req);
@@ -405,24 +391,24 @@ pub struct HopperTickResult {
     pub container_checks: usize,
     pub changed_positions: Vec<(i32, i32, i32)>,
     pub budget_exhausted: bool,
+    /// Entries visited while discovering hoppers via a full block-entity map
+    /// scan. Indexed hops leave this at zero.
+    pub block_entity_scans: usize,
 }
 
-/// Compatibility wrapper used by focused world-tick tests and callers that do
-/// not own an entity manager.  It still uses the same atomic transfer path.
-pub fn tick_hoppers(chunk_manager: &mut ChunkManager, max_transfers_per_tick: usize) -> usize {
-    tick_hoppers_with_entities(chunk_manager, None, max_transfers_per_tick).transfers
-}
-
-/// Ticks active hoppers across loaded chunks.  A transfer is planned against
-/// cloned source/target entities and committed only after both sided-capability
-/// checks succeed, so a failed destination never consumes the source slot.
-/// Dropped item entities are considered after container pulls and are removed
-/// or decremented only after the hopper accepts one complete metadata-bearing
-/// stack item.
-pub fn tick_hoppers_with_entities(
-    chunk_manager: &mut ChunkManager,
+/// Authority hopper tick. A transfer is planned against cloned source/target
+/// entities and committed only after both sided-capability checks succeed, so
+/// a failed destination never consumes the source slot. Dropped item entities
+/// are considered after container pulls and are removed or decremented only
+/// after the hopper accepts one complete metadata-bearing stack item.
+///
+/// `columns` is the simulation-union residency set. Authority always passes
+/// `Some(union)`; tests pass `Some(all_loaded)`.
+pub fn tick_hoppers_in_columns(
+    chunk_manager: &mut WorldColumns,
     mut entity_manager: Option<&mut crate::entity::EntityManager>,
     max_transfers_per_tick: usize,
+    columns: Option<&BTreeSet<(i32, i32)>>,
 ) -> HopperTickResult {
     use crate::block_entity::BlockEntity;
     use crate::redstone::Direction;
@@ -430,101 +416,89 @@ pub fn tick_hoppers_with_entities(
     let budget = max_transfers_per_tick.min(MAX_HOPPER_TRANSFERS_PER_TICK);
     let mut result = HopperTickResult::default();
     let mut hoppers = Vec::new();
-    for (&(cx, cz), chunk) in &chunk_manager.chunks {
-        for (pos, entity) in &chunk.block_entities {
-            if let BlockEntity::Hopper(h) = entity {
-                hoppers.push((
-                    cx * CHUNK_WIDTH as i32 + pos.0 as i32,
-                    pos.1 as i32,
-                    cz * CHUNK_DEPTH as i32 + pos.2 as i32,
-                    h.facing,
-                    h.transfer_cooldown,
-                    h.is_powered,
-                ));
+    let mut collect = |cx: i32, cz: i32, chunk: &crate::world::Chunk| {
+        let origin_x = cx * CHUNK_WIDTH as i32;
+        let origin_z = cz * CHUNK_DEPTH as i32;
+        for &encoded in chunk.hopper_positions() {
+            let (lx, y, lz) = crate::world::Chunk::decode_torch_position(encoded);
+            let Some(BlockEntity::Hopper(h)) =
+                chunk.get_block_entity(lx as u8, y as i16, lz as u8)
+            else {
+                continue;
+            };
+            hoppers.push((
+                origin_x + lx as i32,
+                y,
+                origin_z + lz as i32,
+                h.facing,
+                h.transfer_cooldown,
+                h.is_powered,
+            ));
+        }
+    };
+    if let Some(columns) = columns {
+        for &(cx, cz) in columns {
+            if let Some(chunk) = chunk_manager.chunks.get(&(cx, cz)) {
+                collect(cx, cz, chunk);
             }
+        }
+    } else {
+        for ((cx, cz), chunk) in chunk_manager.chunks.iter() {
+            collect(cx, cz, chunk);
         }
     }
     hoppers.sort_unstable_by_key(|&(x, y, z, _, _, _)| (x, y, z));
 
     for (x, y, z, facing, cooldown, is_powered) in hoppers {
-        if result.transfers >= budget || is_powered {
+        if is_powered {
             continue;
         }
         if cooldown > 0 {
+            // Countdown is memory-only so idle hoppers do not keep the column
+            // dirty. Reload restores the last persisted cooldown (armed 8
+            // after a transfer), so a hopper may wait up to 8 extra ticks.
+            // Write the decremented value through a dedicated path that does
+            // not mark the column dirty and does not clone the entity.
             if let Some(BlockEntity::Hopper(h)) = chunk_manager.get_block_entity_mut(x, y, z) {
-                h.transfer_cooldown = h.transfer_cooldown.saturating_sub(1);
-                // Cooldown is authoritative runtime/save state, but it is not a
-                // container slot mutation.  Keep the chunk dirty for persistence
-                // without waking comparators or broadcasting an update every tick.
-                chunk_manager.mark_block_entity_dirty(x, z);
+                h.transfer_cooldown = cooldown.saturating_sub(1);
             }
             continue;
         }
-
-        let mut transferred = false;
-        let delta = facing.delta();
-        let target_pos = (x + delta.0, y + delta.1, z + delta.2);
-        if chunk_manager.is_block_loaded(target_pos.0, target_pos.1, target_pos.2) {
-            let source = chunk_manager.get_block_entity(x, y, z).cloned();
-            let target = chunk_manager
-                .get_block_entity(target_pos.0, target_pos.1, target_pos.2)
-                .cloned();
-            if let (Some(source), Some(target)) = (source, target) {
-                result.container_checks = result.container_checks.saturating_add(1);
-                if let Some((source_after, target_after)) =
-                    transfer_one(&source, Some(facing), &target, Some(facing.opposite()))
-                {
-                    chunk_manager.set_block_entity(x, y, z, Some(source_after));
-                    chunk_manager.set_block_entity(
-                        target_pos.0,
-                        target_pos.1,
-                        target_pos.2,
-                        Some(target_after),
-                    );
-                    result.changed_positions.push((x, y, z));
-                    result.changed_positions.push(target_pos);
-                    transferred = true;
-                }
-            }
+        if result.transfers >= budget {
+            continue;
         }
 
+        let delta = facing.delta();
+        let target_pos = (x + delta.0, y + delta.1, z + delta.2);
+        let mut transferred = try_container_transfer(
+            chunk_manager,
+            (x, y, z),
+            Some(facing),
+            target_pos,
+            Some(facing.opposite()),
+            &mut result,
+        );
+
         if !transferred {
-            let above_pos = (x, y + 1, z);
-            if chunk_manager.is_block_loaded(above_pos.0, above_pos.1, above_pos.2) {
-                let source = chunk_manager
-                    .get_block_entity(above_pos.0, above_pos.1, above_pos.2)
-                    .cloned();
-                let target = chunk_manager.get_block_entity(x, y, z).cloned();
-                if let (Some(source), Some(target)) = (source, target) {
-                    result.container_checks = result.container_checks.saturating_add(1);
-                    if let Some((source_after, target_after)) =
-                        transfer_one(&source, Some(Direction::Down), &target, Some(Direction::Up))
-                    {
-                        chunk_manager.set_block_entity(
-                            above_pos.0,
-                            above_pos.1,
-                            above_pos.2,
-                            Some(source_after),
-                        );
-                        chunk_manager.set_block_entity(x, y, z, Some(target_after));
-                        result.changed_positions.push(above_pos);
-                        result.changed_positions.push((x, y, z));
-                        transferred = true;
-                    }
-                }
-            }
+            transferred = try_container_transfer(
+                chunk_manager,
+                (x, y + 1, z),
+                Some(Direction::Down),
+                (x, y, z),
+                Some(Direction::Up),
+                &mut result,
+            );
         }
 
         if !transferred {
             // Dropped items are deterministic by entity id.  Only the small
             // pickup volume immediately above the hopper is considered.
+            let pickup_center = Vec3::new(x as f32 + 0.5, y as f32 + 1.625, z as f32 + 0.5);
             let candidate = entity_manager.as_deref().and_then(|entities| {
                 entities
-                    .entities
-                    .iter()
+                    .query_radius_types(pickup_center, 2.0, &[EntityType::DroppedItem])
                     .filter(|entity| {
-                        entity.entity_type == crate::entity::EntityType::DroppedItem
-                            && entity.pickup_cooldown <= 0.0
+                        entity.pickup_cooldown <= 0.0
                             && entity.position.x >= x as f32 - 0.5
                             && entity.position.x <= x as f32 + 1.5
                             && entity.position.z >= z as f32 - 0.5
@@ -586,6 +560,40 @@ pub fn tick_hoppers_with_entities(
     result
 }
 
+fn try_container_transfer(
+    chunk_manager: &mut WorldColumns,
+    source_pos: (i32, i32, i32),
+    source_side: Option<crate::redstone::Direction>,
+    target_pos: (i32, i32, i32),
+    target_side: Option<crate::redstone::Direction>,
+    result: &mut HopperTickResult,
+) -> bool {
+    if !chunk_manager.is_block_loaded(source_pos.0, source_pos.1, source_pos.2)
+        || !chunk_manager.is_block_loaded(target_pos.0, target_pos.1, target_pos.2)
+    {
+        return false;
+    }
+    let Some(source) = chunk_manager.get_block_entity(source_pos.0, source_pos.1, source_pos.2)
+    else {
+        return false;
+    };
+    let Some(target) = chunk_manager.get_block_entity(target_pos.0, target_pos.1, target_pos.2)
+    else {
+        return false;
+    };
+    result.container_checks = result.container_checks.saturating_add(1);
+    let Some((source_after, target_after)) =
+        transfer_one(source, source_side, target, target_side)
+    else {
+        return false;
+    };
+    chunk_manager.set_block_entity(source_pos.0, source_pos.1, source_pos.2, Some(source_after));
+    chunk_manager.set_block_entity(target_pos.0, target_pos.1, target_pos.2, Some(target_after));
+    result.changed_positions.push(source_pos);
+    result.changed_positions.push(target_pos);
+    true
+}
+
 fn transfer_one(
     source: &crate::block_entity::BlockEntity,
     source_side: Option<crate::redstone::Direction>,
@@ -618,6 +626,32 @@ fn transfer_one(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    fn all_loaded(manager: &WorldColumns) -> BTreeSet<(i32, i32)> {
+        manager.chunks.keys().collect()
+    }
+
+    fn tick_hoppers(manager: &mut WorldColumns, max_transfers_per_tick: usize) -> usize {
+        let columns = all_loaded(manager);
+        tick_hoppers_in_columns(manager, None, max_transfers_per_tick, Some(&columns)).transfers
+    }
+
+    fn tick_hoppers_with_entities(
+        manager: &mut WorldColumns,
+        entity_manager: Option<&mut crate::entity::EntityManager>,
+        max_transfers_per_tick: usize,
+    ) -> HopperTickResult {
+        let columns = all_loaded(manager);
+        tick_hoppers_in_columns(
+            manager,
+            entity_manager,
+            max_transfers_per_tick,
+            Some(&columns),
+        )
+    }
+
+    const H: WorldHeight = WorldHeight::OVERWORLD;
 
     #[test]
     fn test_deterministic_rng_reproducibility() {
@@ -633,10 +667,10 @@ mod tests {
         map.insert((10, 64, 10), BlockType::Farmland);
         map.insert((13, 64, 12), BlockType::Water);
 
-        let found = is_water_nearby((10, 64, 10), |x, y, z| map.get(&(x, y, z)).copied());
+        let found = is_water_nearby((10, 64, 10), H, |x, y, z| map.get(&(x, y, z)).copied());
         assert!(found);
 
-        let not_found = is_water_nearby((10, 64, 10), |x, y, z| {
+        let not_found = is_water_nearby((10, 64, 10), H, |x, y, z| {
             if (x, y, z) == (18, 64, 10) {
                 Some(BlockType::Water)
             } else {
@@ -647,12 +681,22 @@ mod tests {
     }
 
     #[test]
+    fn water_below_y_zero_hydrates_farmland_at_y_zero() {
+        let mut map = std::collections::HashMap::new();
+        map.insert((0, 0, 0), BlockType::Farmland);
+        map.insert((1, -1, 0), BlockType::Water);
+        assert!(is_water_nearby((0, 0, 0), H, |x, y, z| map
+            .get(&(x, y, z))
+            .copied()));
+    }
+
+    #[test]
     fn test_farmland_hydration_mutation() {
         let mut map = std::collections::HashMap::new();
         map.insert((0, 64, 0), BlockType::Farmland);
         map.insert((2, 64, 0), BlockType::Water);
 
-        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Farmland, 0, 123, |x, y, z| {
+        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Farmland, 0, 123, H, |x, y, z| {
             map.get(&(x, y, z)).copied()
         });
 
@@ -668,7 +712,7 @@ mod tests {
         map.insert((0, 64, 0), BlockType::Farmland);
         map.insert((0, 65, 0), BlockType::Stone);
 
-        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Farmland, 7, 123, |x, y, z| {
+        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Farmland, 7, 123, H, |x, y, z| {
             map.get(&(x, y, z)).copied()
         });
 
@@ -682,9 +726,10 @@ mod tests {
     fn test_leaf_decay_without_log() {
         let map: std::collections::HashMap<(i32, i32, i32), BlockType> =
             std::collections::HashMap::new();
-        let req = evaluate_random_tick_at((0, 64, 0), BlockType::OakLeaves, 0, 123, |x, y, z| {
-            map.get(&(x, y, z)).copied()
-        });
+        let req =
+            evaluate_random_tick_at((0, 64, 0), BlockType::OakLeaves, 0, 123, H, |x, y, z| {
+                map.get(&(x, y, z)).copied()
+            });
         assert!(req.is_some());
         let r = req.unwrap();
         assert_eq!(r.new_block, BlockType::Air);
@@ -694,9 +739,10 @@ mod tests {
     fn test_leaf_preservation_with_log() {
         let mut map = std::collections::HashMap::new();
         map.insert((0, 63, 0), BlockType::OakLog);
-        let req = evaluate_random_tick_at((0, 64, 0), BlockType::OakLeaves, 0, 123, |x, y, z| {
-            map.get(&(x, y, z)).copied()
-        });
+        let req =
+            evaluate_random_tick_at((0, 64, 0), BlockType::OakLeaves, 0, 123, H, |x, y, z| {
+                map.get(&(x, y, z)).copied()
+            });
         assert!(req.is_none());
     }
 
@@ -705,7 +751,7 @@ mod tests {
         let mut map = std::collections::HashMap::new();
         map.insert((0, 64, 0), BlockType::Grass);
         map.insert((0, 65, 0), BlockType::Stone);
-        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Grass, 0, 123, |x, y, z| {
+        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Grass, 0, 123, H, |x, y, z| {
             map.get(&(x, y, z)).copied()
         });
         assert!(req.is_some());
@@ -718,7 +764,7 @@ mod tests {
         let mut map = std::collections::HashMap::new();
         map.insert((0, 64, 0), BlockType::Cactus);
         map.insert((0, 65, 0), BlockType::Air);
-        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Cactus, 0, 3, |x, y, z| {
+        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Cactus, 0, 3, H, |x, y, z| {
             map.get(&(x, y, z)).copied()
         });
         assert!(req.is_some());
@@ -731,13 +777,70 @@ mod tests {
     fn test_falling_sand() {
         let map: std::collections::HashMap<(i32, i32, i32), BlockType> =
             std::collections::HashMap::new();
-        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Sand, 0, 123, |x, y, z| {
+        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Sand, 0, 123, H, |x, y, z| {
             map.get(&(x, y, z)).copied()
         });
         assert!(req.is_some());
         let r = req.unwrap();
         assert_eq!(r.pos, (0, 64, 0));
         assert_eq!(r.new_block, BlockType::Air);
+    }
+
+    #[test]
+    fn sample_random_ticks_uses_chunk_eligible_index() {
+        let mut manager = WorldColumns::new(4);
+        manager
+            .chunks
+            .insert((0, 0), crate::world::Chunk::empty(0, 0));
+        manager
+            .chunks
+            .insert((1, 0), crate::world::Chunk::empty(1, 0));
+        manager.set_block(2, 20, 2, BlockType::WheatCrop);
+        manager.set_block(18, 20, 2, BlockType::WheatCrop);
+        assert_eq!(
+            manager.chunks.get(&(0, 0)).unwrap().random_tick_sections(),
+            &[1]
+        );
+        assert_eq!(
+            manager.chunks.get(&(1, 0)).unwrap().random_tick_sections(),
+            &[1]
+        );
+
+        let columns = BTreeSet::from([(0, 0), (1, 0)]);
+        let (_, stats) = sample_random_ticks_in_columns(&manager, &columns, 99, 7, 0, 128);
+        assert_eq!(stats.sampled_sections, 2);
+        assert_eq!(stats.total_ticks, 6);
+        assert_eq!(stats.backlog_sections, 0);
+
+        manager.chunks.remove(&(1, 0));
+        let (_, stats) = sample_random_ticks_in_columns(&manager, &columns, 99, 7, 0, 128);
+        assert_eq!(stats.sampled_sections, 1);
+        assert_eq!(stats.total_ticks, 3);
+
+        let only_unloaded = BTreeSet::from([(1, 0)]);
+        let (_, stats) = sample_random_ticks_in_columns(&manager, &only_unloaded, 99, 7, 0, 128);
+        assert_eq!(stats.sampled_sections, 0);
+        assert_eq!(stats.total_ticks, 0);
+    }
+
+    #[test]
+    fn sample_random_ticks_preserves_ordered_section_budget() {
+        let mut manager = WorldColumns::new(4);
+        for cz in 0..3 {
+            manager
+                .chunks
+                .insert((0, cz), crate::world::Chunk::empty(0, cz));
+            manager.set_block(1, 20, cz * 16 + 1, BlockType::Fire);
+        }
+        let columns = BTreeSet::from([(0, 0), (0, 1), (0, 2)]);
+        let (_, stats) = sample_random_ticks_in_columns(&manager, &columns, 1, 2, 0, 2);
+        assert_eq!(stats.sampled_sections, 2);
+        assert_eq!(stats.backlog_sections, 1);
+        assert_eq!(stats.total_ticks, 6);
+
+        let (first, _) = sample_random_ticks_in_columns(&manager, &columns, 1, 2, 0, 2);
+        let (second, _) = sample_random_ticks_in_columns(&manager, &columns, 1, 2, 0, 2);
+        assert_eq!(first, second);
     }
 
     #[test]
@@ -748,7 +851,7 @@ mod tests {
         use crate::inventory::{Item, ItemStack};
         use crate::redstone::Direction;
 
-        let mut manager = ChunkManager::new(8);
+        let mut manager = WorldColumns::new(8);
         manager
             .chunks
             .insert((0, 0), crate::world::Chunk::new(0, 0));
@@ -812,7 +915,7 @@ mod tests {
         use crate::recipes::RecipeManager;
         use crate::redstone::Direction;
 
-        let mut manager = ChunkManager::new(8);
+        let mut manager = WorldColumns::new(8);
         manager
             .chunks
             .insert((0, 0), crate::world::Chunk::new(0, 0));
@@ -881,7 +984,7 @@ mod tests {
         use crate::inventory::{Item, ItemStack};
         use crate::redstone::Direction;
 
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager
             .chunks
             .insert((0, 0), crate::world::Chunk::new(0, 0));
@@ -920,7 +1023,7 @@ mod tests {
         use crate::inventory::{Item, ItemStack};
         use crate::redstone::Direction;
 
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager
             .chunks
             .insert((0, 0), crate::world::Chunk::new(0, 0));
@@ -930,7 +1033,10 @@ mod tests {
         manager.set_block_entity(15, 64, 0, Some(BlockEntity::Hopper(hopper)));
 
         // x=16 belongs to an unloaded chunk.  The source remains untouched.
-        assert_eq!(tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK), 0);
+        assert_eq!(
+            tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
+            0
+        );
         assert_eq!(
             manager
                 .get_block_entity(15, 64, 0)
@@ -943,7 +1049,10 @@ mod tests {
             .insert((1, 0), crate::world::Chunk::new(1, 0));
         manager.set_block(16, 64, 0, BlockType::Chest);
         manager.set_block_entity(16, 64, 0, Some(BlockEntity::Chest(ChestBlockEntity::new())));
-        assert_eq!(tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK), 1);
+        assert_eq!(
+            tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
+            1
+        );
         assert_eq!(
             manager
                 .get_block_entity(16, 64, 0)
@@ -958,7 +1067,7 @@ mod tests {
         use crate::inventory::{Item, ItemStack};
         use crate::redstone::Direction;
 
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager
             .chunks
             .insert((0, 0), crate::world::Chunk::new(0, 0));
@@ -995,7 +1104,7 @@ mod tests {
         use crate::inventory::{Item, ItemStack};
         use crate::redstone::Direction;
 
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager
             .chunks
             .insert((0, 0), crate::world::Chunk::new(0, 0));
@@ -1007,7 +1116,10 @@ mod tests {
         manager.set_block(1, 64, 0, BlockType::Chest);
         manager.set_block_entity(1, 64, 0, Some(BlockEntity::Chest(ChestBlockEntity::new())));
 
-        assert_eq!(tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK), 0);
+        assert_eq!(
+            tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
+            0
+        );
         assert_eq!(
             manager.get_block_entity(0, 64, 0).unwrap().get_stack(0),
             Some(&ItemStack::new(Item::Stone, 1))
@@ -1022,7 +1134,7 @@ mod tests {
         use crate::inventory::{Item, ItemStack};
         use crate::redstone::Direction;
 
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager
             .chunks
             .insert((0, 0), crate::world::Chunk::new(0, 0));
@@ -1059,5 +1171,142 @@ mod tests {
             remaining.dropped_stack,
             Some(ItemStack { count: 2, ..stack })
         );
+    }
+
+    #[test]
+    fn debug_hopper_budget_skips_cooldown() {
+        use crate::block_entity::{BlockEntity, HopperBlockEntity};
+        use crate::inventory::{Item, ItemStack};
+        use crate::redstone::Direction;
+
+        let mut manager = WorldColumns::new(2);
+        manager
+            .chunks
+            .insert((0, 0), crate::world::Chunk::new(0, 0));
+        manager.set_block(0, 64, 0, BlockType::Hopper);
+        manager.set_block(1, 64, 0, BlockType::Chest);
+        manager.set_block(2, 64, 0, BlockType::Hopper);
+        let mut left = HopperBlockEntity::with_facing(Direction::East);
+        left.slots[0] = Some(ItemStack::new(Item::Stone, 1));
+        manager.set_block_entity(0, 64, 0, Some(BlockEntity::Hopper(left)));
+        manager.set_block_entity(
+            1,
+            64,
+            0,
+            Some(BlockEntity::Chest(
+                crate::block_entity::ChestBlockEntity::new(),
+            )),
+        );
+        let mut right = HopperBlockEntity::with_facing(Direction::West);
+        right.transfer_cooldown = 4;
+        manager.set_block_entity(2, 64, 0, Some(BlockEntity::Hopper(right)));
+
+        tick_hoppers(&mut manager, 1);
+        let remaining = match manager.get_block_entity(2, 64, 0) {
+            Some(BlockEntity::Hopper(h)) => h.transfer_cooldown,
+            _ => 255,
+        };
+        assert_eq!(remaining, 3);
+    }
+
+    #[test]
+    fn hopper_cooldown_countdown_does_not_mark_chunk_dirty() {
+        use crate::block_entity::{BlockEntity, ChestBlockEntity, HopperBlockEntity};
+        use crate::inventory::{Item, ItemStack};
+        use crate::redstone::Direction;
+
+        let mut manager = WorldColumns::new(2);
+        manager
+            .chunks
+            .insert((0, 0), crate::world::Chunk::new(0, 0));
+        manager.set_block(0, 64, 0, BlockType::Hopper);
+        let mut hopper = HopperBlockEntity::with_facing(Direction::East);
+        hopper.slots[0] = Some(ItemStack::new(Item::Stone, 1));
+        hopper.transfer_cooldown = 4;
+        manager.set_block_entity(0, 64, 0, Some(BlockEntity::Hopper(hopper)));
+        manager.set_block(1, 64, 0, BlockType::Chest);
+        manager.set_block_entity(1, 64, 0, Some(BlockEntity::Chest(ChestBlockEntity::new())));
+        manager.dirty_chunks.clear();
+
+        assert_eq!(
+            tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
+            0
+        );
+        let remaining = match manager.get_block_entity(0, 64, 0) {
+            Some(BlockEntity::Hopper(h)) => h.transfer_cooldown,
+            _ => panic!("hopper"),
+        };
+        assert_eq!(remaining, 3);
+        assert!(
+            !manager.dirty_chunks.is_dirty(0, 0),
+            "cooldown countdown must not mark the column dirty"
+        );
+    }
+
+    #[test]
+    fn hopper_transfer_marks_chunk_dirty_and_arms_cooldown() {
+        use crate::block_entity::{BlockEntity, ChestBlockEntity, HopperBlockEntity};
+        use crate::inventory::{Item, ItemStack};
+        use crate::redstone::Direction;
+
+        let mut manager = WorldColumns::new(2);
+        manager
+            .chunks
+            .insert((0, 0), crate::world::Chunk::new(0, 0));
+        manager.set_block(0, 64, 0, BlockType::Hopper);
+        let mut hopper = HopperBlockEntity::with_facing(Direction::East);
+        hopper.slots[0] = Some(ItemStack::new(Item::Stone, 1));
+        manager.set_block_entity(0, 64, 0, Some(BlockEntity::Hopper(hopper)));
+        manager.set_block(1, 64, 0, BlockType::Chest);
+        manager.set_block_entity(1, 64, 0, Some(BlockEntity::Chest(ChestBlockEntity::new())));
+        manager.dirty_chunks.clear();
+
+        assert_eq!(
+            tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
+            1
+        );
+        let remaining = match manager.get_block_entity(0, 64, 0) {
+            Some(BlockEntity::Hopper(h)) => h.transfer_cooldown,
+            _ => panic!("hopper"),
+        };
+        assert_eq!(remaining, 8);
+        assert!(
+            manager.dirty_chunks.is_dirty(0, 0),
+            "slot change and cooldown 0→8 after a transfer must dirty the column"
+        );
+    }
+
+    #[test]
+    fn zero_hopper_sim_columns_do_not_scan_block_entities() {
+        use crate::block_entity::{BlockEntity, ChestBlockEntity};
+
+        let mut manager = WorldColumns::new(2);
+        manager
+            .chunks
+            .insert((0, 0), crate::world::Chunk::new(0, 0));
+        for i in 0..8 {
+            manager.set_block(i, 64, 0, BlockType::Chest);
+            manager.set_block_entity(
+                i,
+                64,
+                0,
+                Some(BlockEntity::Chest(ChestBlockEntity::new())),
+            );
+        }
+        assert!(manager
+            .chunks
+            .get(&(0, 0))
+            .unwrap()
+            .hopper_positions()
+            .is_empty());
+        let columns = all_loaded(&manager);
+        let result =
+            tick_hoppers_in_columns(&mut manager, None, MAX_HOPPER_TRANSFERS_PER_TICK, Some(&columns));
+        assert_eq!(result.transfers, 0);
+        assert_eq!(
+            result.block_entity_scans, 0,
+            "indexed hopper tick must not walk chunk.block_entities"
+        );
+        assert_eq!(result.container_checks, 0);
     }
 }

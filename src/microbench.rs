@@ -1,6 +1,8 @@
 //! Deterministic storage/engine microbenchmarks.
 //!
-//! Run with `cargo test --release microbench -- --ignored --nocapture`.
+//! Compiled only into the desktop binary behind feature `microbench`
+//! (`mod` in `src/main.rs`). Run with
+//! `cargo run --features microbench -- --microbench`.
 //! Each JSON line contains a stable operation name, iteration count, elapsed
 //! nanoseconds per operation, and a checksum of the observed results.
 
@@ -9,7 +11,7 @@ use std::time::Instant;
 
 use glam::Vec3;
 
-use crate::chunk_manager::ChunkManager;
+use crate::chunk_manager::WorldColumns;
 use crate::network::protocol::Packet;
 use crate::physics::PlayerPhysics;
 use crate::save::ChunkSaveData;
@@ -147,7 +149,7 @@ fn bench_lighting() -> u64 {
 }
 
 fn bench_physics() -> u64 {
-    let mut manager = ChunkManager::new_in_dimension(2, crate::dimension::Dimension::Overworld);
+    let mut manager = WorldColumns::new_in_dimension(2, crate::dimension::Dimension::Overworld);
     manager.chunks.insert((0, 0), Chunk::new(0, 0));
     let mut player = PlayerPhysics::new(Vec3::new(8.5, 80.0, 8.5));
     let start = Instant::now();
@@ -179,7 +181,9 @@ fn bench_mesh() -> u64 {
     let mut checksum = 0u64;
     for _ in 0..ITERS {
         let mesh = chunk.generate_section_mesh_bundle(key, 1, 1, |x, y, z| {
-            let inside = (0..16).contains(&x) && (0..256).contains(&y) && (0..16).contains(&z);
+            let inside = (0..16).contains(&x)
+                && chunk.world_y_range().contains(&y)
+                && (0..16).contains(&z);
             if inside {
                 (
                     chunk.get_block(x, y, z),
@@ -211,7 +215,7 @@ fn bench_save() -> u64 {
     let start = Instant::now();
     let mut checksum = 0u64;
     for _ in 0..ITERS {
-        let data = ChunkSaveData::from_chunk(&chunk);
+        let data = ChunkSaveData::from_chunk(&chunk).expect("compress chunk");
         checksum = checksum.wrapping_add(data.blocks.len() as u64);
         checksum = checksum.wrapping_add(bincode::serialize(&data).unwrap().len() as u64);
     }
@@ -229,19 +233,18 @@ fn bench_network() -> u64 {
     let start = Instant::now();
     let mut checksum = 0u64;
     for _ in 0..ITERS {
-        let flattened = ChunkSaveData::from_chunk(&chunk);
+        let payload = ChunkSaveData::network_terrain_payload(&chunk).expect("flatten chunk");
         let packet = Packet::ChunkData {
-            protocol_version: crate::network::protocol::PROTOCOL_VERSION,
             dimension: 0,
             cx: chunk.chunk_x,
             cz: chunk.chunk_z,
             revision: 1,
             min_section_y: chunk.min_section_y,
             section_count: chunk.sections.len() as u16,
-            blocks: flattened.blocks,
-            block_states: flattened.block_states,
-            fluid_levels: flattened.fluid_levels,
-            block_entities: flattened.block_entities,
+            blocks: payload.blocks,
+            block_states: payload.block_states,
+            fluid_levels: payload.fluid_levels,
+            block_entities: payload.block_entities,
         };
         let bytes = packet.encode();
         let decoded = Packet::decode(&bytes).unwrap();

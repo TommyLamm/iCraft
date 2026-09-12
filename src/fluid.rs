@@ -1,6 +1,6 @@
-use crate::chunk_manager::{mark_block_mesh_dependencies, ChunkManager};
+use crate::chunk_manager::{mark_block_mesh_dependencies, WorldColumns};
 use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_WIDTH, FLUID_LEVEL_MASK};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 type BlockPos = (i32, i32, i32);
 
@@ -16,17 +16,21 @@ pub struct FluidMutation {
     pub raw_fluid: u8,
 }
 
-/// Advances only fluid cells affected by a block change. Work is capped so a
-/// large flow can span several frames without blocking rendering.
+/// Authority fluid tick. Advances only fluid cells affected by a block change,
+/// capped so a large flow can span several frames.
+///
+/// `columns` is the simulation-union residency set. Authority always passes
+/// `Some(union)`; tests pass `Some(all_loaded)`.
 ///
 /// Returns the dirty chunk coordinates and the list of raw fluid mutations
 /// applied this tick. The mutation list lets a multiplayer host broadcast the
 /// exact cells that changed so connected clients render the same flow without
 /// running the fluid simulation themselves.
-pub fn tick_fluids(
-    chunk_manager: &mut ChunkManager,
+pub fn tick_fluids_in_columns(
+    chunk_manager: &mut WorldColumns,
     is_lava: bool,
     max_updates: usize,
+    columns: Option<&BTreeSet<(i32, i32)>>,
 ) -> (HashSet<(i32, i32)>, Vec<FluidMutation>) {
     let mut dirty_chunks = HashSet::new();
     let mut mutations: Vec<FluidMutation> = Vec::new();
@@ -53,6 +57,9 @@ pub fn tick_fluids(
         let cx = wx.div_euclid(CHUNK_WIDTH as i32);
         let cz = wz.div_euclid(CHUNK_DEPTH as i32);
         if !chunk_manager.chunks.contains_key(&(cx, cz)) {
+            continue;
+        }
+        if columns.is_some_and(|allowed| !allowed.contains(&(cx, cz))) {
             continue;
         }
 
@@ -86,7 +93,7 @@ pub fn tick_fluids(
 }
 
 fn update_cell(
-    chunk_manager: &mut ChunkManager,
+    chunk_manager: &mut WorldColumns,
     pos: BlockPos,
     target_type: BlockType,
     other_type: BlockType,
@@ -162,13 +169,13 @@ fn update_cell(
 }
 
 fn desired_flow(
-    chunk_manager: &ChunkManager,
+    chunk_manager: &WorldColumns,
     (wx, wy, wz): BlockPos,
     target_type: BlockType,
     is_lava: bool,
 ) -> Option<(u8, bool)> {
     if chunk_manager.dimension.height().contains_y(wy + 1)
-        && is_water_source_at(chunk_manager, (wx, wy + 1, wz), target_type, is_lava)
+        && is_same_fluid_at(chunk_manager, (wx, wy + 1, wz), target_type, is_lava)
     {
         return Some((0, true));
     }
@@ -196,7 +203,7 @@ fn desired_flow(
     for (dx, _, dz) in HORIZONTAL_DIRECTIONS {
         let nx = wx + dx;
         let nz = wz + dz;
-        if !is_water_source_at(chunk_manager, (nx, wy, nz), target_type, is_lava) {
+        if !is_same_fluid_at(chunk_manager, (nx, wy, nz), target_type, is_lava) {
             continue;
         }
 
@@ -225,8 +232,21 @@ fn desired_flow(
     best_level.map(|level| (level + 1, false))
 }
 
+fn is_same_fluid_at(
+    chunk_manager: &WorldColumns,
+    pos: BlockPos,
+    target_type: BlockType,
+    is_lava: bool,
+) -> bool {
+    let (wx, wy, wz) = pos;
+    if !is_lava && target_type == BlockType::Water && chunk_manager.is_waterlogged(wx, wy, wz) {
+        return true;
+    }
+    chunk_manager.get_block(wx, wy, wz) == target_type
+}
+
 fn is_water_source_at(
-    chunk_manager: &ChunkManager,
+    chunk_manager: &WorldColumns,
     pos: BlockPos,
     target_type: BlockType,
     is_lava: bool,
@@ -241,21 +261,18 @@ fn is_water_source_at(
 }
 
 fn is_supported(
-    chunk_manager: &ChunkManager,
+    chunk_manager: &WorldColumns,
     wx: i32,
     wy: i32,
     wz: i32,
     fluid_type: BlockType,
 ) -> bool {
-    if wy == 0 {
-        return true;
-    }
     let below = chunk_manager.get_block(wx, wy - 1, wz);
     below != BlockType::Air && below != fluid_type && !below.properties().is_passable
 }
 
 fn set_fluid_state(
-    chunk_manager: &mut ChunkManager,
+    chunk_manager: &mut WorldColumns,
     (wx, wy, wz): BlockPos,
     fluid_type: BlockType,
     level: u8,
@@ -280,10 +297,24 @@ fn set_fluid_state(
 mod tests {
     use super::*;
     use crate::world::Chunk;
+    use std::collections::BTreeSet;
+
+    fn all_loaded(manager: &WorldColumns) -> BTreeSet<(i32, i32)> {
+        manager.chunks.keys().collect()
+    }
+
+    fn tick_fluids(
+        manager: &mut WorldColumns,
+        is_lava: bool,
+        max_updates: usize,
+    ) -> (HashSet<(i32, i32)>, Vec<FluidMutation>) {
+        let columns = all_loaded(manager);
+        tick_fluids_in_columns(manager, is_lava, max_updates, Some(&columns))
+    }
 
     #[test]
     fn generated_chunks_do_not_schedule_the_static_ocean() {
-        let mut manager = ChunkManager::new(1);
+        let mut manager = WorldColumns::new(1);
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
 
         assert_eq!(manager.pending_fluid_updates(false), 0);
@@ -293,7 +324,7 @@ mod tests {
 
     #[test]
     fn placed_source_flows_without_scanning_the_world() {
-        let mut manager = ChunkManager::new(1);
+        let mut manager = WorldColumns::new(1);
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
         let source = (8, 120, 8);
         manager.set_block(source.0, source.1, source.2, BlockType::Water);
@@ -311,7 +342,7 @@ mod tests {
 
     #[test]
     fn raw_fluid_change_is_reported_when_block_stays_water() {
-        let mut manager = ChunkManager::new(1);
+        let mut manager = WorldColumns::new(1);
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
         let source = (8, 120, 8);
         let flowing = (8, 119, 8);
@@ -335,7 +366,7 @@ mod tests {
 
     #[test]
     fn waterlogged_slab_source_flows_into_adjacent_air() {
-        let mut manager = ChunkManager::new(1);
+        let mut manager = WorldColumns::new(1);
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
         let slab = (8, 120, 8);
         let below = (8, 119, 8);
@@ -355,7 +386,7 @@ mod tests {
 
     #[test]
     fn waterlogged_slab_flows_across_chunk_boundary() {
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
         manager.chunks.insert((1, 0), Chunk::new(1, 0));
         let slab = (15, 80, 8);
@@ -389,7 +420,7 @@ mod tests {
 
     #[test]
     fn removing_a_source_drains_its_incremental_flow() {
-        let mut manager = ChunkManager::new(1);
+        let mut manager = WorldColumns::new(1);
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
         let source = (8, 120, 8);
         manager.set_block(source.0, source.1, source.2, BlockType::Water);
@@ -412,5 +443,72 @@ mod tests {
 
         assert_eq!(manager.pending_fluid_updates(false), 0);
         assert_eq!(manager.get_block(8, 119, 8), BlockType::Air);
+    }
+
+    #[test]
+    fn y_zero_is_not_automatic_support_for_infinite_source() {
+        let mut manager = WorldColumns::new(1);
+        manager.chunks.insert((0, 0), Chunk::empty(0, 0));
+        manager.set_block(8, 0, 8, BlockType::Water);
+        manager.set_block(10, 0, 8, BlockType::Water);
+        manager.set_block(9, 0, 8, BlockType::Water);
+        manager.set_fluid_level(9, 0, 8, 1);
+        manager.set_fluid_falling(9, 0, 8, false);
+
+        tick_fluids(&mut manager, false, 64);
+
+        assert_eq!(manager.get_block(9, 0, 8), BlockType::Water);
+        assert_ne!(
+            manager.get_fluid_level(9, 0, 8),
+            0,
+            "Y=0 over air must not form an infinite source"
+        );
+    }
+
+    #[test]
+    fn debug_waterfall_and_horizontal_spread() {
+        let mut manager = WorldColumns::new(1);
+        manager.chunks.insert((0, 0), Chunk::empty(0, 0));
+        manager.set_block(8, 120, 8, BlockType::Water);
+        for y in 100..120 {
+            manager.set_block(8, y, 8, BlockType::Air);
+            manager.set_block(9, y, 8, BlockType::Air);
+        }
+        manager.set_block(8, 100, 8, BlockType::Stone);
+        manager.set_block(9, 100, 8, BlockType::Stone);
+        manager.set_block(10, 100, 8, BlockType::Stone);
+
+        for _ in 0..64 {
+            tick_fluids(&mut manager, false, 256);
+            if manager.pending_fluid_updates(false) == 0 {
+                break;
+            }
+        }
+        let y118 = manager.get_block(8, 118, 8);
+        let y118_falling = manager.get_fluid_falling(8, 118, 8);
+        let side = manager.get_block(9, 101, 8);
+        assert_eq!(y118, BlockType::Water);
+        assert!(y118_falling);
+        assert_eq!(side, BlockType::Water);
+    }
+
+    #[test]
+    fn source_on_ground_spreads_horizontally() {
+        let mut manager = WorldColumns::new(1);
+        manager.chunks.insert((0, 0), Chunk::empty(0, 0));
+        manager.set_block(8, 79, 8, BlockType::Stone);
+        manager.set_block(9, 79, 8, BlockType::Stone);
+        manager.set_block(10, 79, 8, BlockType::Stone);
+        manager.set_block(8, 80, 8, BlockType::Water);
+        for _ in 0..32 {
+            tick_fluids(&mut manager, false, 256);
+            if manager.pending_fluid_updates(false) == 0 {
+                break;
+            }
+        }
+        assert_eq!(manager.get_block(9, 80, 8), BlockType::Water);
+        assert_eq!(manager.get_fluid_level(9, 80, 8), 1);
+        assert_eq!(manager.get_block(10, 80, 8), BlockType::Water);
+        assert_eq!(manager.get_fluid_level(10, 80, 8), 2);
     }
 }

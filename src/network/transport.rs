@@ -4,9 +4,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 
-use super::protocol::Packet;
+use super::protocol::{Packet, MAX_PACKET_SIZE};
 
-const MAX_PACKET_SIZE: u32 = 2 * 1024 * 1024;
 const LEN_HEADER: usize = 4;
 
 pub struct Connection {
@@ -48,24 +47,35 @@ impl Connection {
         self.writer.send(packet).await
     }
 
+    pub async fn send_payload(&mut self, payload: &[u8]) -> io::Result<()> {
+        self.writer.send_payload(payload).await
+    }
+
     pub(super) fn into_split(self) -> (ConnectionReader, ConnectionWriter) {
         (self.reader, self.writer)
     }
 }
 
 impl ConnectionReader {
+    /// Fill `buf` up to `need` bytes. Header and body stay separate await
+    /// points so cancellation between them still leaves `frame_len` latched.
+    async fn read_exact_into(&mut self, need: usize) -> io::Result<()> {
+        while self.buf.len() < need {
+            let mut tmp = [0u8; 4096];
+            let n = self.stream.read(&mut tmp).await?;
+            if n == 0 {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "early eof"));
+            }
+            self.buf.extend_from_slice(&tmp[..n]);
+        }
+        Ok(())
+    }
+
     pub async fn recv(&mut self) -> io::Result<Packet> {
         if self.frame_len.is_none() {
-            while self.buf.len() < LEN_HEADER {
-                let mut tmp = [0u8; 4096];
-                let n = self.stream.read(&mut tmp).await?;
-                if n == 0 {
-                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "early eof"));
-                }
-                self.buf.extend_from_slice(&tmp[..n]);
-            }
+            self.read_exact_into(LEN_HEADER).await?;
             let len = u32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]);
-            if len > MAX_PACKET_SIZE {
+            if len as usize > MAX_PACKET_SIZE {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("packet length {len} exceeds maximum {MAX_PACKET_SIZE}"),
@@ -76,14 +86,7 @@ impl ConnectionReader {
         }
 
         let need = self.frame_len.unwrap();
-        while self.buf.len() < need {
-            let mut tmp = [0u8; 4096];
-            let n = self.stream.read(&mut tmp).await?;
-            if n == 0 {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "early eof"));
-            }
-            self.buf.extend_from_slice(&tmp[..n]);
-        }
+        self.read_exact_into(need).await?;
 
         let body: Vec<u8> = self.buf.drain(0..need).collect();
         self.frame_len = None;
@@ -92,19 +95,27 @@ impl ConnectionReader {
 }
 
 impl ConnectionWriter {
-    pub async fn send(&mut self, packet: &Packet) -> io::Result<()> {
-        let payload = packet.encode();
-        let len = u32::try_from(payload.len()).map_err(|_| {
-            io::Error::new(
+    /// Write a pre-encoded bincode payload with the standard 4-byte BE length
+    /// prefix. Callers that already hold shared outbound bytes use this so the
+    /// socket path never re-serializes.
+    pub async fn send_payload(&mut self, payload: &[u8]) -> io::Result<()> {
+        if payload.len() > MAX_PACKET_SIZE {
+            return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "packet payload exceeds u32 length",
-            )
-        })?;
-        let mut frame = Vec::with_capacity(LEN_HEADER + payload.len());
-        frame.extend_from_slice(&len.to_be_bytes());
-        frame.extend_from_slice(&payload);
-        self.stream.write_all(&frame).await?;
+                "packet payload exceeds maximum",
+            ));
+        }
+        let len = (payload.len() as u32).to_be_bytes();
+        self.stream.write_all(&len).await?;
+        self.stream.write_all(payload).await?;
         Ok(())
+    }
+
+    pub async fn send(&mut self, packet: &Packet) -> io::Result<()> {
+        let payload = packet
+            .encode_payload()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        self.send_payload(&payload).await
     }
 }
 
@@ -149,7 +160,6 @@ mod tests {
             let first = conn.recv().await.unwrap();
             let second = conn.recv().await.unwrap();
             let echo = Packet::ChatMessage {
-                protocol_version: crate::network::protocol::PROTOCOL_VERSION,
                 sender: "server".into(),
                 message: "pong".into(),
             };
@@ -161,7 +171,6 @@ mod tests {
         let mut client = Connection::new(client_stream);
 
         let pos = Packet::PlayerPosition {
-            protocol_version: crate::network::protocol::PROTOCOL_VERSION,
             id: 1,
             sequence: 3,
             sender_time_millis: 150,
@@ -172,7 +181,6 @@ mod tests {
             pitch: 30.0,
         };
         let act = Packet::PlayerAction {
-            protocol_version: crate::network::protocol::PROTOCOL_VERSION,
             id: 1,
             action: Action::Break,
         };
@@ -255,5 +263,38 @@ mod tests {
 
         assert_eq!(r1, p1);
         assert_eq!(r2, p2);
+    }
+
+    #[tokio::test]
+    async fn recv_rejects_length_header_above_max_packet_size() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let client_stream = TcpStream::connect(addr).await.unwrap();
+        let mut server_stream = listener.accept().await.unwrap().0;
+
+        let (reader_half, _writer_half) = client_stream.into_split();
+        let mut reader = ConnectionReader {
+            stream: reader_half,
+            buf: Vec::new(),
+            frame_len: None,
+        };
+
+        // 2 MiB + 1, plus a short body that must not be allocated as the frame.
+        let header = 0x0020_0001u32.to_be_bytes();
+        server_stream.write_all(&header).await.unwrap();
+        server_stream.write_all(&[0u8; 16]).await.unwrap();
+        server_stream.flush().await.unwrap();
+
+        let error = reader.recv().await.expect_err("oversized length header");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("exceeds maximum"));
+        assert!(reader.frame_len.is_none());
+        assert!(
+            reader.buf.len() < MAX_PACKET_SIZE,
+            "body must not be reserved at the advertised length"
+        );
     }
 }

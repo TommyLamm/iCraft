@@ -1,6 +1,6 @@
 # Multiplayer Sub-task 1: Network Protocol & Transport Layer
 
-> **Parent task:** [plans/p3/25_multiplayer.md](../../../plans/p3/25_multiplayer.md) (任務 25 - 多人遊戲)
+> **Parent task:** [plans/01_basic_gameplay/p3/25_multiplayer.md](../../../plans/01_basic_gameplay/p3/25_multiplayer.md) (任務 25 - 多人遊戲)
 > **Sub-task:** 1 of 6 — foundation layer with **no game-logic dependencies**.
 > **Depends on:** nothing. **Blocks:** Sub-tasks 2, 3, 4, 5.
 >

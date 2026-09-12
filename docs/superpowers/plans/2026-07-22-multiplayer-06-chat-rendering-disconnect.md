@@ -1,6 +1,6 @@
 # Multiplayer Sub-task 6: Chat, Remote Player Rendering & Disconnect Handling
 
-> **Parent task:** [plans/p3/25_multiplayer.md](../../../plans/p3/25_multiplayer.md) (任務 25 - 多人遊戲)
+> **Parent task:** [plans/01_basic_gameplay/p3/25_multiplayer.md](../../../plans/01_basic_gameplay/p3/25_multiplayer.md) (任務 25 - 多人遊戲)
 > **Sub-task:** 6 of 6 (final) - the user-facing surface: chat UI, remote-player avatars, name tags, and graceful disconnect.
 > **Depends on:** Sub-task 3 (Client Bridge), Sub-task 4 (Player Sync data). **Blocks:** nothing - completes task 25.
 >
@@ -152,7 +152,7 @@
   The network and CPU/render-construction portions above are covered by automated tests. The final two-window visual/interaction pass was not run in this non-interactive workspace and is recorded as a release recommendation rather than an unverified code blocker.
 
 - [x] **Step 3: Update tracking docs**
-  - Mark task #25 complete in `plans/progress.md` (status 🟢, completion date, changelog entry summarizing the 6 sub-tasks, new files, modified files, key decisions, and verification).
+  - Mark task #25 complete in `plans/01_basic_gameplay/progress.md` (status 🟢, completion date, changelog entry summarizing the 6 sub-tasks, new files, modified files, key decisions, and verification).
   - Refresh `ARCHITECTURE.md`: add a "Networking" subsection under "Runtime data flows" and a `src/network/` row in the source routing table; note the listen-server model, the background-thread + mpsc bridge, shared-seed deterministic generation, and host-authoritative block sync.
 
 ---
@@ -165,12 +165,12 @@
 - **[MODIFY]** `src/network/server.rs`
 - **[MODIFY]** `src/network/client.rs`
 - **[MODIFY]** `ARCHITECTURE.md`
-- **[MODIFY]** `plans/progress.md`
+- **[MODIFY]** `plans/01_basic_gameplay/progress.md`
 - **[MODIFY]** `docs/superpowers/plans/2026-07-22-multiplayer-06-chat-rendering-disconnect.md`
 
 ## Verification Gate (Task 25 Complete)
 
-All four acceptance criteria from `plans/p3/25_multiplayer.md` are met:
+All four acceptance criteria from `plans/01_basic_gameplay/p3/25_multiplayer.md` are met:
 - [x] Two clients connect to one server.
 - [x] Players are mutually visible with synced positions.
 - [x] Block placement is visible to the other client.

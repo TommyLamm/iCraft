@@ -18,14 +18,11 @@ const SIXTEENTH: f32 = 1.0 / 16.0;
 /// atlas tile without asking the world/state layer to understand JSON.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModelDescriptor {
-    pub parent: Option<String>,
     pub atlas_tile: Option<(u32, u32)>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RawModelDescriptor {
-    #[serde(default)]
-    parent: Option<String>,
     #[serde(default)]
     atlas_tile: Option<[u32; 2]>,
 }
@@ -39,12 +36,14 @@ pub struct ModelRegistry {
 }
 
 impl ModelRegistry {
-    pub fn from_resource_packs<'a, I>(manager: &mut ResourcePackManager, model_paths: I) -> Self
+    pub fn from_resource_packs<I, S>(manager: &mut ResourcePackManager, model_paths: I) -> Self
     where
-        I: IntoIterator<Item = &'a str>,
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
     {
         let mut registry = Self::default();
         for path in model_paths {
+            let path = path.as_ref();
             // A complete registry probes every known block path.  Missing
             // descriptors are normal for packs that only override a subset
             // of blocks, so use the quiet read path and diagnose only assets
@@ -78,146 +77,57 @@ impl ModelRegistry {
     }
 
     pub fn atlas_tile_for_block(&self, block: BlockType, fallback: (u32, u32)) -> (u32, u32) {
-        self.atlas_tile_for(model_path_for_block(block), fallback)
+        self.atlas_tile_for(&model_path_for_block(block), fallback)
+    }
+}
+
+/// Convert a PascalCase / SCREAMING ident into snake_case.
+fn pascal_to_snake(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    let bytes = name.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        let c = b as char;
+        if c.is_ascii_uppercase() && i > 0 {
+            let prev_lower = (bytes[i - 1] as char).is_ascii_lowercase();
+            let next_lower = bytes
+                .get(i + 1)
+                .map(|n| (*n as char).is_ascii_lowercase())
+                .unwrap_or(false);
+            if prev_lower || next_lower {
+                out.push('_');
+            }
+        }
+        out.push(c.to_ascii_lowercase());
+    }
+    out
+}
+
+/// Model path slug derived from the [`BlockType`] discriminant name.
+///
+/// `Grass` keeps the historical `grass_block` pack path; reserved wire holes
+/// use `reservedN` so packs never need the deleted powered/open variant names.
+fn model_slug_for_block(block: BlockType) -> String {
+    match block {
+        BlockType::Grass => "grass_block".to_string(),
+        other => pascal_to_snake(&format!("{other:?}")),
     }
 }
 
 /// Canonical resource path for a block model descriptor.
 ///
-/// The table is intentionally explicit and follows the wire enum order, so
-/// model lookup is stable even when a pack does not provide every descriptor.
-pub fn model_path_for_block(block: BlockType) -> &'static str {
-    MODEL_PATHS[block as usize]
+/// Paths are derived from the [`BlockType`] name (`models/block/{snake}.json`)
+/// so adding a variant does not require a parallel `MODEL_PATHS` table.
+pub fn model_path_for_block(block: BlockType) -> String {
+    format!("models/block/{}.json", model_slug_for_block(block))
 }
 
 /// Every canonical block model path, in [`BlockType`] discriminant order.
-pub fn all_model_paths() -> impl Iterator<Item = &'static str> {
-    MODEL_PATHS.iter().copied()
+pub fn all_model_paths() -> impl Iterator<Item = String> {
+    (0..=BlockType::Observer as u8).map(|id| {
+        let block: BlockType = unsafe { std::mem::transmute(id) };
+        model_path_for_block(block)
+    })
 }
-
-const MODEL_PATHS: [&str; BlockType::Observer as usize + 1] = [
-    "models/block/air.json",
-    "models/block/grass_block.json",
-    "models/block/dirt.json",
-    "models/block/stone.json",
-    "models/block/sand.json",
-    "models/block/gravel.json",
-    "models/block/oak_log.json",
-    "models/block/oak_planks.json",
-    "models/block/oak_leaves.json",
-    "models/block/cobblestone.json",
-    "models/block/bedrock.json",
-    "models/block/water.json",
-    "models/block/coal_ore.json",
-    "models/block/iron_ore.json",
-    "models/block/gold_ore.json",
-    "models/block/diamond_ore.json",
-    "models/block/redstone_ore.json",
-    "models/block/glass.json",
-    "models/block/brick.json",
-    "models/block/stone_brick.json",
-    "models/block/snow.json",
-    "models/block/ice.json",
-    "models/block/clay.json",
-    "models/block/sandstone.json",
-    "models/block/obsidian.json",
-    "models/block/crafting_table.json",
-    "models/block/furnace.json",
-    "models/block/chest.json",
-    "models/block/tnt.json",
-    "models/block/bookshelf.json",
-    "models/block/torch.json",
-    "models/block/lava.json",
-    "models/block/birch_log.json",
-    "models/block/birch_planks.json",
-    "models/block/birch_leaves.json",
-    "models/block/spruce_log.json",
-    "models/block/spruce_planks.json",
-    "models/block/spruce_leaves.json",
-    "models/block/tall_grass.json",
-    "models/block/dandelion.json",
-    "models/block/poppy.json",
-    "models/block/cactus.json",
-    "models/block/sugar_cane.json",
-    "models/block/pumpkin.json",
-    "models/block/melon.json",
-    "models/block/enchanting_table.json",
-    "models/block/brewing_stand.json",
-    "models/block/anvil.json",
-    "models/block/redstone_wire.json",
-    "models/block/redstone_torch.json",
-    "models/block/redstone_torch_off.json",
-    "models/block/repeater.json",
-    "models/block/repeater_powered.json",
-    "models/block/comparator.json",
-    "models/block/comparator_powered.json",
-    "models/block/stone_button.json",
-    "models/block/stone_button_pressed.json",
-    "models/block/lever.json",
-    "models/block/lever_on.json",
-    "models/block/pressure_plate.json",
-    "models/block/pressure_plate_powered.json",
-    "models/block/piston.json",
-    "models/block/piston_extended.json",
-    "models/block/sticky_piston.json",
-    "models/block/sticky_piston_extended.json",
-    "models/block/redstone_lamp.json",
-    "models/block/redstone_lamp_lit.json",
-    "models/block/oak_door.json",
-    "models/block/oak_door_open.json",
-    "models/block/oak_trapdoor.json",
-    "models/block/oak_trapdoor_open.json",
-    "models/block/dispenser.json",
-    "models/block/dropper.json",
-    "models/block/note_block.json",
-    "models/block/fire.json",
-    "models/block/snow_layer.json",
-    "models/block/netherrack.json",
-    "models/block/soul_sand.json",
-    "models/block/glowstone.json",
-    "models/block/nether_portal.json",
-    "models/block/end_stone.json",
-    "models/block/end_portal_frame.json",
-    "models/block/end_portal_frame_filled.json",
-    "models/block/end_portal.json",
-    "models/block/purpur.json",
-    "models/block/dragon_egg.json",
-    "models/block/wither_skeleton_skull.json",
-    "models/block/nether_brick.json",
-    "models/block/end_city_chest.json",
-    "models/block/bed.json",
-    "models/block/furnace_lit.json",
-    "models/block/farmland.json",
-    "models/block/wheat_crop.json",
-    "models/block/carrot_crop.json",
-    "models/block/potato_crop.json",
-    "models/block/oak_slab.json",
-    "models/block/cobblestone_slab.json",
-    "models/block/oak_stair.json",
-    "models/block/cobblestone_stair.json",
-    "models/block/oak_fence.json",
-    "models/block/oak_fence_gate.json",
-    "models/block/cobblestone_wall.json",
-    "models/block/glass_pane.json",
-    "models/block/oak_ladder.json",
-    "models/block/oak_sign.json",
-    "models/block/oak_sapling.json",
-    "models/block/birch_sapling.json",
-    "models/block/spruce_sapling.json",
-    "models/block/spawner.json",
-    "models/block/mossy_cobblestone.json",
-    "models/block/dirt_path.json",
-    "models/block/nether_wart_crop.json",
-    "models/block/end_stone_brick.json",
-    "models/block/respawn_anchor.json",
-    "models/block/end_gateway.json",
-    "models/block/rail.json",
-    "models/block/powered_rail.json",
-    "models/block/detector_rail.json",
-    "models/block/activator_rail.json",
-    "models/block/hopper.json",
-    "models/block/observer.json",
-];
 
 fn normalize_model_path(path: &str) -> Result<String, ()> {
     let path = path.replace('\\', "/");
@@ -229,17 +139,11 @@ fn normalize_model_path(path: &str) -> Result<String, ()> {
 
 fn parse_model_descriptor(bytes: &[u8]) -> Option<ModelDescriptor> {
     let raw = serde_json::from_slice::<RawModelDescriptor>(bytes).ok()?;
-    if raw.parent.as_ref().is_some_and(|parent| parent.len() > 256) {
-        return None;
-    }
     let atlas_tile = raw.atlas_tile.map(|tile| (tile[0], tile[1]));
     if atlas_tile.is_some_and(|(x, y)| x >= 16 || y >= 16) {
         return None;
     }
-    Some(ModelDescriptor {
-        parent: raw.parent,
-        atlas_tile,
-    })
+    Some(ModelDescriptor { atlas_tile })
 }
 
 fn push_quad(
@@ -265,54 +169,11 @@ fn push_quad(
     indices.extend_from_slice(&[start, start + 1, start + 2, start + 2, start + 3, start]);
 }
 
-fn append_box(
-    vertices: &mut Vec<TerrainVertex>,
-    indices: &mut Vec<u32>,
-    origin: [f32; 3],
-    bounds: ([f32; 3], [f32; 3]),
-    sky_light: u8,
-    block_light: u8,
-    atlas_tile: (u32, u32),
-    region_coord: (i32, i32),
-) {
-    append_box_with_face_skip(
-        vertices,
-        indices,
-        origin,
-        bounds,
-        sky_light,
-        block_light,
-        atlas_tile,
-        region_coord,
-        None,
-    );
-}
-
-fn append_box_without_face(
-    vertices: &mut Vec<TerrainVertex>,
-    indices: &mut Vec<u32>,
-    origin: [f32; 3],
-    bounds: ([f32; 3], [f32; 3]),
-    sky_light: u8,
-    block_light: u8,
-    atlas_tile: (u32, u32),
-    region_coord: (i32, i32),
-    skip_face: usize,
-) {
-    append_box_with_face_skip(
-        vertices,
-        indices,
-        origin,
-        bounds,
-        sky_light,
-        block_light,
-        atlas_tile,
-        region_coord,
-        Some(skip_face),
-    );
-}
-
-fn append_box_with_face_skip(
+/// Shared axis-aligned box emitter for `TerrainVertex` meshes.
+///
+/// Face order: north, south, west, east, top, bottom. `skip_face` drops one
+/// face by that index (used by waterlogged slab water caps).
+pub fn emit_box(
     vertices: &mut Vec<TerrainVertex>,
     indices: &mut Vec<u32>,
     origin: [f32; 3],
@@ -393,6 +254,53 @@ fn append_box_with_face_skip(
             region_coord,
         );
     }
+}
+
+fn append_box(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    origin: [f32; 3],
+    bounds: ([f32; 3], [f32; 3]),
+    sky_light: u8,
+    block_light: u8,
+    atlas_tile: (u32, u32),
+    region_coord: (i32, i32),
+) {
+    emit_box(
+        vertices,
+        indices,
+        origin,
+        bounds,
+        sky_light,
+        block_light,
+        atlas_tile,
+        region_coord,
+        None,
+    );
+}
+
+fn append_box_without_face(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    origin: [f32; 3],
+    bounds: ([f32; 3], [f32; 3]),
+    sky_light: u8,
+    block_light: u8,
+    atlas_tile: (u32, u32),
+    region_coord: (i32, i32),
+    skip_face: usize,
+) {
+    emit_box(
+        vertices,
+        indices,
+        origin,
+        bounds,
+        sky_light,
+        block_light,
+        atlas_tile,
+        region_coord,
+        Some(skip_face),
+    );
 }
 
 fn is_connectable(neighbor: BlockType, self_type: BlockType) -> bool {
@@ -1224,16 +1132,22 @@ mod tests {
         assert!(trans_vertices
             .iter()
             .all(|vertex| vertex.atlas_tile == [3, 4]));
-        assert!(trans_vertices.iter().all(|vertex| vertex.pos[1] >= 16));
-        assert!(trans_vertices.iter().all(|vertex| vertex.pos[1] <= 32));
-        let has_horizontal_quad = |vertices: &[TerrainVertex], indices: &[u32], y: u16| {
+        // Packed `pos.y` is relative to `REGION_ORIGIN_Y`; compare decoded local Y.
+        assert!(trans_vertices
+            .iter()
+            .all(|vertex| vertex.local_position()[1] >= 0.5));
+        assert!(trans_vertices
+            .iter()
+            .all(|vertex| vertex.local_position()[1] <= 1.0));
+        let has_horizontal_quad = |vertices: &[TerrainVertex], indices: &[u32], y: f32| {
             indices.chunks_exact(6).any(|quad| {
-                quad.iter()
-                    .all(|index| vertices[*index as usize].pos[1] == y)
+                quad.iter().all(|index| {
+                    (vertices[*index as usize].local_position()[1] - y).abs() < 1e-3
+                })
             })
         };
-        assert!(!has_horizontal_quad(&trans_vertices, &trans_indices, 16));
-        assert!(has_horizontal_quad(&trans_vertices, &trans_indices, 32));
+        assert!(!has_horizontal_quad(&trans_vertices, &trans_indices, 0.5));
+        assert!(has_horizontal_quad(&trans_vertices, &trans_indices, 1.0));
 
         let mut top_vertices = Vec::new();
         let mut top_indices = Vec::new();
@@ -1255,9 +1169,11 @@ mod tests {
         );
         assert_eq!(top_vertices.len(), 20);
         assert_eq!(top_indices.len(), 30);
-        assert!(top_vertices.iter().all(|vertex| vertex.pos[1] <= 16));
-        assert!(!has_horizontal_quad(&top_vertices, &top_indices, 16));
-        assert!(has_horizontal_quad(&top_vertices, &top_indices, 0));
+        assert!(top_vertices
+            .iter()
+            .all(|vertex| vertex.local_position()[1] <= 0.5));
+        assert!(!has_horizontal_quad(&top_vertices, &top_indices, 0.5));
+        assert!(has_horizontal_quad(&top_vertices, &top_indices, 0.0));
 
         let before = trans_vertices.len();
         append_waterlogged_slab_mesh(
@@ -1290,8 +1206,31 @@ mod tests {
             model_path_for_block(BlockType::OakSlab),
             "models/block/oak_slab.json"
         );
+        assert_eq!(
+            model_path_for_block(BlockType::TNT),
+            "models/block/tnt.json"
+        );
+        assert_eq!(
+            model_path_for_block(BlockType::Reserved50),
+            "models/block/reserved50.json"
+        );
+        assert_eq!(
+            model_path_for_block(BlockType::Observer),
+            "models/block/observer.json"
+        );
+        for (id, path) in paths.iter().enumerate() {
+            let block: BlockType = unsafe { std::mem::transmute(id as u8) };
+            assert_eq!(path, &model_path_for_block(block));
+            assert!(path.starts_with("models/block/") && path.ends_with(".json"));
+            let slug = path
+                .trim_start_matches("models/block/")
+                .trim_end_matches(".json");
+            assert!(!slug.is_empty());
+            assert!(slug
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'));
+        }
         assert!(paths.windows(2).all(|pair| pair[0] != pair[1]));
-        assert!(paths.iter().all(|path| path.starts_with("models/block/")));
     }
 
     #[test]
@@ -1309,7 +1248,7 @@ mod tests {
         let registry = ModelRegistry::from_resource_packs(&mut manager, all_model_paths());
         assert_eq!(
             registry
-                .descriptor(model_path_for_block(BlockType::Stone))
+                .descriptor(&model_path_for_block(BlockType::Stone))
                 .and_then(|descriptor| descriptor.atlas_tile),
             None
         );
