@@ -2,17 +2,14 @@ use crate::world::{
     section_and_local_y_to_world_y, BlockType, Chunk, ChunkSection, CHUNK_DEPTH, CHUNK_WIDTH,
     SECTION_SIZE,
 };
+use crate::structure::placement::{END_CITY_BASE_Y, END_CITY_X, END_CITY_Z};
 use glam::Vec3;
 use noise::{NoiseFn, Perlin};
-use crate::world::chunk_xz;
 
 pub type BlockPos = (i32, i32, i32);
 
 const LAVA_LEVEL: usize = 31;
 const NETHER_COLUMN_HEIGHT: usize = WorldHeight::NETHER.height() as usize;
-const END_CITY_X: i32 = 1_032;
-const END_CITY_Z: i32 = 8;
-const END_CITY_BASE_Y: i32 = 71;
 
 /// Block-center X/Z and entity Y for the eight main-island healing crystals.
 pub const END_CRYSTAL_TOWERS: [(i32, i32, i32); 8] = [
@@ -220,45 +217,8 @@ pub fn generate_chunk_with_options(
             std::sync::OnceLock::new();
         let manager = STRUCTURE_MANAGER.get_or_init(|| crate::structure::StructureManager::new());
         manager.apply_structures_to_chunk(&mut chunk, dimension, seed);
-        if dimension == Dimension::End {
-            apply_fixed_end_city(&mut chunk, seed);
-        }
     }
     chunk
-}
-
-fn apply_fixed_end_city(chunk: &mut Chunk, seed: u32) {
-    let start = crate::structure::gen::end_city::generate_end_city(
-        END_CITY_X,
-        END_CITY_BASE_Y,
-        END_CITY_Z,
-        seed,
-    );
-    for piece in &start.pieces {
-        if !piece
-            .bounding_box
-            .intersects_chunk(chunk.chunk_x, chunk.chunk_z)
-        {
-            continue;
-        }
-        for placement in &piece.blocks {
-            if chunk_xz(placement.world_x, placement.world_z) != (chunk.chunk_x, chunk.chunk_z)
-            {
-                continue;
-            }
-            let lx = placement.world_x.rem_euclid(16) as usize;
-            let lz = placement.world_z.rem_euclid(16) as usize;
-            chunk.set_block_local(lx, placement.world_y, lz, placement.block_type);
-            if let Some(entity) = &placement.block_entity {
-                let _ = chunk.insert_block_entity(
-                    lx as u8,
-                    placement.world_y as i16,
-                    lz as u8,
-                    entity.clone(),
-                );
-            }
-        }
-    }
 }
 
 fn generate_superflat_chunk(chunk_x: i32, chunk_z: i32, _seed: u32) -> Chunk {
@@ -479,7 +439,9 @@ fn end_surface_at(world_x: i32, world_z: i32, seed: u32) -> Option<i32> {
     let city_dz = (world_z - END_CITY_Z) as f64;
     let city_distance = city_dx.hypot(city_dz);
     if city_distance <= 46.0 {
-        return Some(64 + ((1.0 - city_distance / 46.0) * 6.0).round() as i32);
+        // Disc peaks one block under the pinned city base (END_CITY_BASE_Y).
+        let disc_floor = END_CITY_BASE_Y - 7;
+        return Some(disc_floor + ((1.0 - city_distance / 46.0) * 6.0).round() as i32);
     }
 
     const GRID: i32 = 192;

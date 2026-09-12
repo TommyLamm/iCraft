@@ -402,7 +402,11 @@ LODs are filled the first time the camera selects them.
 - `worldgen/` owns climate, density, surfaces, caves, ores, features.
 - `structure/` owns villages, strongholds, fortresses, End cities, dungeons,
   mineshafts. Structure-start caches are `(seed, dimension, region_x,
-  region_z)`.
+  region_z)`. Generators share `fill_box` / `hollow_box` / `place_loot_chest`
+  / `finish_start`. The End pins one familiar city at
+  `(END_CITY_X, END_CITY_BASE_Y, END_CITY_Z)` inside `StructureManager`
+  (same Y as `origin_y_for(EndCity)`); there is no parallel
+  `dimension::apply_fixed_end_city` path.
 - Column fill samples surface/biome once per (x, z), then `block_at_sampled`
   per Y. Ambient spawn uses `ChunkManager::highest_solid_y`.
 

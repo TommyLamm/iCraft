@@ -1,4 +1,6 @@
-use super::placement::{get_structure_candidate_in_region, origin_y_for};
+use super::placement::{
+    get_structure_candidate_in_region, origin_y_for, END_CITY_BASE_Y, END_CITY_X, END_CITY_Z,
+};
 use super::types::StructureId;
 use crate::dimension::Dimension;
 use crate::world::{chunk_origin, chunk_xz};
@@ -13,6 +15,15 @@ pub fn locate_structure(
 
     let mut closest: Option<((i32, i32, i32), f64)> = None;
     let radius_regions = 20;
+
+    let consider = |pos: (i32, i32, i32), closest: &mut Option<((i32, i32, i32), f64)>| {
+        let dx = (pos.0 - current_pos.0) as f64;
+        let dz = (pos.2 - current_pos.2) as f64;
+        let dist_sq = dx * dx + dz * dz;
+        if closest.map_or(true, |(_, best_dist)| dist_sq < best_dist) {
+            *closest = Some((pos, dist_sq));
+        }
+    };
 
     for r in 0..=radius_regions {
         for rx in -r..=r {
@@ -29,20 +40,21 @@ pub fn locate_structure(
                     let origin_x = chunk_origin(chunk_x) + 2;
                     let origin_z = chunk_origin(chunk_z) + 2;
                     let origin_y = origin_y_for(id, world_seed, chunk_x, chunk_z);
-
-                    let dx = (origin_x - current_pos.0) as f64;
-                    let dz = (origin_z - current_pos.2) as f64;
-                    let dist_sq = dx * dx + dz * dz;
-
-                    if closest.map_or(true, |(_, best_dist)| dist_sq < best_dist) {
-                        closest = Some(((origin_x, origin_y, origin_z), dist_sq));
-                    }
+                    consider((origin_x, origin_y, origin_z), &mut closest);
                 }
             }
         }
         if closest.is_some() {
             break;
         }
+    }
+
+    // Always compete the pinned familiar city so locate matches manager placement.
+    if id == StructureId::EndCity && dimension == Dimension::End {
+        consider(
+            (END_CITY_X, END_CITY_BASE_Y, END_CITY_Z),
+            &mut closest,
+        );
     }
 
     closest.map(|(pos, _)| pos)
@@ -113,5 +125,32 @@ mod tests {
             y,
             surface.clamp(height.min_y(), height.max_y_exclusive() - 1)
         );
+    }
+
+    #[test]
+    fn locate_end_city_matches_pinned_placement() {
+        let seed = 7;
+        let pos = locate_structure(
+            StructureId::EndCity,
+            (1000, 64, 0),
+            seed,
+            Dimension::End,
+        )
+        .expect("End City");
+        assert_eq!(pos, (END_CITY_X, END_CITY_BASE_Y, END_CITY_Z));
+
+        let manager = crate::structure::StructureManager::new();
+        let starts = manager.get_or_generate_starts(Dimension::End, seed, 2, 0);
+        let city = starts
+            .iter()
+            .find(|s| {
+                s.id == StructureId::EndCity
+                    && s.origin_x == END_CITY_X
+                    && s.origin_z == END_CITY_Z
+            })
+            .expect("pinned city in manager");
+        assert_eq!(city.origin_x, pos.0);
+        assert_eq!(city.origin_y, pos.1);
+        assert_eq!(city.origin_z, pos.2);
     }
 }

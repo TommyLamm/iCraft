@@ -2,6 +2,12 @@ use super::types::StructureId;
 use crate::dimension::Dimension;
 use crate::world::chunk_origin;
 
+/// Familiar fixed End City origin (block coords). Manager pins one start here.
+pub const END_CITY_X: i32 = 1_032;
+pub const END_CITY_Z: i32 = 8;
+/// Shared Y for `/locate`, grid End Cities, and the pinned city.
+pub const END_CITY_BASE_Y: i32 = 71;
+
 /// Shared origin Y for `/locate` and actual structure placement.
 ///
 /// Village uses the generated surface height, clamped to Overworld bounds.
@@ -21,7 +27,7 @@ pub fn origin_y_for(id: StructureId, seed: u32, chunk_x: i32, chunk_z: i32) -> i
         }
         StructureId::Stronghold => 22,
         StructureId::NetherFortress => 55,
-        StructureId::EndCity => 64,
+        StructureId::EndCity => END_CITY_BASE_Y,
     }
 }
 
