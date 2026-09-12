@@ -1,4 +1,9 @@
-use crate::world::BlockType;
+use crate::world::{BlockType, BLOCK_TYPE_COUNT};
+use std::sync::OnceLock;
+
+#[path = "item_table.rs"]
+mod item_table;
+pub use item_table::{ItemDef, ITEM_COUNT, ITEM_DEFS};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Item {
@@ -727,416 +732,17 @@ pub struct ItemProperties {
 }
 
 impl Item {
+    #[inline]
+    pub fn def(self) -> &'static ItemDef {
+        &ITEM_DEFS[self as usize]
+    }
+
     pub fn creative_tab(self) -> Option<CreativeTab> {
-        match self {
-            Item::Air => None,
-            Item::Grass
-            | Item::Dirt
-            | Item::Stone
-            | Item::Sand
-            | Item::Gravel
-            | Item::OakLog
-            | Item::OakPlanks
-            | Item::OakLeaves
-            | Item::Cobblestone
-            | Item::Bedrock
-            | Item::Water
-            | Item::CoalOre
-            | Item::IronOre
-            | Item::GoldOre
-            | Item::DiamondOre
-            | Item::RedstoneOre
-            | Item::Glass
-            | Item::Brick
-            | Item::StoneBrick
-            | Item::Snow
-            | Item::Ice
-            | Item::Clay
-            | Item::Sandstone
-            | Item::Obsidian
-            | Item::CraftingTable
-            | Item::Furnace
-            | Item::Chest
-            | Item::Bookshelf
-            | Item::Torch
-            | Item::Lava
-            | Item::BirchLog
-            | Item::BirchPlanks
-            | Item::BirchLeaves
-            | Item::SpruceLog
-            | Item::SprucePlanks
-            | Item::SpruceLeaves
-            | Item::TallGrass
-            | Item::Dandelion
-            | Item::Poppy
-            | Item::Cactus
-            | Item::SugarCane
-            | Item::Pumpkin
-            | Item::Melon
-            | Item::EnchantingTable
-            | Item::BrewingStand
-            | Item::Anvil
-            | Item::Netherrack
-            | Item::SoulSand
-            | Item::Glowstone
-            | Item::EndStone
-            | Item::EndPortalFrame
-            | Item::Purpur
-            | Item::DragonEgg
-            | Item::WitherSkeletonSkull
-            | Item::NetherBrick => Some(CreativeTab::Blocks),
-            Item::StonePickaxe
-            | Item::StoneAxe
-            | Item::StoneShovel
-            | Item::IronPickaxe
-            | Item::IronAxe
-            | Item::IronShovel
-            | Item::DiamondPickaxe
-            | Item::DiamondAxe
-            | Item::DiamondShovel
-            | Item::WoodenHoe
-            | Item::StoneHoe
-            | Item::IronHoe
-            | Item::GoldenHoe
-            | Item::DiamondHoe
-            | Item::Shears
-            | Item::Bucket
-            | Item::WaterBucket
-            | Item::LavaBucket
-            | Item::MilkBucket
-            | Item::FlintAndSteel
-            | Item::Elytra => Some(CreativeTab::Tools),
-            Item::StoneSword
-            | Item::IronSword
-            | Item::DiamondSword
-            | Item::WoodenSword
-            | Item::WoodenPickaxe
-            | Item::WoodenAxe
-            | Item::WoodenShovel
-            | Item::GoldenSword
-            | Item::GoldenPickaxe
-            | Item::GoldenAxe
-            | Item::GoldenShovel
-            | Item::Bow
-            | Item::Arrow
-            | Item::Shield
-            | Item::LeatherHelmet
-            | Item::LeatherChestplate
-            | Item::LeatherLeggings
-            | Item::LeatherBoots
-            | Item::GoldenHelmet
-            | Item::GoldenChestplate
-            | Item::GoldenLeggings
-            | Item::GoldenBoots
-            | Item::IronHelmet
-            | Item::IronChestplate
-            | Item::IronLeggings
-            | Item::IronBoots
-            | Item::DiamondHelmet
-            | Item::DiamondChestplate
-            | Item::DiamondLeggings
-            | Item::DiamondBoots
-            | Item::EndCrystal => Some(CreativeTab::Combat),
-            Item::Apple
-            | Item::Bread
-            | Item::Potato
-            | Item::BakedPotato
-            | Item::PoisonousPotato
-            | Item::GoldenApple
-            | Item::Gunpowder
-            | Item::Wheat
-            | Item::Carrot
-            | Item::RawPorkchop
-            | Item::CookedPorkchop
-            | Item::RawBeef
-            | Item::CookedBeef
-            | Item::RawMutton
-            | Item::CookedMutton
-            | Item::RawChicken
-            | Item::CookedChicken
-            | Item::Egg
-            | Item::GlassBottle
-            | Item::Potion
-            | Item::SplashPotion
-            | Item::NetherWart
-            | Item::Sugar
-            | Item::BlazePowder
-            | Item::GlisteringMelon
-            | Item::GhastTear
-            | Item::GoldenCarrot
-            | Item::FermentedSpiderEye
-            | Item::MagmaCream
-            | Item::Pufferfish
-            | Item::SpiderEye
-            | Item::GlowstoneDust
-            | Item::RedstoneDust => Some(CreativeTab::FoodAndBrewing),
-            Item::TNT
-            | Item::Redstone
-            | Item::RedstoneWire
-            | Item::RedstoneTorch
-            | Item::Repeater
-            | Item::Comparator
-            | Item::StoneButton
-            | Item::Lever
-            | Item::PressurePlate
-            | Item::Piston
-            | Item::StickyPiston
-            | Item::RedstoneLamp
-            | Item::OakDoor
-            | Item::OakTrapdoor
-            | Item::Dispenser
-            | Item::Dropper
-            | Item::NoteBlock
-            | Item::Hopper
-            | Item::Observer => Some(CreativeTab::Redstone),
-            Item::Stick
-            | Item::Coal
-            | Item::IronIngot
-            | Item::GoldIngot
-            | Item::Diamond
-            | Item::BoneMeal
-            | Item::RottenFlesh
-            | Item::Bone
-            | Item::Seeds
-            | Item::Wool
-            | Item::Leather
-            | Item::Feather
-            | Item::RedDye
-            | Item::BlueDye
-            | Item::GreenDye
-            | Item::LapisLazuli
-            | Item::EyeOfEnder
-            | Item::NetherStar
-            | Item::BlazeRod
-            | Item::Bed
-            | Item::ShulkerShell
-            | Item::Saddle
-            | Item::Emerald
-            | Item::Book
-            | Item::Paper
-            | Item::EnchantedBook
-            | Item::Compass => Some(CreativeTab::Misc),
-            Item::OakSlab => Some(CreativeTab::Blocks),
-            Item::CobblestoneSlab => Some(CreativeTab::Blocks),
-            Item::OakStair => Some(CreativeTab::Blocks),
-            Item::CobblestoneStair => Some(CreativeTab::Blocks),
-            Item::OakFence => Some(CreativeTab::Blocks),
-            Item::OakFenceGate => Some(CreativeTab::Blocks),
-            Item::CobblestoneWall => Some(CreativeTab::Blocks),
-            Item::GlassPane => Some(CreativeTab::Blocks),
-            Item::OakLadder => Some(CreativeTab::Blocks),
-            Item::OakSign => Some(CreativeTab::Blocks),
-            Item::String
-            | Item::Slimeball
-            | Item::RawCod
-            | Item::RawSalmon
-            | Item::InkSac
-            | Item::OakBoat
-            | Item::Minecart
-            | Item::Rail
-            | Item::PoweredRail
-            | Item::DetectorRail
-            | Item::ActivatorRail
-            | Item::Clock
-            | Item::Map
-            | Item::FishingRod
-            | Item::RawFish
-            | Item::TropicalFish
-            | Item::LilyPad => Some(CreativeTab::Misc),
-        }
+        self.def().creative_tab
     }
 
     pub fn tool_properties(self) -> Option<ToolProperties> {
-        match self {
-            Item::StoneSword => Some(ToolProperties {
-                tool_type: ToolType::Sword,
-                material: ToolMaterial::Stone,
-                mining_speed: 4.0,
-                durability: 131,
-                damage: 5.0,
-            }),
-            Item::StonePickaxe => Some(ToolProperties {
-                tool_type: ToolType::Pickaxe,
-                material: ToolMaterial::Stone,
-                mining_speed: 4.0,
-                durability: 131,
-                damage: 3.0,
-            }),
-            Item::StoneAxe => Some(ToolProperties {
-                tool_type: ToolType::Axe,
-                material: ToolMaterial::Stone,
-                mining_speed: 4.0,
-                durability: 131,
-                damage: 4.0,
-            }),
-            Item::StoneShovel => Some(ToolProperties {
-                tool_type: ToolType::Shovel,
-                material: ToolMaterial::Stone,
-                mining_speed: 4.0,
-                durability: 131,
-                damage: 2.0,
-            }),
-            Item::Shears => Some(ToolProperties {
-                tool_type: ToolType::None,
-                material: ToolMaterial::Iron,
-                mining_speed: 1.0,
-                durability: 238,
-                damage: 1.0,
-            }),
-
-            Item::IronSword => Some(ToolProperties {
-                tool_type: ToolType::Sword,
-                material: ToolMaterial::Iron,
-                mining_speed: 6.0,
-                durability: 250,
-                damage: 6.0,
-            }),
-            Item::IronPickaxe => Some(ToolProperties {
-                tool_type: ToolType::Pickaxe,
-                material: ToolMaterial::Iron,
-                mining_speed: 6.0,
-                durability: 250,
-                damage: 4.0,
-            }),
-            Item::IronAxe => Some(ToolProperties {
-                tool_type: ToolType::Axe,
-                material: ToolMaterial::Iron,
-                mining_speed: 6.0,
-                durability: 250,
-                damage: 5.0,
-            }),
-            Item::IronShovel => Some(ToolProperties {
-                tool_type: ToolType::Shovel,
-                material: ToolMaterial::Iron,
-                mining_speed: 6.0,
-                durability: 250,
-                damage: 3.0,
-            }),
-
-            Item::DiamondSword => Some(ToolProperties {
-                tool_type: ToolType::Sword,
-                material: ToolMaterial::Diamond,
-                mining_speed: 8.0,
-                durability: 1561,
-                damage: 7.0,
-            }),
-            Item::DiamondPickaxe => Some(ToolProperties {
-                tool_type: ToolType::Pickaxe,
-                material: ToolMaterial::Diamond,
-                mining_speed: 8.0,
-                durability: 1561,
-                damage: 5.0,
-            }),
-            Item::DiamondAxe => Some(ToolProperties {
-                tool_type: ToolType::Axe,
-                material: ToolMaterial::Diamond,
-                mining_speed: 8.0,
-                durability: 1561,
-                damage: 6.0,
-            }),
-            Item::DiamondShovel => Some(ToolProperties {
-                tool_type: ToolType::Shovel,
-                material: ToolMaterial::Diamond,
-                mining_speed: 8.0,
-                durability: 1561,
-                damage: 4.0,
-            }),
-
-            Item::WoodenHoe => Some(ToolProperties {
-                tool_type: ToolType::Hoe,
-                material: ToolMaterial::Wood,
-                mining_speed: 2.0,
-                durability: 59,
-                damage: 1.0,
-            }),
-            Item::StoneHoe => Some(ToolProperties {
-                tool_type: ToolType::Hoe,
-                material: ToolMaterial::Stone,
-                mining_speed: 4.0,
-                durability: 131,
-                damage: 1.0,
-            }),
-            Item::IronHoe => Some(ToolProperties {
-                tool_type: ToolType::Hoe,
-                material: ToolMaterial::Iron,
-                mining_speed: 6.0,
-                durability: 250,
-                damage: 1.0,
-            }),
-            Item::GoldenHoe => Some(ToolProperties {
-                tool_type: ToolType::Hoe,
-                material: ToolMaterial::Gold,
-                mining_speed: 12.0,
-                durability: 32,
-                damage: 1.0,
-            }),
-            Item::DiamondHoe => Some(ToolProperties {
-                tool_type: ToolType::Hoe,
-                material: ToolMaterial::Diamond,
-                mining_speed: 8.0,
-                durability: 1561,
-                damage: 1.0,
-            }),
-
-            Item::WoodenSword => Some(ToolProperties {
-                tool_type: ToolType::Sword,
-                material: ToolMaterial::Wood,
-                mining_speed: 2.0,
-                durability: 59,
-                damage: 4.0,
-            }),
-            Item::WoodenPickaxe => Some(ToolProperties {
-                tool_type: ToolType::Pickaxe,
-                material: ToolMaterial::Wood,
-                mining_speed: 2.0,
-                durability: 59,
-                damage: 2.0,
-            }),
-            Item::WoodenAxe => Some(ToolProperties {
-                tool_type: ToolType::Axe,
-                material: ToolMaterial::Wood,
-                mining_speed: 2.0,
-                durability: 59,
-                damage: 7.0,
-            }),
-            Item::WoodenShovel => Some(ToolProperties {
-                tool_type: ToolType::Shovel,
-                material: ToolMaterial::Wood,
-                mining_speed: 2.0,
-                durability: 59,
-                damage: 2.5,
-            }),
-
-            Item::GoldenSword => Some(ToolProperties {
-                tool_type: ToolType::Sword,
-                material: ToolMaterial::Gold,
-                mining_speed: 12.0,
-                durability: 32,
-                damage: 4.0,
-            }),
-            Item::GoldenPickaxe => Some(ToolProperties {
-                tool_type: ToolType::Pickaxe,
-                material: ToolMaterial::Gold,
-                mining_speed: 12.0,
-                durability: 32,
-                damage: 2.0,
-            }),
-            Item::GoldenAxe => Some(ToolProperties {
-                tool_type: ToolType::Axe,
-                material: ToolMaterial::Gold,
-                mining_speed: 12.0,
-                durability: 32,
-                damage: 7.0,
-            }),
-            Item::GoldenShovel => Some(ToolProperties {
-                tool_type: ToolType::Shovel,
-                material: ToolMaterial::Gold,
-                mining_speed: 12.0,
-                durability: 32,
-                damage: 2.5,
-            }),
-            _ => None,
-        }
+        self.def().tool
     }
 
     pub fn is_armor(self) -> bool {
@@ -1144,121 +750,7 @@ impl Item {
     }
 
     pub fn armor_properties(self) -> Option<ArmorProperties> {
-        match self {
-            Item::LeatherHelmet => Some(ArmorProperties {
-                slot: ArmorSlot::Helmet,
-                armor_points: 1.0,
-                toughness: 0.0,
-                knockback_resistance: 0.0,
-                durability: 55,
-            }),
-            Item::LeatherChestplate => Some(ArmorProperties {
-                slot: ArmorSlot::Chestplate,
-                armor_points: 3.0,
-                toughness: 0.0,
-                knockback_resistance: 0.0,
-                durability: 80,
-            }),
-            Item::LeatherLeggings => Some(ArmorProperties {
-                slot: ArmorSlot::Leggings,
-                armor_points: 2.0,
-                toughness: 0.0,
-                knockback_resistance: 0.0,
-                durability: 75,
-            }),
-            Item::LeatherBoots => Some(ArmorProperties {
-                slot: ArmorSlot::Boots,
-                armor_points: 1.0,
-                toughness: 0.0,
-                knockback_resistance: 0.0,
-                durability: 65,
-            }),
-            Item::GoldenHelmet => Some(ArmorProperties {
-                slot: ArmorSlot::Helmet,
-                armor_points: 2.0,
-                toughness: 0.0,
-                knockback_resistance: 0.0,
-                durability: 77,
-            }),
-            Item::GoldenChestplate => Some(ArmorProperties {
-                slot: ArmorSlot::Chestplate,
-                armor_points: 5.0,
-                toughness: 0.0,
-                knockback_resistance: 0.0,
-                durability: 112,
-            }),
-            Item::GoldenLeggings => Some(ArmorProperties {
-                slot: ArmorSlot::Leggings,
-                armor_points: 3.0,
-                toughness: 0.0,
-                knockback_resistance: 0.0,
-                durability: 105,
-            }),
-            Item::GoldenBoots => Some(ArmorProperties {
-                slot: ArmorSlot::Boots,
-                armor_points: 1.0,
-                toughness: 0.0,
-                knockback_resistance: 0.0,
-                durability: 91,
-            }),
-            Item::IronHelmet => Some(ArmorProperties {
-                slot: ArmorSlot::Helmet,
-                armor_points: 2.0,
-                toughness: 0.0,
-                knockback_resistance: 0.0,
-                durability: 165,
-            }),
-            Item::IronChestplate => Some(ArmorProperties {
-                slot: ArmorSlot::Chestplate,
-                armor_points: 6.0,
-                toughness: 0.0,
-                knockback_resistance: 0.0,
-                durability: 240,
-            }),
-            Item::IronLeggings => Some(ArmorProperties {
-                slot: ArmorSlot::Leggings,
-                armor_points: 5.0,
-                toughness: 0.0,
-                knockback_resistance: 0.0,
-                durability: 225,
-            }),
-            Item::IronBoots => Some(ArmorProperties {
-                slot: ArmorSlot::Boots,
-                armor_points: 2.0,
-                toughness: 0.0,
-                knockback_resistance: 0.0,
-                durability: 195,
-            }),
-            Item::DiamondHelmet => Some(ArmorProperties {
-                slot: ArmorSlot::Helmet,
-                armor_points: 3.0,
-                toughness: 2.0,
-                knockback_resistance: 0.0,
-                durability: 363,
-            }),
-            Item::DiamondChestplate => Some(ArmorProperties {
-                slot: ArmorSlot::Chestplate,
-                armor_points: 8.0,
-                toughness: 2.0,
-                knockback_resistance: 0.0,
-                durability: 528,
-            }),
-            Item::DiamondLeggings => Some(ArmorProperties {
-                slot: ArmorSlot::Leggings,
-                armor_points: 6.0,
-                toughness: 2.0,
-                knockback_resistance: 0.0,
-                durability: 495,
-            }),
-            Item::DiamondBoots => Some(ArmorProperties {
-                slot: ArmorSlot::Boots,
-                armor_points: 3.0,
-                toughness: 2.0,
-                knockback_resistance: 0.0,
-                durability: 429,
-            }),
-            _ => None,
-        }
+        self.def().armor
     }
 
     pub fn attack_cooldown_ticks(self) -> u32 {
@@ -1277,128 +769,7 @@ impl Item {
     }
 
     pub fn food_properties(self) -> Option<FoodProperties> {
-        match self {
-            Item::Apple => Some(FoodProperties {
-                hunger: 4.0,
-                saturation: 2.4,
-                use_duration_ticks: 32,
-                always_edible: false,
-                return_item: None,
-            }),
-            Item::Bread => Some(FoodProperties {
-                hunger: 5.0,
-                saturation: 6.0,
-                use_duration_ticks: 32,
-                always_edible: false,
-                return_item: None,
-            }),
-            Item::RawPorkchop => Some(FoodProperties {
-                hunger: 3.0,
-                saturation: 1.8,
-                use_duration_ticks: 32,
-                always_edible: false,
-                return_item: None,
-            }),
-            Item::CookedPorkchop => Some(FoodProperties {
-                hunger: 8.0,
-                saturation: 12.8,
-                use_duration_ticks: 32,
-                always_edible: false,
-                return_item: None,
-            }),
-            Item::RawBeef => Some(FoodProperties {
-                hunger: 3.0,
-                saturation: 1.8,
-                use_duration_ticks: 32,
-                always_edible: false,
-                return_item: None,
-            }),
-            Item::CookedBeef => Some(FoodProperties {
-                hunger: 8.0,
-                saturation: 12.8,
-                use_duration_ticks: 32,
-                always_edible: false,
-                return_item: None,
-            }),
-            Item::RawChicken => Some(FoodProperties {
-                hunger: 2.0,
-                saturation: 1.2,
-                use_duration_ticks: 32,
-                always_edible: false,
-                return_item: None,
-            }),
-            Item::CookedChicken => Some(FoodProperties {
-                hunger: 6.0,
-                saturation: 7.2,
-                use_duration_ticks: 32,
-                always_edible: false,
-                return_item: None,
-            }),
-            Item::RawMutton => Some(FoodProperties {
-                hunger: 2.0,
-                saturation: 1.2,
-                use_duration_ticks: 32,
-                always_edible: false,
-                return_item: None,
-            }),
-            Item::CookedMutton => Some(FoodProperties {
-                hunger: 6.0,
-                saturation: 9.6,
-                use_duration_ticks: 32,
-                always_edible: false,
-                return_item: None,
-            }),
-            Item::Carrot => Some(FoodProperties {
-                hunger: 3.0,
-                saturation: 3.6,
-                use_duration_ticks: 32,
-                always_edible: false,
-                return_item: None,
-            }),
-            Item::Potato => Some(FoodProperties {
-                hunger: 1.0,
-                saturation: 0.6,
-                use_duration_ticks: 32,
-                always_edible: false,
-                return_item: None,
-            }),
-            Item::BakedPotato => Some(FoodProperties {
-                hunger: 5.0,
-                saturation: 6.0,
-                use_duration_ticks: 32,
-                always_edible: false,
-                return_item: None,
-            }),
-            Item::PoisonousPotato => Some(FoodProperties {
-                hunger: 2.0,
-                saturation: 1.2,
-                use_duration_ticks: 32,
-                always_edible: false,
-                return_item: None,
-            }),
-            Item::GoldenCarrot => Some(FoodProperties {
-                hunger: 6.0,
-                saturation: 14.4,
-                use_duration_ticks: 32,
-                always_edible: false,
-                return_item: None,
-            }),
-            Item::GoldenApple => Some(FoodProperties {
-                hunger: 4.0,
-                saturation: 9.6,
-                use_duration_ticks: 32,
-                always_edible: true,
-                return_item: None,
-            }),
-            Item::RottenFlesh => Some(FoodProperties {
-                hunger: 4.0,
-                saturation: 0.8,
-                use_duration_ticks: 32,
-                always_edible: false,
-                return_item: None,
-            }),
-            _ => None,
-        }
+        self.def().food
     }
 
     /// True when the item should be drawn as a flat sprite instead of a cube
@@ -1413,1145 +784,179 @@ impl Item {
     }
 
     pub fn properties(self) -> ItemProperties {
-        match self {
-            Item::Air => ItemProperties {
-                name: "Air",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (0, 0),
-            },
-            Item::Grass => ItemProperties {
-                name: "Grass Block",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Grass),
-                tex_coords: (1, 0),
-            },
-            Item::Dirt => ItemProperties {
-                name: "Dirt",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Dirt),
-                tex_coords: (2, 0),
-            },
-            Item::Stone => ItemProperties {
-                name: "Stone",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Stone),
-                tex_coords: (3, 0),
-            },
-            Item::Sand => ItemProperties {
-                name: "Sand",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Sand),
-                tex_coords: (4, 0),
-            },
-            Item::Gravel => ItemProperties {
-                name: "Gravel",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Gravel),
-                tex_coords: (5, 0),
-            },
-            Item::OakLog => ItemProperties {
-                name: "Oak Log",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::OakLog),
-                tex_coords: (11, 1),
-            },
-            Item::OakPlanks => ItemProperties {
-                name: "Oak Planks",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::OakPlanks),
-                tex_coords: (6, 0),
-            },
-            Item::OakLeaves => ItemProperties {
-                name: "Oak Leaves",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::OakLeaves),
-                tex_coords: (7, 0),
-            },
-            Item::Cobblestone => ItemProperties {
-                name: "Cobblestone",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Cobblestone),
-                tex_coords: (8, 0),
-            },
-            Item::Bedrock => ItemProperties {
-                name: "Bedrock",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Bedrock),
-                tex_coords: (9, 0),
-            },
-            Item::Water => ItemProperties {
-                name: "Water",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Water),
-                tex_coords: (10, 0),
-            },
-            Item::CoalOre => ItemProperties {
-                name: "Coal Ore",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::CoalOre),
-                tex_coords: (11, 0),
-            },
-            Item::IronOre => ItemProperties {
-                name: "Iron Ore",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::IronOre),
-                tex_coords: (12, 0),
-            },
-            Item::GoldOre => ItemProperties {
-                name: "Gold Ore",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::GoldOre),
-                tex_coords: (13, 0),
-            },
-            Item::DiamondOre => ItemProperties {
-                name: "Diamond Ore",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::DiamondOre),
-                tex_coords: (14, 0),
-            },
-            Item::RedstoneOre => ItemProperties {
-                name: "Redstone Ore",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::RedstoneOre),
-                tex_coords: (15, 0),
-            },
-            Item::Glass => ItemProperties {
-                name: "Glass",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Glass),
-                tex_coords: (0, 1),
-            },
-            Item::Brick => ItemProperties {
-                name: "Brick Block",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Brick),
-                tex_coords: (1, 1),
-            },
-            Item::StoneBrick => ItemProperties {
-                name: "Stone Brick",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::StoneBrick),
-                tex_coords: (2, 1),
-            },
-            Item::Snow => ItemProperties {
-                name: "Snow Block",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Snow),
-                tex_coords: (4, 1),
-            },
-            Item::Ice => ItemProperties {
-                name: "Ice",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Ice),
-                tex_coords: (5, 1),
-            },
-            Item::Clay => ItemProperties {
-                name: "Clay Block",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Clay),
-                tex_coords: (6, 1),
-            },
-            Item::Sandstone => ItemProperties {
-                name: "Sandstone",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Sandstone),
-                tex_coords: (8, 1),
-            },
-            Item::Obsidian => ItemProperties {
-                name: "Obsidian",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Obsidian),
-                tex_coords: (9, 1),
-            },
-            Item::CraftingTable => ItemProperties {
-                name: "Crafting Table",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::CraftingTable),
-                tex_coords: (13, 1),
-            },
-            Item::Furnace => ItemProperties {
-                name: "Furnace",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Furnace),
-                tex_coords: (14, 1),
-            },
-            Item::Chest => ItemProperties {
-                name: "Chest",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Chest),
-                tex_coords: (15, 1),
-            },
-            Item::TNT => ItemProperties {
-                name: "TNT",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::TNT),
-                tex_coords: (2, 2),
-            },
-            Item::Bookshelf => ItemProperties {
-                name: "Bookshelf",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Bookshelf),
-                tex_coords: (3, 2),
-            },
-            Item::Torch => ItemProperties {
-                name: "Torch",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Torch),
-                tex_coords: (4, 2),
-            },
-            Item::Lava => ItemProperties {
-                name: "Lava",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Lava),
-                tex_coords: (15, 2),
-            },
-
-            // Tools (row 4-7)
-            Item::StoneSword => ItemProperties {
-                name: "Stone Sword",
-                max_stack: 1,
-                is_block: false,
-                block_type: None,
-                tex_coords: (0, 4),
-            },
-            Item::IronSword => ItemProperties {
-                name: "Iron Sword",
-                max_stack: 1,
-                is_block: false,
-                block_type: None,
-                tex_coords: (1, 4),
-            },
-            Item::DiamondSword => ItemProperties {
-                name: "Diamond Sword",
-                max_stack: 1,
-                is_block: false,
-                block_type: None,
-                tex_coords: (2, 4),
-            },
-            Item::StonePickaxe => ItemProperties {
-                name: "Stone Pickaxe",
-                max_stack: 1,
-                is_block: false,
-                block_type: None,
-                tex_coords: (0, 5),
-            },
-            Item::IronPickaxe => ItemProperties {
-                name: "Iron Pickaxe",
-                max_stack: 1,
-                is_block: false,
-                block_type: None,
-                tex_coords: (1, 5),
-            },
-            Item::DiamondPickaxe => ItemProperties {
-                name: "Diamond Pickaxe",
-                max_stack: 1,
-                is_block: false,
-                block_type: None,
-                tex_coords: (2, 5),
-            },
-            Item::StoneAxe => ItemProperties {
-                name: "Stone Axe",
-                max_stack: 1,
-                is_block: false,
-                block_type: None,
-                tex_coords: (0, 6),
-            },
-            Item::IronAxe => ItemProperties {
-                name: "Iron Axe",
-                max_stack: 1,
-                is_block: false,
-                block_type: None,
-                tex_coords: (1, 6),
-            },
-            Item::DiamondAxe => ItemProperties {
-                name: "Diamond Axe",
-                max_stack: 1,
-                is_block: false,
-                block_type: None,
-                tex_coords: (2, 6),
-            },
-            Item::StoneShovel => ItemProperties {
-                name: "Stone Shovel",
-                max_stack: 1,
-                is_block: false,
-                block_type: None,
-                tex_coords: (0, 7),
-            },
-            Item::IronShovel => ItemProperties {
-                name: "Iron Shovel",
-                max_stack: 1,
-                is_block: false,
-                block_type: None,
-                tex_coords: (1, 7),
-            },
-            Item::DiamondShovel => ItemProperties {
-                name: "Diamond Shovel",
-                max_stack: 1,
-                is_block: false,
-                block_type: None,
-                tex_coords: (2, 7),
-            },
-
-            // Resources (row 3)
-            Item::Stick => ItemProperties {
-                name: "Stick",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (0, 3),
-            },
-            Item::Coal => ItemProperties {
-                name: "Coal",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (1, 3),
-            },
-            Item::IronIngot => ItemProperties {
-                name: "Iron Ingot",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (2, 3),
-            },
-            Item::GoldIngot => ItemProperties {
-                name: "Gold Ingot",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (3, 3),
-            },
-            Item::Diamond => ItemProperties {
-                name: "Diamond",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (4, 3),
-            },
-            Item::Redstone => ItemProperties {
-                name: "Redstone Dust",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (5, 3),
-            },
-            Item::Apple => ItemProperties {
-                name: "Apple",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (6, 3),
-            },
-            Item::Bread => ItemProperties {
-                name: "Bread",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (7, 3),
-            },
-
-            // Mob Drops on Row 3, Cols 8..11
-            Item::RottenFlesh => ItemProperties {
-                name: "Rotten Flesh",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (8, 3),
-            },
-            Item::Bone => ItemProperties {
-                name: "Bone",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (9, 3),
-            },
-            Item::Bow => ItemProperties {
-                name: "Bow",
-                max_stack: 1,
-                is_block: false,
-                block_type: None,
-                tex_coords: (10, 3),
-            },
-            Item::Gunpowder => ItemProperties {
-                name: "Gunpowder",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (11, 3),
-            },
-
-            // Passive Mob Items
-            Item::Wheat => ItemProperties {
-                name: "Wheat",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (12, 3),
-            },
-            Item::Seeds => ItemProperties {
-                name: "Seeds",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::WheatCrop),
-                tex_coords: (13, 3),
-            },
-            Item::Carrot => ItemProperties {
-                name: "Carrot",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::CarrotCrop),
-                tex_coords: (14, 3),
-            },
-            Item::Shears => ItemProperties {
-                name: "Shears",
-                max_stack: 1,
-                is_block: false,
-                block_type: None,
-                tex_coords: (0, 11),
-            },
-            Item::Bucket => ItemProperties {
-                name: "Bucket",
-                max_stack: 16,
-                is_block: false,
-                block_type: None,
-                tex_coords: (1, 11),
-            },
-            Item::WaterBucket => ItemProperties {
-                name: "Water Bucket",
-                max_stack: 1,
-                is_block: false,
-                block_type: None,
-                tex_coords: (1, 11),
-            },
-            Item::LavaBucket => ItemProperties {
-                name: "Lava Bucket",
-                max_stack: 1,
-                is_block: false,
-                block_type: None,
-                tex_coords: (1, 11),
-            },
-            Item::MilkBucket => ItemProperties {
-                name: "Milk Bucket",
-                max_stack: 1,
-                is_block: false,
-                block_type: None,
-                tex_coords: (2, 11),
-            },
-            Item::RawPorkchop => ItemProperties {
-                name: "Raw Porkchop",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (3, 11),
-            },
-            Item::CookedPorkchop => ItemProperties {
-                name: "Cooked Porkchop",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (7, 11),
-            },
-            Item::RawBeef => ItemProperties {
-                name: "Raw Beef",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (4, 11),
-            },
-            Item::CookedBeef => ItemProperties {
-                name: "Cooked Beef",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (8, 11),
-            },
-            Item::RawMutton => ItemProperties {
-                name: "Raw Mutton",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (5, 11),
-            },
-            Item::CookedMutton => ItemProperties {
-                name: "Cooked Mutton",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (9, 11),
-            },
-            Item::RawChicken => ItemProperties {
-                name: "Raw Chicken",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (6, 11),
-            },
-            Item::CookedChicken => ItemProperties {
-                name: "Cooked Chicken",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (10, 11),
-            },
-            Item::Wool => ItemProperties {
-                name: "Wool Block",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Snow),
-                tex_coords: (10, 11),
-            },
-            Item::Leather => ItemProperties {
-                name: "Leather",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (11, 11),
-            },
-            Item::Feather => ItemProperties {
-                name: "Feather",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (12, 11),
-            },
-            Item::Egg => ItemProperties {
-                name: "Egg",
-                max_stack: 16,
-                is_block: false,
-                block_type: None,
-                tex_coords: (13, 11),
-            },
-            Item::RedDye => ItemProperties {
-                name: "Red Dye",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (14, 11),
-            },
-            Item::BlueDye => ItemProperties {
-                name: "Blue Dye",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (15, 11),
-            },
-            Item::GreenDye => ItemProperties {
-                name: "Green Dye",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (15, 11),
-            },
-            // Trees & Biomes Additions
-            Item::BirchLog => ItemProperties {
-                name: "Birch Log",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::BirchLog),
-                tex_coords: (1, 12),
-            },
-            Item::BirchPlanks => ItemProperties {
-                name: "Birch Planks",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::BirchPlanks),
-                tex_coords: (2, 12),
-            },
-            Item::BirchLeaves => ItemProperties {
-                name: "Birch Leaves",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::BirchLeaves),
-                tex_coords: (3, 12),
-            },
-            Item::SpruceLog => ItemProperties {
-                name: "Spruce Log",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::SpruceLog),
-                tex_coords: (5, 12),
-            },
-            Item::SprucePlanks => ItemProperties {
-                name: "Spruce Planks",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::SprucePlanks),
-                tex_coords: (6, 12),
-            },
-            Item::SpruceLeaves => ItemProperties {
-                name: "Spruce Leaves",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::SpruceLeaves),
-                tex_coords: (7, 12),
-            },
-            Item::TallGrass => ItemProperties {
-                name: "Tall Grass",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::TallGrass),
-                tex_coords: (8, 12),
-            },
-            Item::Dandelion => ItemProperties {
-                name: "Dandelion",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Dandelion),
-                tex_coords: (9, 12),
-            },
-            Item::Poppy => ItemProperties {
-                name: "Poppy",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Poppy),
-                tex_coords: (10, 12),
-            },
-            Item::Cactus => ItemProperties {
-                name: "Cactus",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Cactus),
-                tex_coords: (11, 12),
-            },
-            Item::SugarCane => ItemProperties {
-                name: "Sugar Cane",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::SugarCane),
-                tex_coords: (12, 12),
-            },
-            Item::Pumpkin => ItemProperties {
-                name: "Pumpkin",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Pumpkin),
-                tex_coords: (13, 12),
-            },
-            Item::Melon => ItemProperties {
-                name: "Melon",
-                max_stack: 64,
-                is_block: true,
-                block_type: Some(BlockType::Melon),
-                tex_coords: (14, 12),
-            },
-            item @ (Item::EnchantingTable | Item::BrewingStand | Item::Anvil) => {
-                let (name, block_type, tex_coords) = match item {
-                    Item::EnchantingTable => {
-                        ("Enchanting Table", BlockType::EnchantingTable, (0, 13))
-                    }
-                    Item::BrewingStand => ("Brewing Stand", BlockType::BrewingStand, (1, 13)),
-                    _ => ("Anvil", BlockType::Anvil, (2, 13)),
-                };
-                ItemProperties {
-                    name,
-                    max_stack: 64,
-                    is_block: true,
-                    block_type: Some(block_type),
-                    tex_coords,
-                }
-            }
-            item @ (Item::LapisLazuli
-            | Item::IronHelmet
-            | Item::IronChestplate
-            | Item::IronLeggings
-            | Item::IronBoots
-            | Item::GlassBottle
-            | Item::Potion
-            | Item::SplashPotion
-            | Item::NetherWart
-            | Item::Sugar
-            | Item::BlazePowder
-            | Item::GlisteringMelon
-            | Item::GhastTear
-            | Item::GoldenCarrot
-            | Item::FermentedSpiderEye
-            | Item::MagmaCream
-            | Item::Pufferfish
-            | Item::SpiderEye
-            | Item::GlowstoneDust
-            | Item::RedstoneDust) => {
-                let (name, max_stack, tex_coords) = match item {
-                    Item::LapisLazuli => ("Lapis Lazuli", 64, (3, 13)),
-                    Item::IronHelmet => ("Iron Helmet", 1, (4, 13)),
-                    Item::IronChestplate => ("Iron Chestplate", 1, (5, 13)),
-                    Item::IronLeggings => ("Iron Leggings", 1, (6, 13)),
-                    Item::IronBoots => ("Iron Boots", 1, (7, 13)),
-                    Item::GlassBottle => ("Glass Bottle", 64, (8, 13)),
-                    Item::Potion => ("Potion", 1, (9, 13)),
-                    Item::SplashPotion => ("Splash Potion", 1, (10, 13)),
-                    Item::NetherWart => ("Nether Wart", 64, (11, 13)),
-                    Item::Sugar => ("Sugar", 64, (12, 13)),
-                    Item::BlazePowder => ("Blaze Powder", 64, (13, 13)),
-                    Item::GlisteringMelon => ("Glistering Melon", 64, (14, 13)),
-                    Item::GhastTear => ("Ghast Tear", 64, (15, 13)),
-                    Item::GoldenCarrot => ("Golden Carrot", 64, (0, 14)),
-                    Item::FermentedSpiderEye => ("Fermented Spider Eye", 64, (1, 14)),
-                    Item::MagmaCream => ("Magma Cream", 64, (2, 14)),
-                    Item::Pufferfish => ("Pufferfish", 64, (3, 14)),
-                    Item::SpiderEye => ("Spider Eye", 64, (4, 14)),
-                    Item::GlowstoneDust => ("Glowstone Dust", 64, (5, 14)),
-                    Item::RedstoneDust => ("Redstone Dust", 64, (6, 14)),
-                    _ => unreachable!(),
-                };
-                ItemProperties {
-                    name,
-                    max_stack,
-                    is_block: false,
-                    block_type: None,
-                    tex_coords,
-                }
-            }
-            Item::Arrow => ItemProperties {
-                name: "Arrow",
-                max_stack: 64,
-                is_block: false,
-                block_type: None,
-                tex_coords: (7, 14),
-            },
-            item @ (Item::RedstoneWire
-            | Item::RedstoneTorch
-            | Item::Repeater
-            | Item::Comparator
-            | Item::StoneButton
-            | Item::Lever
-            | Item::PressurePlate
-            | Item::Piston
-            | Item::StickyPiston
-            | Item::RedstoneLamp
-            | Item::OakDoor
-            | Item::OakTrapdoor
-            | Item::Dispenser
-            | Item::Dropper
-            | Item::NoteBlock
-            | Item::Hopper
-            | Item::Observer) => {
-                let (name, block_type, tex_coords) = match item {
-                    Item::RedstoneWire => ("Redstone Wire", BlockType::RedstoneWire, (5, 2)),
-                    Item::RedstoneTorch => ("Redstone Torch", BlockType::RedstoneTorch, (6, 2)),
-                    Item::Repeater => ("Redstone Repeater", BlockType::Repeater, (7, 2)),
-                    Item::Comparator => ("Redstone Comparator", BlockType::Comparator, (8, 2)),
-                    Item::StoneButton => ("Stone Button", BlockType::StoneButton, (9, 2)),
-                    Item::Lever => ("Lever", BlockType::Lever, (10, 2)),
-                    Item::PressurePlate => {
-                        ("Stone Pressure Plate", BlockType::PressurePlate, (11, 2))
-                    }
-                    Item::Piston => ("Piston", BlockType::Piston, (12, 2)),
-                    Item::StickyPiston => ("Sticky Piston", BlockType::StickyPiston, (13, 2)),
-                    Item::RedstoneLamp => ("Redstone Lamp", BlockType::RedstoneLamp, (14, 2)),
-                    Item::OakDoor => ("Oak Door", BlockType::OakDoor, (9, 14)),
-                    Item::OakTrapdoor => ("Oak Trapdoor", BlockType::OakTrapdoor, (10, 14)),
-                    Item::Dispenser => ("Dispenser", BlockType::Dispenser, (11, 14)),
-                    Item::Dropper => ("Dropper", BlockType::Dropper, (12, 14)),
-                    Item::NoteBlock => ("Note Block", BlockType::NoteBlock, (13, 14)),
-                    Item::Hopper => ("Hopper", BlockType::Hopper, (11, 15)),
-                    Item::Observer => ("Observer", BlockType::Observer, (11, 16)),
-                    _ => unreachable!(),
-                };
-                ItemProperties {
-                    name,
-                    max_stack: 64,
-                    is_block: true,
-                    block_type: Some(block_type),
-                    tex_coords,
-                }
-            }
-            item @ (Item::Netherrack
-            | Item::SoulSand
-            | Item::Glowstone
-            | Item::EndStone
-            | Item::EndPortalFrame
-            | Item::Purpur
-            | Item::DragonEgg
-            | Item::WitherSkeletonSkull
-            | Item::NetherBrick) => {
-                let (name, block_type, tex_coords) = match item {
-                    Item::Netherrack => ("Netherrack", BlockType::Netherrack, (10, 15)),
-                    Item::SoulSand => ("Soul Sand", BlockType::SoulSand, (11, 15)),
-                    Item::Glowstone => ("Glowstone", BlockType::Glowstone, (12, 15)),
-                    Item::EndStone => ("End Stone", BlockType::EndStone, (14, 15)),
-                    Item::EndPortalFrame => {
-                        ("End Portal Frame", BlockType::EndPortalFrame, (15, 15))
-                    }
-                    Item::Purpur => ("Purpur Block", BlockType::Purpur, (15, 10)),
-                    Item::DragonEgg => ("Dragon Egg", BlockType::DragonEgg, (14, 11)),
-                    Item::WitherSkeletonSkull => (
-                        "Wither Skeleton Skull",
-                        BlockType::WitherSkeletonSkull,
-                        (15, 11),
-                    ),
-                    Item::NetherBrick => ("Nether Bricks", BlockType::NetherBrick, (9, 10)),
-                    _ => unreachable!(),
-                };
-                ItemProperties {
-                    name,
-                    max_stack: 64,
-                    is_block: true,
-                    block_type: Some(block_type),
-                    tex_coords,
-                }
-            }
-            Item::Bed => ItemProperties {
-                name: "Bed",
-                max_stack: 1,
-                is_block: true,
-                block_type: Some(BlockType::Bed),
-                tex_coords: (6, 0),
-            },
-            item @ (Item::WoodenHoe
-            | Item::StoneHoe
-            | Item::IronHoe
-            | Item::GoldenHoe
-            | Item::DiamondHoe
-            | Item::WoodenSword
-            | Item::WoodenPickaxe
-            | Item::WoodenAxe
-            | Item::WoodenShovel
-            | Item::GoldenSword
-            | Item::GoldenPickaxe
-            | Item::GoldenAxe
-            | Item::GoldenShovel
-            | Item::LeatherHelmet
-            | Item::LeatherChestplate
-            | Item::LeatherLeggings
-            | Item::LeatherBoots
-            | Item::GoldenHelmet
-            | Item::GoldenChestplate
-            | Item::GoldenLeggings
-            | Item::GoldenBoots
-            | Item::DiamondHelmet
-            | Item::DiamondChestplate
-            | Item::DiamondLeggings
-            | Item::DiamondBoots
-            | Item::Shield
-            | Item::BoneMeal
-            | Item::Potato
-            | Item::BakedPotato
-            | Item::PoisonousPotato
-            | Item::GoldenApple
-            | Item::FlintAndSteel
-            | Item::EyeOfEnder
-            | Item::Elytra
-            | Item::NetherStar
-            | Item::EndCrystal
-            | Item::BlazeRod
-            | Item::ShulkerShell
-            | Item::Saddle
-            | Item::Emerald
-            | Item::Book
-            | Item::Paper
-            | Item::EnchantedBook
-            | Item::Compass
-            | Item::OakSlab
-            | Item::CobblestoneSlab
-            | Item::OakStair
-            | Item::CobblestoneStair
-            | Item::OakFence
-            | Item::OakFenceGate
-            | Item::CobblestoneWall
-            | Item::GlassPane
-            | Item::OakLadder
-            | Item::OakSign
-            | Item::String
-            | Item::Slimeball
-            | Item::RawCod
-            | Item::RawSalmon
-            | Item::InkSac
-            | Item::OakBoat
-            | Item::Minecart
-            | Item::Rail
-            | Item::PoweredRail
-            | Item::DetectorRail
-            | Item::ActivatorRail
-            | Item::Clock
-            | Item::Map
-            | Item::FishingRod
-            | Item::RawFish
-            | Item::TropicalFish
-            | Item::LilyPad) => {
-                let (name, max_stack, is_block, block_type, tex_coords) = match item {
-                    Item::WoodenHoe => ("Wooden Hoe", 1, false, None, (0, 8)),
-                    Item::StoneHoe => ("Stone Hoe", 1, false, None, (1, 8)),
-                    Item::IronHoe => ("Iron Hoe", 1, false, None, (2, 8)),
-                    Item::GoldenHoe => ("Golden Hoe", 1, false, None, (4, 8)),
-                    Item::DiamondHoe => ("Diamond Hoe", 1, false, None, (3, 8)),
-                    Item::BoneMeal => ("Bone Meal", 64, false, None, (15, 10)),
-                    Item::Potato => ("Potato", 64, true, Some(BlockType::PotatoCrop), (15, 3)),
-                    Item::BakedPotato => ("Baked Potato", 64, false, None, (7, 11)),
-                    Item::PoisonousPotato => ("Poisonous Potato", 64, false, None, (8, 11)),
-                    Item::GoldenApple => ("Golden Apple", 64, false, None, (11, 0)),
-                    Item::FlintAndSteel => ("Flint and Steel", 1, false, None, (11, 10)),
-                    Item::EyeOfEnder => ("Eye of Ender", 64, false, None, (12, 10)),
-                    Item::Elytra => ("Elytra", 1, false, None, (13, 10)),
-                    Item::NetherStar => ("Nether Star", 64, false, None, (3, 4)),
-                    Item::EndCrystal => ("End Crystal", 64, false, None, (4, 4)),
-                    Item::BlazeRod => ("Blaze Rod", 64, false, None, (5, 4)),
-                    Item::ShulkerShell => ("Shulker Shell", 64, false, None, (14, 14)),
-                    Item::Saddle => ("Saddle", 1, false, None, (8, 6)),
-                    Item::Emerald => ("Emerald", 64, false, None, (11, 1)),
-                    Item::Book => ("Book", 64, false, None, (11, 3)),
-                    Item::Paper => ("Paper", 64, false, None, (10, 3)),
-                    Item::EnchantedBook => ("Enchanted Book", 1, false, None, (11, 3)),
-                    Item::Compass => ("Compass", 64, false, None, (6, 3)),
-                    Item::OakSlab => ("Oak Slab", 64, true, Some(BlockType::OakSlab), (6, 0)),
-                    Item::CobblestoneSlab => (
-                        "Cobblestone Slab",
-                        64,
-                        true,
-                        Some(BlockType::CobblestoneSlab),
-                        (8, 0),
-                    ),
-                    Item::OakStair => ("Oak Stairs", 64, true, Some(BlockType::OakStair), (6, 0)),
-                    Item::CobblestoneStair => (
-                        "Cobblestone Stairs",
-                        64,
-                        true,
-                        Some(BlockType::CobblestoneStair),
-                        (8, 0),
-                    ),
-                    Item::OakFence => ("Oak Fence", 64, true, Some(BlockType::OakFence), (6, 0)),
-                    Item::OakFenceGate => (
-                        "Oak Fence Gate",
-                        64,
-                        true,
-                        Some(BlockType::OakFenceGate),
-                        (6, 0),
-                    ),
-                    Item::CobblestoneWall => (
-                        "Cobblestone Wall",
-                        64,
-                        true,
-                        Some(BlockType::CobblestoneWall),
-                        (8, 0),
-                    ),
-                    Item::GlassPane => ("Glass Pane", 64, true, Some(BlockType::GlassPane), (0, 1)),
-                    Item::OakLadder => ("Ladder", 64, true, Some(BlockType::OakLadder), (3, 5)),
-                    Item::OakSign => ("Oak Sign", 16, true, Some(BlockType::OakSign), (6, 0)),
-                    Item::WoodenSword => ("Wooden Sword", 1, false, None, (0, 7)),
-                    Item::WoodenPickaxe => ("Wooden Pickaxe", 1, false, None, (0, 6)),
-                    Item::WoodenAxe => ("Wooden Axe", 1, false, None, (0, 5)),
-                    Item::WoodenShovel => ("Wooden Shovel", 1, false, None, (0, 4)),
-                    Item::GoldenSword => ("Golden Sword", 1, false, None, (4, 7)),
-                    Item::GoldenPickaxe => ("Golden Pickaxe", 1, false, None, (4, 6)),
-                    Item::GoldenAxe => ("Golden Axe", 1, false, None, (4, 5)),
-                    Item::GoldenShovel => ("Golden Shovel", 1, false, None, (4, 4)),
-                    Item::LeatherHelmet => ("Leather Cap", 1, false, None, (0, 13)),
-                    Item::LeatherChestplate => ("Leather Tunic", 1, false, None, (0, 14)),
-                    Item::LeatherLeggings => ("Leather Pants", 1, false, None, (0, 15)),
-                    Item::LeatherBoots => ("Leather Boots", 1, false, None, (0, 12)),
-                    Item::GoldenHelmet => ("Golden Helmet", 1, false, None, (3, 13)),
-                    Item::GoldenChestplate => ("Golden Chestplate", 1, false, None, (3, 14)),
-                    Item::GoldenLeggings => ("Golden Leggings", 1, false, None, (3, 15)),
-                    Item::GoldenBoots => ("Golden Boots", 1, false, None, (3, 12)),
-                    Item::DiamondHelmet => ("Diamond Helmet", 1, false, None, (2, 13)),
-                    Item::DiamondChestplate => ("Diamond Chestplate", 1, false, None, (2, 14)),
-                    Item::DiamondLeggings => ("Diamond Leggings", 1, false, None, (2, 15)),
-                    Item::DiamondBoots => ("Diamond Boots", 1, false, None, (2, 12)),
-                    Item::Shield => ("Shield", 1, false, None, (15, 12)),
-                    Item::String => ("String", 64, false, None, (8, 3)),
-                    Item::Slimeball => ("Slimeball", 64, false, None, (14, 1)),
-                    Item::RawCod => ("Raw Cod", 64, false, None, (1, 10)),
-                    Item::RawSalmon => ("Raw Salmon", 64, false, None, (2, 10)),
-                    Item::InkSac => ("Ink Sac", 64, false, None, (15, 1)),
-                    Item::OakBoat => ("Oak Boat", 1, false, None, (8, 6)),
-                    Item::Minecart => ("Minecart", 1, false, None, (8, 7)),
-                    Item::Rail => ("Rail", 64, true, Some(BlockType::Rail), (0, 8)),
-                    Item::PoweredRail => (
-                        "Powered Rail",
-                        64,
-                        true,
-                        Some(BlockType::PoweredRail),
-                        (3, 8),
-                    ),
-                    Item::DetectorRail => (
-                        "Detector Rail",
-                        64,
-                        true,
-                        Some(BlockType::DetectorRail),
-                        (3, 9),
-                    ),
-                    Item::ActivatorRail => (
-                        "Activator Rail",
-                        64,
-                        true,
-                        Some(BlockType::ActivatorRail),
-                        (3, 10),
-                    ),
-                    Item::Clock => ("Clock", 64, false, None, (8, 4)),
-                    Item::Map => ("Map", 64, false, None, (8, 5)),
-                    Item::FishingRod => ("Fishing Rod", 1, false, None, (5, 4)),
-                    Item::RawFish => ("Raw Fish", 64, false, None, (1, 10)),
-                    Item::TropicalFish => ("Tropical Fish", 64, false, None, (3, 10)),
-                    Item::Pufferfish => ("Pufferfish", 64, false, None, (4, 10)),
-                    Item::LilyPad => ("Lily Pad", 64, false, None, (12, 0)),
-                    _ => ("Unknown", 64, false, None, (0, 0)),
-                };
-                ItemProperties {
-                    name,
-                    max_stack,
-                    is_block,
-                    block_type,
-                    tex_coords,
-                }
-            }
+        let d = self.def();
+        ItemProperties {
+            name: d.name,
+            max_stack: d.max_stack,
+            is_block: d.is_block,
+            block_type: d.block_type,
+            tex_coords: d.tex_coords,
         }
     }
 
     pub fn from_block(b: BlockType) -> Self {
-        match b.canonicalize() {
-            BlockType::Air => Item::Air,
-            BlockType::Grass => Item::Grass,
-            BlockType::Dirt => Item::Dirt,
-            BlockType::Stone => Item::Stone,
-            BlockType::Sand => Item::Sand,
-            BlockType::Gravel => Item::Gravel,
-            BlockType::OakLog => Item::OakLog,
-            BlockType::OakPlanks => Item::OakPlanks,
-            BlockType::OakLeaves => Item::OakLeaves,
-            BlockType::Cobblestone => Item::Cobblestone,
-            BlockType::Bedrock => Item::Bedrock,
-            BlockType::Water => Item::Water,
-            BlockType::CoalOre => Item::CoalOre,
-            BlockType::IronOre => Item::IronOre,
-            BlockType::GoldOre => Item::GoldOre,
-            BlockType::DiamondOre => Item::DiamondOre,
-            BlockType::RedstoneOre => Item::RedstoneOre,
-            BlockType::Glass => Item::Glass,
-            BlockType::Brick => Item::Brick,
-            BlockType::StoneBrick => Item::StoneBrick,
-            BlockType::Snow => Item::Snow,
-            BlockType::Ice => Item::Ice,
-            BlockType::Clay => Item::Clay,
-            BlockType::Sandstone => Item::Sandstone,
-            BlockType::Obsidian => Item::Obsidian,
-            BlockType::CraftingTable => Item::CraftingTable,
-            BlockType::Furnace => Item::Furnace,
-            BlockType::Chest => Item::Chest,
-            BlockType::TNT => Item::TNT,
-            BlockType::Bookshelf => Item::Bookshelf,
-            BlockType::Torch => Item::Torch,
-            BlockType::Lava => Item::Lava,
-            BlockType::Bed => Item::Bed,
-            // Trees & Biomes Additions
-            BlockType::BirchLog => Item::BirchLog,
-            BlockType::BirchPlanks => Item::BirchPlanks,
-            BlockType::BirchLeaves => Item::BirchLeaves,
-            BlockType::SpruceLog => Item::SpruceLog,
-            BlockType::SprucePlanks => Item::SprucePlanks,
-            BlockType::SpruceLeaves => Item::SpruceLeaves,
-            BlockType::TallGrass => Item::TallGrass,
-            BlockType::Dandelion => Item::Dandelion,
-            BlockType::Poppy => Item::Poppy,
-            BlockType::Cactus => Item::Cactus,
-            BlockType::Rail => Item::Rail,
-            BlockType::PoweredRail => Item::PoweredRail,
-            BlockType::DetectorRail => Item::DetectorRail,
-            BlockType::ActivatorRail => Item::ActivatorRail,
-            BlockType::SugarCane => Item::SugarCane,
-            BlockType::Pumpkin => Item::Pumpkin,
-            BlockType::Melon => Item::Melon,
-            BlockType::EnchantingTable => Item::EnchantingTable,
-            BlockType::BrewingStand => Item::BrewingStand,
-            BlockType::Anvil => Item::Anvil,
-            BlockType::RedstoneWire => Item::RedstoneWire,
-            BlockType::RedstoneTorch => Item::RedstoneTorch,
-            BlockType::Repeater => Item::Repeater,
-            BlockType::Comparator => Item::Comparator,
-            BlockType::StoneButton => Item::StoneButton,
-            BlockType::Lever => Item::Lever,
-            BlockType::PressurePlate => Item::PressurePlate,
-            BlockType::Piston => Item::Piston,
-            BlockType::StickyPiston => Item::StickyPiston,
-            BlockType::RedstoneLamp => Item::RedstoneLamp,
-            BlockType::OakDoor => Item::OakDoor,
-            BlockType::OakTrapdoor => Item::OakTrapdoor,
-            BlockType::Dispenser => Item::Dispenser,
-            BlockType::Dropper => Item::Dropper,
-            BlockType::NoteBlock => Item::NoteBlock,
-            BlockType::Hopper => Item::Hopper,
-            BlockType::Observer => Item::Observer,
-            BlockType::SnowLayer => Item::Snow,
-            BlockType::Fire => Item::Air,
-            BlockType::Netherrack => Item::Netherrack,
-            BlockType::SoulSand => Item::SoulSand,
-            BlockType::Glowstone => Item::Glowstone,
-            BlockType::NetherPortal => Item::Air,
-            BlockType::EndStone => Item::EndStone,
-            BlockType::EndPortalFrame => Item::EndPortalFrame,
-            BlockType::EndPortal => Item::Air,
-            BlockType::Purpur => Item::Purpur,
-            BlockType::DragonEgg => Item::DragonEgg,
-            BlockType::WitherSkeletonSkull => Item::WitherSkeletonSkull,
-            BlockType::NetherBrick => Item::NetherBrick,
-            BlockType::EndCityChest => Item::Air,
-            BlockType::Farmland => Item::Dirt,
-            BlockType::WheatCrop => Item::Wheat,
-            BlockType::CarrotCrop => Item::Carrot,
-            BlockType::PotatoCrop => Item::Potato,
-            BlockType::OakSlab => Item::OakSlab,
-            BlockType::CobblestoneSlab => Item::CobblestoneSlab,
-            BlockType::OakStair => Item::OakStair,
-            BlockType::CobblestoneStair => Item::CobblestoneStair,
-            BlockType::OakFence => Item::OakFence,
-            BlockType::OakFenceGate => Item::OakFenceGate,
-            BlockType::CobblestoneWall => Item::CobblestoneWall,
-            BlockType::GlassPane => Item::GlassPane,
-            BlockType::OakLadder => Item::OakLadder,
-            BlockType::OakSign => Item::OakSign,
-            BlockType::OakSapling | BlockType::BirchSapling | BlockType::SpruceSapling => Item::Air,
-            BlockType::Spawner => Item::Air,
-            BlockType::MossyCobblestone => Item::Cobblestone,
-            BlockType::DirtPath => Item::Dirt,
-            BlockType::NetherWartCrop => Item::NetherWart,
-            BlockType::EndStoneBrick => Item::EndStone,
-            BlockType::RespawnAnchor => Item::Obsidian,
-            BlockType::EndGateway => Item::Air,
-            // Reserved wire holes — unreachable after canonicalize(), kept for exhaustiveness.
-            BlockType::Reserved50
-            | BlockType::Reserved52
-            | BlockType::Reserved54
-            | BlockType::Reserved56
-            | BlockType::Reserved58
-            | BlockType::Reserved60
-            | BlockType::Reserved62
-            | BlockType::Reserved64
-            | BlockType::Reserved66
-            | BlockType::Reserved68
-            | BlockType::Reserved70
-            | BlockType::Reserved82
-            | BlockType::Reserved90 => Item::Air,
+        from_block_map()[b.canonicalize() as usize]
+    }
+}
+
+/// Reverse map BlockType -> Item, built once from ITEM_DEFS (first-wins) plus
+/// explicit overrides for blocks that are not 1:1 with an item's `block_type`.
+fn from_block_map() -> &'static [Item; BLOCK_TYPE_COUNT] {
+    static MAP: OnceLock<[Item; BLOCK_TYPE_COUNT]> = OnceLock::new();
+    MAP.get_or_init(|| {
+        let mut map = [Item::Air; BLOCK_TYPE_COUNT];
+        for (idx, def) in ITEM_DEFS.iter().enumerate() {
+            if let Some(bt) = def.block_type {
+                let slot = &mut map[bt as usize];
+                // First-wins keeps Item::Snow over the historical Wool→Snow typo.
+                if *slot == Item::Air {
+                    *slot = ALL_ITEMS[idx];
+                }
+            }
         }
+        // Non-1:1 block drops / aliases (byte-identical to the former match).
+        // Seeds place WheatCrop, but breaking the crop yields Wheat.
+        map[BlockType::WheatCrop as usize] = Item::Wheat;
+        map[BlockType::SnowLayer as usize] = Item::Snow;
+        map[BlockType::Farmland as usize] = Item::Dirt;
+        map[BlockType::MossyCobblestone as usize] = Item::Cobblestone;
+        map[BlockType::DirtPath as usize] = Item::Dirt;
+        map[BlockType::NetherWartCrop as usize] = Item::NetherWart;
+        map[BlockType::EndStoneBrick as usize] = Item::EndStone;
+        map[BlockType::RespawnAnchor as usize] = Item::Obsidian;
+        // Explicit Air (already default): Fire, portals, saplings, spawner, …
+        map[BlockType::Fire as usize] = Item::Air;
+        map[BlockType::NetherPortal as usize] = Item::Air;
+        map[BlockType::EndPortal as usize] = Item::Air;
+        map[BlockType::EndCityChest as usize] = Item::Air;
+        map[BlockType::OakSapling as usize] = Item::Air;
+        map[BlockType::BirchSapling as usize] = Item::Air;
+        map[BlockType::SpruceSapling as usize] = Item::Air;
+        map[BlockType::Spawner as usize] = Item::Air;
+        map[BlockType::EndGateway as usize] = Item::Air;
+        map
+    })
+}
+
+#[cfg(test)]
+mod item_def_tests {
+    use super::*;
+    use crate::world::BlockType;
+
+    #[test]
+    fn item_defs_cover_every_variant() {
+        assert_eq!(ITEM_DEFS.len(), ITEM_COUNT);
+        assert_eq!(ITEM_COUNT, Item::Observer as usize + 1);
+        assert_eq!(ALL_ITEMS.len(), ITEM_COUNT);
+        for (idx, &item) in ALL_ITEMS.iter().enumerate() {
+            assert_eq!(item as usize, idx);
+            assert!(
+                std::ptr::eq(item.def(), &ITEM_DEFS[idx]),
+                "variant {item:?} must index its own row"
+            );
+        }
+    }
+
+    #[test]
+    fn item_static_property_snapshot_is_byte_identical() {
+        let mut lines = Vec::with_capacity(ITEM_COUNT);
+        for (idx, &item) in ALL_ITEMS.iter().enumerate() {
+            let d = item.def();
+            let tool_s = match d.tool {
+                None => "None".into(),
+                Some(t) => format!(
+                    "{:?}/{:?}/{:.3}/{}/{:.3}",
+                    t.tool_type, t.material, t.mining_speed, t.durability, t.damage
+                ),
+            };
+            let armor_s = match d.armor {
+                None => "None".into(),
+                Some(a) => format!(
+                    "{:?}/{:.3}/{:.3}/{:.3}/{}",
+                    a.slot, a.armor_points, a.toughness, a.knockback_resistance, a.durability
+                ),
+            };
+            let food_s = match d.food {
+                None => "None".into(),
+                Some(f) => format!(
+                    "{:.3}/{:.3}/{}/{}/{:?}",
+                    f.hunger,
+                    f.saturation,
+                    f.use_duration_ticks,
+                    f.always_edible as u8,
+                    f.return_item
+                ),
+            };
+            lines.push(format!(
+                "{idx}|{item:?}|{name}|{max}|{is_block}|{block:?}|{tc0},{tc1}|{tab:?}|{tool_s}|{armor_s}|{food_s}",
+                name = d.name,
+                max = d.max_stack,
+                is_block = d.is_block as u8,
+                block = d.block_type,
+                tc0 = d.tex_coords.0,
+                tc1 = d.tex_coords.1,
+                tab = d.creative_tab,
+            ));
+        }
+        let snapshot = lines.join("\n");
+        let expected = include_str!("item_property_snapshot.txt")
+            .replace("\r\n", "\n")
+            .trim_end()
+            .to_string();
+        assert_eq!(
+            snapshot, expected,
+            "ItemDef table drifted from the locked snapshot"
+        );
+        for &item in ALL_ITEMS {
+            let d = item.def();
+            let p = item.properties();
+            assert_eq!(p.name, d.name);
+            assert_eq!(p.max_stack, d.max_stack);
+            assert_eq!(p.is_block, d.is_block);
+            assert_eq!(p.block_type, d.block_type);
+            assert_eq!(p.tex_coords, d.tex_coords);
+            assert_eq!(item.creative_tab(), d.creative_tab);
+            assert_eq!(
+                item.tool_properties().map(|t| (
+                    t.tool_type,
+                    t.material,
+                    t.mining_speed.to_bits(),
+                    t.durability,
+                    t.damage.to_bits()
+                )),
+                d.tool.map(|t| (
+                    t.tool_type,
+                    t.material,
+                    t.mining_speed.to_bits(),
+                    t.durability,
+                    t.damage.to_bits()
+                ))
+            );
+            assert_eq!(item.armor_properties(), d.armor);
+            assert_eq!(item.food_properties(), d.food);
+        }
+    }
+
+    #[test]
+    fn from_block_snapshot_is_byte_identical() {
+        let mut lines = Vec::new();
+        for id in 0..BLOCK_TYPE_COUNT as u8 {
+            let raw: BlockType = unsafe { std::mem::transmute(id) };
+            if raw.is_reserved_hole() {
+                continue;
+            }
+            let b = BlockType::from_u8(id);
+            let item = Item::from_block(b);
+            lines.push(format!("{id}|{b:?}|{item:?}"));
+        }
+        let snapshot = lines.join("\n");
+        let expected = include_str!("from_block_snapshot.txt")
+            .replace("\r\n", "\n")
+            .trim_end()
+            .to_string();
+        assert_eq!(
+            snapshot, expected,
+            "from_block reverse map drifted from the locked snapshot"
+        );
     }
 }

@@ -340,6 +340,14 @@ gameplay/render fields live in `BLOCK_TABLE` (`src/world/block_table.rs`),
 indexed by discriminant after `canonicalize()`. `BlockType::def()` /
 `properties()` return `&'static` rows (no per-voxel struct rebuild).
 Behavioral helpers (`can_stay_on`, `support_status_at`) stay as code.
+`Item` static fields (name / stack / block / atlas / creative tab / tool /
+armor / food) live in `ITEM_DEFS` (`src/inventory/item_table.rs`), indexed by
+discriminant. `Item::def()` and the former six property match arms read that
+table; `Item::from_block` builds a reverse map once (`OnceLock`) from
+`ITEM_DEFS` plus a small set of non-1:1 overrides. Crafting / smelting recipes
+are pattern tables in `src/recipes.rs` (wood-family expansion for planks /
+sticks / table / chest); shaped lookup is keyed by `(width, height,
+pattern[0][0])` and smelting by `HashMap<Item, _>`.
 
 Open / powered / lit / extended / filled no longer use paired `BlockType`
 variants. Bit 4 of `BlockState` (`is_open` / `BLOCK_STATE_OPEN_BIT`) carries
