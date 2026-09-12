@@ -1,7 +1,7 @@
 use crate::camera::{Camera, CameraUniform};
 use crate::chunk_manager::{
     mark_block_mesh_dependencies, mark_section_mesh_dependencies, surrounding_chunk_coords,
-    ChunkManager,
+    PresentationChunks,
 };
 use crate::chunk_render::{
     select_lod_for_bounds, DrawCandidate, DrawLayer, Frustum, LodLevel, LodThresholds, MeshBounds,
@@ -186,11 +186,11 @@ fn closest_melee_target(
 
 /// Apply a network-visible block value to CPU presentation state and return
 /// every chunk whose mesh/light data depends on it. Writes the cell payload
-/// directly — never `ChunkManager::set_block`, which would enqueue fluids and
+/// directly — never `PresentationChunks::set_block`, which would enqueue fluids and
 /// re-run authority side effects on the GPU thread. Local lighting runs only
 /// when opacity or light emission changes.
 fn apply_synced_block_change(
-    chunk_manager: &mut ChunkManager,
+    chunk_manager: &mut PresentationChunks,
     x: i32,
     y: i32,
     z: i32,
@@ -705,7 +705,7 @@ mod remote_sync_tests {
 
     #[test]
     fn remote_block_change_updates_light_and_boundary_mesh_dependencies() {
-        let mut manager = ChunkManager::new(2);
+        let mut manager = PresentationChunks::new(2);
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
         manager.chunks.insert((1, 0), Chunk::new(1, 0));
         manager.set_sky_light(15, 80, 8, 15);
@@ -717,10 +717,8 @@ mod remote_sync_tests {
         assert_eq!(manager.get_sky_light(15, 80, 8), 0);
         assert!(dirty.contains(&(0, 0)));
         assert!(dirty.contains(&(1, 0)));
-        assert!(
-            manager.pop_fluid_update(false).is_none(),
-            "projection apply must not enqueue fluid neighbors"
-        );
+        // PresentationChunks has no fluid queues — type-level proof that
+        // projection apply cannot enqueue authority fluid neighbors.
     }
 
     #[test]
@@ -1288,9 +1286,9 @@ impl State {
         self.clear_replicated_entities();
         self.presented_fishing_hook_entity = None;
         self.current_dimension = target;
-        let render_distance = self.chunk_manager.render_distance;
+        let render_distance = self.chunk_manager.view_distance;
         self.teardown_terrain_runtime("authority dimension projection");
-        self.chunk_manager = ChunkManager::new_in_dimension(render_distance, target);
+        self.chunk_manager = PresentationChunks::new_in_dimension(render_distance, target);
         self.entity_manager = crate::entity::EntityManager::new();
         self.particles = crate::particles::ParticleSystem::new();
         self.pending_chunk_payloads.clear();
@@ -2141,7 +2139,7 @@ pub struct State {
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     depth_view: wgpu::TextureView,
-    pub chunk_manager: ChunkManager,
+    pub chunk_manager: PresentationChunks,
     pub chunk_meshes: std::collections::HashMap<(i32, i32), ChunkMesh>,
     pub render_regions: std::collections::HashMap<(i32, i32), RenderRegion>,
     /// At most one low-priority compaction candidate is staged per frame.
@@ -3034,7 +3032,7 @@ impl State {
         // Presentation chunk maps start empty; terrain arrives from ServerRuntime
         // projection or join `ChunkData`, then `update_chunks`.
         let render_distance = settings.render_distance;
-        let chunk_manager = ChunkManager::new_in_dimension(render_distance, current_dimension);
+        let chunk_manager = PresentationChunks::new_in_dimension(render_distance, current_dimension);
         let chunk_meshes = std::collections::HashMap::new();
         let (terrain_worker_tx, terrain_worker_rx) = std::sync::mpsc::channel();
         let chunk_lifetimes = std::collections::HashMap::new();
@@ -3713,7 +3711,7 @@ impl State {
     pub fn save_settings(&mut self) {
         self.settings.fov = self.base_fov;
         self.settings.sensitivity = self.sensitivity;
-        self.settings.render_distance = self.chunk_manager.render_distance;
+        self.settings.render_distance = self.chunk_manager.view_distance;
         self.sync_audio_settings();
         self.settings.save();
     }
@@ -5178,7 +5176,7 @@ impl State {
                         }
                         continue;
                     }
-                    let r = self.chunk_manager.render_distance;
+                    let r = self.chunk_manager.view_distance;
                     if !chunk_load_result_is_current(
                         expected,
                         result.lifetime,
@@ -5441,7 +5439,7 @@ impl State {
     }
 
     fn section_selected_lod(&self, key: SectionKey) -> LodLevel {
-        let render_blocks = self.chunk_manager.render_distance as f32 * CHUNK_WIDTH as f32;
+        let render_blocks = self.chunk_manager.view_distance as f32 * CHUNK_WIDTH as f32;
         let thresholds = LodThresholds::new(render_blocks * 0.5, render_blocks * 0.75);
         let min = Vec3::new(
             (key.cx * CHUNK_WIDTH as i32) as f32,
@@ -5474,7 +5472,7 @@ impl State {
         let player_pos = self.player_physics.position;
         let px = (player_pos.x / 16.0).floor() as i32;
         let pz = (player_pos.z / 16.0).floor() as i32;
-        let r = self.chunk_manager.render_distance;
+        let r = self.chunk_manager.view_distance;
         self.process_terrain_worker_results((px, pz));
         self.process_terrain_compaction();
         // Only empty, previously-grown arenas are staged. Processing is
@@ -5492,7 +5490,7 @@ impl State {
             }
 
             let mut to_unload = Vec::new();
-            for &(cx, cz) in self.chunk_manager.chunks.keys() {
+            for (cx, cz) in self.chunk_manager.chunks.keys() {
                 if !crate::chunk_schedule::within_unload_hysteresis(cx, cz, px, pz, r) {
                     to_unload.push((cx, cz));
                 }
@@ -5500,6 +5498,8 @@ impl State {
             for &(cx, cz) in &to_unload {
                 let _ = self.chunk_manager.chunks.remove(&(cx, cz));
             }
+            // Slide the dense window with the same center/hysteresis as unload.
+            self.chunk_manager.recenter(px, pz);
             for &(cx, cz) in &to_unload {
                 for neighbor in surrounding_chunk_coords(cx, cz) {
                     if self.chunk_manager.chunks.contains_key(&neighbor) {
@@ -5631,7 +5631,7 @@ impl State {
                 self.camera_uniform.update_view_proj(
                     &self.camera,
                     self.config.width as f32 / self.config.height as f32,
-                    self.chunk_manager.render_distance as u32,
+                    self.chunk_manager.view_distance as u32,
                     self.chunk_manager.dimension.height().height(),
                     &self.world_time,
                     self.total_time,
@@ -5669,11 +5669,11 @@ impl State {
                 self.audio_manager
                     .play_sound(crate::audio::SoundId::UiClick);
                 if x < 0.0 {
-                    self.chunk_manager.render_distance =
-                        (self.chunk_manager.render_distance - 1).max(2);
+                    self.chunk_manager.view_distance =
+                        (self.chunk_manager.view_distance - 1).max(2);
                 } else {
-                    self.chunk_manager.render_distance =
-                        (self.chunk_manager.render_distance + 1).min(16);
+                    self.chunk_manager.view_distance =
+                        (self.chunk_manager.view_distance + 1).min(16);
                 }
                 self.save_settings();
             }
@@ -6133,7 +6133,7 @@ impl State {
         self.camera_uniform.update_view_proj(
             &presentation_camera,
             self.config.width as f32 / self.config.height as f32,
-            self.chunk_manager.render_distance as u32,
+            self.chunk_manager.view_distance as u32,
             self.chunk_manager.dimension.height().height(),
             &self.world_time,
             self.total_time,
@@ -9411,7 +9411,7 @@ mod debug_tests {
 
     #[test]
     fn test_flower_breaks_and_pops_when_ground_is_destroyed() {
-        let mut manager = ChunkManager::new(2);
+        let mut manager = crate::chunk_manager::WorldColumns::new(2);
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
         manager.set_block(2, 10, 2, BlockType::Grass);
         manager.set_block(2, 11, 2, BlockType::Dandelion);
@@ -9432,7 +9432,7 @@ mod debug_tests {
 
     #[test]
     fn door_and_trapdoor_placement_states_and_hinges() {
-        let mut manager = ChunkManager::new(2);
+        let mut manager = crate::chunk_manager::WorldColumns::new(2);
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
 
         // Test door facing from yaw (yaw=0.0 -> East, yaw=FRAC_PI_2 -> South, -FRAC_PI_2 -> North, PI -> West)

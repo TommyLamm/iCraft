@@ -1,4 +1,4 @@
-use crate::chunk_manager::{ChunkManager, ColumnNeighborhood};
+use crate::chunk_manager::{ColumnNeighborhood, ColumnQuery, WorldColumns};
 use crate::voxel_shape::VoxelShape;
 use crate::world::BlockType;
 use glam::Vec3;
@@ -179,7 +179,7 @@ impl PlayerPhysics {
     pub fn update(
         &mut self,
         dt: f32,
-        chunk_manager: &ChunkManager,
+        chunk_manager: &impl ColumnQuery,
         movement_input: Vec3,
         is_sneaking: bool,
         is_sprinting: bool,
@@ -222,7 +222,7 @@ impl PlayerPhysics {
     fn update_substep(
         &mut self,
         dt: f32,
-        chunk_manager: &ChunkManager,
+        chunk_manager: &impl ColumnQuery,
         movement_input: Vec3,
         is_sneaking: bool,
         is_sprinting: bool,
@@ -369,7 +369,7 @@ impl PlayerPhysics {
 
     fn move_axis_with_collisions(
         &mut self,
-        chunk_manager: &ChunkManager,
+        chunk_manager: &impl ColumnQuery,
         axis: usize,
         displacement: f32,
     ) {
@@ -401,7 +401,7 @@ impl PlayerPhysics {
         }
     }
 
-    fn resolve_collisions(&mut self, chunk_manager: &ChunkManager, axis: usize) {
+    fn resolve_collisions(&mut self, chunk_manager: &impl ColumnQuery, axis: usize) {
         if self.no_clip {
             return;
         }
@@ -418,7 +418,7 @@ impl PlayerPhysics {
         );
     }
 
-    pub fn is_block_below(&self, chunk_manager: &ChunkManager) -> bool {
+    pub fn is_block_below(&self, chunk_manager: &impl ColumnQuery) -> bool {
         let mut check_aabb = self.get_aabb();
         check_aabb.min.y -= 0.05;
         check_aabb.max.y = self.position.y;
@@ -538,8 +538,8 @@ mod tests {
     use crate::world::ChestType;
     use crate::world::{BlockType, Chunk};
 
-    fn empty_chunk_manager() -> ChunkManager {
-        let mut chunk_manager = ChunkManager::new(2);
+    fn empty_chunk_manager() -> WorldColumns {
+        let mut chunk_manager = WorldColumns::new(2);
         let chunk = Chunk::new(0, 0);
         chunk_manager.chunks.insert((0, 0), chunk);
         chunk_manager
@@ -666,7 +666,7 @@ mod tests {
 
     #[test]
     fn test_player_sneaking_speed() {
-        let chunk_manager = ChunkManager::new(2);
+        let chunk_manager = WorldColumns::new(2);
         let mut physics = PlayerPhysics::new(Vec3::new(8.0, 80.0, 8.0));
         physics.on_ground = false;
         let dt = 0.1;
@@ -678,7 +678,7 @@ mod tests {
 
     #[test]
     fn test_player_sprinting_speed() {
-        let chunk_manager = ChunkManager::new(2);
+        let chunk_manager = WorldColumns::new(2);
         let mut physics = PlayerPhysics::new(Vec3::new(8.0, 80.0, 8.0));
         physics.on_ground = true;
         let dt = 0.1;

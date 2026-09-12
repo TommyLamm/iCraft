@@ -10,7 +10,6 @@
 //! - `occlusion_shape` – used by the culling system to decide whether a face of
 //!   a neighbouring block is hidden. Only full-cube blocks occlude.
 
-use crate::chunk_manager::ChunkManager;
 use crate::physics::AABB;
 use crate::redstone::Direction;
 use crate::world::{BlockState, BlockType};
@@ -411,16 +410,9 @@ pub fn get_connections_sampled(
 pub fn get_connections(
     self_type: BlockType,
     pos: (i32, i32, i32),
-    chunk_manager: Option<&ChunkManager>,
+    sample: Option<&dyn Fn(i32, i32, i32) -> BlockType>,
 ) -> (bool, bool, bool, bool) {
-    match chunk_manager {
-        Some(cm) => get_connections_sampled(
-            self_type,
-            pos,
-            Some(&|x, y, z| cm.get_block(x, y, z)),
-        ),
-        None => get_connections_sampled(self_type, pos, None),
-    }
+    get_connections_sampled(self_type, pos, sample)
 }
 
 // ---------------------------------------------------------------------------
@@ -432,14 +424,9 @@ pub fn block_collision_shape(
     block: BlockType,
     state_raw: u8,
     pos: (i32, i32, i32),
-    chunk_manager: Option<&ChunkManager>,
+    sample: Option<&dyn Fn(i32, i32, i32) -> BlockType>,
 ) -> VoxelShape {
-    match chunk_manager {
-        Some(cm) => {
-            block_collision_shape_sampled(block, state_raw, pos, Some(&|x, y, z| cm.get_block(x, y, z)))
-        }
-        None => block_collision_shape_sampled(block, state_raw, pos, None),
-    }
+    block_collision_shape_sampled(block, state_raw, pos, sample)
 }
 
 /// Physical collision shape with an arbitrary neighbor sampler (3×3 neighborhood).
@@ -610,7 +597,7 @@ pub fn block_selection_shape(
     block: BlockType,
     state_raw: u8,
     pos: (i32, i32, i32),
-    chunk_manager: Option<&ChunkManager>,
+    sample: Option<&dyn Fn(i32, i32, i32) -> BlockType>,
 ) -> VoxelShape {
     let (fx, fy, fz) = (pos.0 as f32, pos.1 as f32, pos.2 as f32);
 
@@ -661,7 +648,7 @@ pub fn block_selection_shape(
         )),
 
         _ => {
-            let col = block_collision_shape(block, state_raw, (0, 0, 0), chunk_manager);
+            let col = block_collision_shape(block, state_raw, (0, 0, 0), sample);
             if col.is_empty() {
                 VoxelShape::FULL_CUBE
             } else {

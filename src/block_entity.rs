@@ -852,7 +852,7 @@ impl BlockEntity {
 }
 
 pub fn double_chest_partner(
-    manager: &crate::chunk_manager::ChunkManager,
+    manager: &impl crate::chunk_manager::ColumnQuery,
     pos: (i32, i32, i32),
 ) -> Option<(i32, i32, i32)> {
     let state_raw = manager.get_block_state(pos.0, pos.1, pos.2);
@@ -881,7 +881,7 @@ pub fn double_chest_partner(
 }
 
 pub fn calculate_container_comparator_signal(
-    manager: &crate::chunk_manager::ChunkManager,
+    manager: &impl crate::chunk_manager::ColumnQuery,
     pos: (i32, i32, i32),
 ) -> u8 {
     let block_entity = match manager.get_block_entity(pos.0, pos.1, pos.2) {
@@ -1125,7 +1125,7 @@ mod tests {
 
     #[test]
     fn test_comparator_fullness_signal_computation() {
-        let mut manager = crate::chunk_manager::ChunkManager::new(8);
+        let mut manager = crate::chunk_manager::WorldColumns::new(8);
         manager
             .chunks
             .insert((0, 0), crate::world::Chunk::new(0, 0));

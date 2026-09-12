@@ -1837,7 +1837,7 @@ fn legal_region_with_empty_inner_zlib_is_not_replaced_by_generated_terrain() {
     assert!(!world.chunks.chunks.contains_key(&(0, 0)));
 
     let mut manager = SaveManager::new(&world_dir);
-    for (&(cx, cz), column) in &world.chunks.chunks {
+    for ((cx, cz), column) in world.chunks.chunks.iter() {
         if world.failed_restore_chunks().contains(&(cx, cz)) {
             continue;
         }
@@ -1902,7 +1902,7 @@ fn player_modified_chunk_with_corrupt_inner_zlib_is_not_written_as_generated() {
     assert!(!world.chunks.chunks.contains_key(&(0, 0)));
 
     let mut manager = SaveManager::new(&world_dir);
-    for (&(cx, cz), column) in &world.chunks.chunks {
+    for ((cx, cz), column) in world.chunks.chunks.iter() {
         if world.failed_restore_chunks().contains(&(cx, cz)) {
             continue;
         }

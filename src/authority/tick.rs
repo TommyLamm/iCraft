@@ -47,7 +47,7 @@ impl AuthorityCore {
                 })
                 .collect();
             let simulation_chunks = simulation_unions.get(&dimension).cloned().unwrap_or_else(|| {
-                let distance = self.config.render_distance.clamp(0, 32) as u8;
+                let distance = self.config.simulation_distance.clamp(0, 32) as u8;
                 let mut union = BTreeSet::new();
                 for (_, position, _, _) in &players {
                     if position.iter().all(|value| value.is_finite()) {

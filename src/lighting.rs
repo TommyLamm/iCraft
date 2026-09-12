@@ -1,4 +1,4 @@
-use crate::chunk_manager::ChunkManager;
+use crate::chunk_manager::LightColumnHost;
 use crate::dimension::WorldHeight;
 use crate::redstone::Direction;
 use crate::world::{BlockType, Chunk, RenderType, CHUNK_DEPTH, CHUNK_WIDTH, SECTION_SIZE};
@@ -68,30 +68,30 @@ struct LightNeighborhood {
     height: WorldHeight,
     has_sky_light: bool,
     columns: [[Option<Chunk>; 3]; 3],
-    /// World cells whose light value changed; applied to ChunkManager after restore.
+    /// World cells whose light value changed; applied to WorldColumns after restore.
     changed_cells: Vec<(i32, i32, i32)>,
 }
 
 impl LightNeighborhood {
-    fn take(chunk_manager: &mut ChunkManager, origin_cx: i32, origin_cz: i32) -> Self {
+    fn take(chunk_manager: &mut impl LightColumnHost, origin_cx: i32, origin_cz: i32) -> Self {
         let mut columns: [[Option<Chunk>; 3]; 3] = std::array::from_fn(|_| std::array::from_fn(|_| None));
         for dz in 0..3i32 {
             for dx in 0..3i32 {
                 let key = (origin_cx + dx - 1, origin_cz + dz - 1);
-                columns[dz as usize][dx as usize] = chunk_manager.chunks.remove(&key);
+                columns[dz as usize][dx as usize] = chunk_manager.chunks_mut().remove(&key);
             }
         }
         Self {
             origin_cx,
             origin_cz,
-            height: chunk_manager.dimension.height(),
-            has_sky_light: chunk_manager.dimension.has_sky_light(),
+            height: chunk_manager.dimension().height(),
+            has_sky_light: chunk_manager.dimension().has_sky_light(),
             columns,
             changed_cells: Vec::new(),
         }
     }
 
-    fn restore(self, chunk_manager: &mut ChunkManager) {
+    fn restore(self, chunk_manager: &mut impl LightColumnHost) {
         let Self {
             origin_cx,
             origin_cz,
@@ -102,9 +102,7 @@ impl LightNeighborhood {
         for dz in 0..3i32 {
             for dx in 0..3i32 {
                 if let Some(chunk) = columns[dz as usize][dx as usize].take() {
-                    chunk_manager
-                        .chunks
-                        .insert((origin_cx + dx - 1, origin_cz + dz - 1), chunk);
+                    chunk_manager.chunks_mut().insert((origin_cx + dx - 1, origin_cz + dz - 1), chunk);
                 }
             }
         }
@@ -263,7 +261,7 @@ fn remove_light(
 }
 
 fn run_propagate(
-    chunk_manager: &mut ChunkManager,
+    chunk_manager: &mut impl LightColumnHost,
     origin_cx: i32,
     origin_cz: i32,
     kind: LightKind,
@@ -279,7 +277,7 @@ fn run_propagate(
 }
 
 fn run_remove(
-    chunk_manager: &mut ChunkManager,
+    chunk_manager: &mut impl LightColumnHost,
     origin_cx: i32,
     origin_cz: i32,
     kind: LightKind,
@@ -309,7 +307,7 @@ fn origin_from_node(x: i32, z: i32) -> (i32, i32) {
 }
 
 pub fn propagate_sky_light(
-    chunk_manager: &mut ChunkManager,
+    chunk_manager: &mut impl LightColumnHost,
     queue: &mut VecDeque<LightNode>,
     dirty_chunks: &mut HashSet<(i32, i32)>,
 ) {
@@ -328,7 +326,7 @@ pub fn propagate_sky_light(
 }
 
 pub fn remove_sky_light(
-    chunk_manager: &mut ChunkManager,
+    chunk_manager: &mut impl LightColumnHost,
     removal_queue: &mut VecDeque<LightRemovalNode>,
     propagate_queue: &mut VecDeque<LightNode>,
     dirty_chunks: &mut HashSet<(i32, i32)>,
@@ -349,7 +347,7 @@ pub fn remove_sky_light(
 }
 
 pub fn propagate_block_light(
-    chunk_manager: &mut ChunkManager,
+    chunk_manager: &mut impl LightColumnHost,
     queue: &mut VecDeque<LightNode>,
     dirty_chunks: &mut HashSet<(i32, i32)>,
 ) {
@@ -368,7 +366,7 @@ pub fn propagate_block_light(
 }
 
 pub fn remove_block_light(
-    chunk_manager: &mut ChunkManager,
+    chunk_manager: &mut impl LightColumnHost,
     removal_queue: &mut VecDeque<LightRemovalNode>,
     propagate_queue: &mut VecDeque<LightNode>,
     dirty_chunks: &mut HashSet<(i32, i32)>,
@@ -389,7 +387,7 @@ pub fn remove_block_light(
 }
 
 pub fn update_sky_light_after_placed(
-    chunk_manager: &mut ChunkManager,
+    chunk_manager: &mut impl LightColumnHost,
     wx: i32,
     wy: i32,
     wz: i32,
@@ -420,7 +418,7 @@ pub fn update_sky_light_after_placed(
         });
 
         if old_val == 15 {
-            let height = chunk_manager.dimension.height();
+            let height = chunk_manager.dimension().height();
             for y in (height.min_y()..wy).rev() {
                 let val = chunk_manager.get_sky_light(wx, y, wz);
                 if val == 0 {
@@ -447,17 +445,17 @@ pub fn update_sky_light_after_placed(
 }
 
 pub fn update_sky_light_after_removed(
-    chunk_manager: &mut ChunkManager,
+    chunk_manager: &mut impl LightColumnHost,
     wx: i32,
     wy: i32,
     wz: i32,
     dirty_chunks: &mut HashSet<(i32, i32)>,
 ) {
     let mut propagate_queue = VecDeque::new();
-    let height = chunk_manager.dimension.height();
+    let height = chunk_manager.dimension().height();
 
     let above_sky = if wy + 1 >= height.max_y_exclusive() {
-        chunk_manager.dimension.has_sky_light()
+        chunk_manager.dimension().has_sky_light()
     } else {
         chunk_manager.get_sky_light(wx, wy + 1, wz) == 15
     };
@@ -502,7 +500,7 @@ pub fn update_sky_light_after_removed(
 }
 
 pub fn update_block_light_after_placed(
-    chunk_manager: &mut ChunkManager,
+    chunk_manager: &mut impl LightColumnHost,
     wx: i32,
     wy: i32,
     wz: i32,
@@ -545,7 +543,7 @@ pub fn update_block_light_after_placed(
 }
 
 pub fn update_block_light_after_removed(
-    chunk_manager: &mut ChunkManager,
+    chunk_manager: &mut impl LightColumnHost,
     wx: i32,
     wy: i32,
     wz: i32,
@@ -575,7 +573,7 @@ pub fn update_block_light_after_removed(
         let mut max_neighbor = 0;
         for &(dx, dy, dz) in &LIGHT_DIRS {
             let ny = wy + dy;
-            if chunk_manager.dimension.height().contains_y(ny) {
+            if chunk_manager.dimension().height().contains_y(ny) {
                 let val = chunk_manager.get_block_light(wx + dx, ny, wz + dz);
                 if val > max_neighbor {
                     max_neighbor = val;
@@ -838,14 +836,14 @@ fn seed_shared_face(
 /// seeds only the shared faces of the four cardinal neighbors (no neighbor volume
 /// scan). One BFS runs on a taken 3×3 neighborhood.
 pub fn propagate_chunk_lighting(
-    chunk_manager: &mut ChunkManager,
+    chunk_manager: &mut impl LightColumnHost,
     cx: i32,
     cz: i32,
     dirty_chunks: &mut HashSet<(i32, i32)>,
 ) {
     let mut sky_queue = VecDeque::new();
     let mut block_queue = VecDeque::new();
-    let height = chunk_manager.dimension.height();
+    let height = chunk_manager.dimension().height();
     {
         let neighborhood = chunk_manager.column_neighborhood(cx, cz);
         if neighborhood[1][1].is_none() {
@@ -892,12 +890,13 @@ pub fn propagate_chunk_lighting(
 
 #[cfg(test)]
 mod tests {
+    use crate::chunk_manager::WorldColumns;
     use super::*;
     use crate::world::{BlockType, Chunk};
 
     #[test]
     fn initial_lighting_reaches_horizontal_cave_entrance() {
-        let mut chunk_manager = ChunkManager::new(0);
+        let mut chunk_manager = WorldColumns::new(0);
         let mut chunk = Chunk::new(0, 0);
 
         // Build a controlled landscape with a directly-lit surface above a
@@ -934,7 +933,7 @@ mod tests {
 
     #[test]
     fn load_lighting_seeds_across_chunk_faces() {
-        let mut chunk_manager = ChunkManager::new(0);
+        let mut chunk_manager = WorldColumns::new(0);
         let mut west = Chunk::empty(0, 0);
         let mut east = Chunk::empty(1, 0);
         for z in 0..CHUNK_DEPTH {
@@ -954,7 +953,7 @@ mod tests {
 
     #[test]
     fn propagation_does_not_discard_work_after_five_thousand_nodes() {
-        let mut chunk_manager = ChunkManager::new(0);
+        let mut chunk_manager = WorldColumns::new(0);
         let mut chunk = Chunk::new(0, 0);
 
         for x in 0..CHUNK_WIDTH {
@@ -993,8 +992,8 @@ mod tests {
         assert_eq!(chunk_manager.get_block_light(8, 63, 8), 13);
     }
 
-    fn empty_fully_lit_overworld_column() -> ChunkManager {
-        let mut chunk_manager = ChunkManager::new(0);
+    fn empty_fully_lit_overworld_column() -> WorldColumns {
+        let mut chunk_manager = WorldColumns::new(0);
         let mut chunk = Chunk::empty(0, 0);
         let height = crate::dimension::WorldHeight::OVERWORLD;
         for x in 0..CHUNK_WIDTH {
@@ -1068,7 +1067,7 @@ mod tests {
         )
         .unwrap();
         let sky_after_restore = dst.get_sky_light(8, 71, 8);
-        let mut restored_manager = ChunkManager::new(0);
+        let mut restored_manager = WorldColumns::new(0);
         restored_manager.chunks.insert((0, 0), dst);
         let mut dirty = HashSet::new();
         propagate_chunk_lighting(&mut restored_manager, 0, 0, &mut dirty);
@@ -1077,7 +1076,7 @@ mod tests {
         assert_eq!(sky_after_propagate, 15);
     }
 
-    fn lighting_checksum(chunk_manager: &ChunkManager, cx: i32, cz: i32) -> u64 {
+    fn lighting_checksum(chunk_manager: &crate::chunk_manager::WorldColumns, cx: i32, cz: i32) -> u64 {
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
         let chunk = chunk_manager.chunks.get(&(cx, cz)).expect("column present");
         for x in 0..CHUNK_WIDTH {
@@ -1097,7 +1096,7 @@ mod tests {
 
     #[test]
     fn fixed_seed_place_break_lighting_checksum_stable() {
-        let mut chunk_manager = ChunkManager::new(0);
+        let mut chunk_manager = WorldColumns::new(0);
         let mut chunk = Chunk::new_with_seed(0, 0, 0x4c17_17c0u32);
         chunk.recompute_direct_column_lighting();
         chunk_manager.chunks.insert((0, 0), chunk);
@@ -1175,7 +1174,7 @@ mod tests {
 
     #[test]
     fn load_lighting_skips_neighbor_volume_scan_but_fills_shared_face() {
-        let mut chunk_manager = ChunkManager::new(0);
+        let mut chunk_manager = WorldColumns::new(0);
         let mut west = Chunk::empty(0, 0);
         let mut east = Chunk::empty(1, 0);
         for z in 0..CHUNK_DEPTH {
@@ -1202,7 +1201,7 @@ mod tests {
     #[test]
     fn load_lighting_timing_smoke() {
         use std::time::Instant;
-        let mut chunk_manager = ChunkManager::new(0);
+        let mut chunk_manager = WorldColumns::new(0);
         // Center + four neighbors so face seeding is exercised.
         for (cx, cz) in [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)] {
             let mut chunk = Chunk::new_with_seed(cx, cz, 42);

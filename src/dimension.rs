@@ -418,7 +418,7 @@ fn generate_nether_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
     // Propagate block light within this column via the shared lighting path
     // (replaces the former private Nether BFS).
     let mut manager =
-        crate::chunk_manager::ChunkManager::new_in_dimension(0, Dimension::Nether);
+        crate::chunk_manager::WorldColumns::new_in_dimension(0, Dimension::Nether);
     manager.insert_resident_chunk((chunk_x, chunk_z), chunk);
     let mut dirty = std::collections::HashSet::new();
     crate::lighting::propagate_chunk_lighting(&mut manager, chunk_x, chunk_z, &mut dirty);

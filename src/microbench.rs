@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use glam::Vec3;
 
-use crate::chunk_manager::ChunkManager;
+use crate::chunk_manager::WorldColumns;
 use crate::network::protocol::Packet;
 use crate::physics::PlayerPhysics;
 use crate::save::ChunkSaveData;
@@ -149,7 +149,7 @@ fn bench_lighting() -> u64 {
 }
 
 fn bench_physics() -> u64 {
-    let mut manager = ChunkManager::new_in_dimension(2, crate::dimension::Dimension::Overworld);
+    let mut manager = WorldColumns::new_in_dimension(2, crate::dimension::Dimension::Overworld);
     manager.chunks.insert((0, 0), Chunk::new(0, 0));
     let mut player = PlayerPhysics::new(Vec3::new(8.5, 80.0, 8.5));
     let start = Instant::now();

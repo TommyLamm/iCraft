@@ -1,4 +1,4 @@
-use crate::chunk_manager::ChunkManager;
+use crate::chunk_manager::WorldColumns;
 use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_WIDTH};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -294,7 +294,7 @@ pub struct RedstoneUpdate {
 pub struct RedstoneSystem {
     components: HashMap<BlockPos, ComponentState>,
     known_chunks: HashSet<(i32, i32)>,
-    /// `ChunkManager::load_generation` observed by the last successful sync.
+    /// `WorldColumns::load_generation` observed by the last successful sync.
     /// `u64::MAX` means never synced, so the first tick always rebuilds.
     known_load_generation: u64,
     scheduled: Vec<ScheduledTick>,
@@ -430,7 +430,7 @@ impl RedstoneSystem {
             .unwrap_or(0)
     }
 
-    pub fn block_state_at(&self, manager: &ChunkManager, pos: BlockPos) -> RedstoneState {
+    pub fn block_state_at(&self, manager: &WorldColumns, pos: BlockPos) -> RedstoneState {
         if let Some(state) = self.components.get(&pos) {
             return state.signal;
         }
@@ -485,7 +485,7 @@ impl RedstoneSystem {
     /// their own block position, so each one belongs to exactly one chunk.
     pub fn collect_chunk_metadata(
         &self,
-        manager: &ChunkManager,
+        manager: &WorldColumns,
         cx: i32,
         cz: i32,
     ) -> Vec<RedstoneComponentMetadata> {
@@ -534,7 +534,7 @@ impl RedstoneSystem {
     /// ignored so stale metadata cannot resurrect facings on unrelated blocks.
     pub(crate) fn restore_chunk_metadata(
         &mut self,
-        manager: &ChunkManager,
+        manager: &WorldColumns,
         cx: i32,
         cz: i32,
         metadata: &[RedstoneComponentMetadata],
@@ -592,7 +592,7 @@ impl RedstoneSystem {
         true
     }
 
-    fn mark_neighbors_dirty(&mut self, manager: &ChunkManager, pos: BlockPos) {
+    fn mark_neighbors_dirty(&mut self, manager: &WorldColumns, pos: BlockPos) {
         if self.components.contains_key(&pos) {
             self.dirty.insert(pos);
             self.sleeping = false;
@@ -615,7 +615,7 @@ impl RedstoneSystem {
         }
     }
 
-    pub fn mark_container_changed(&mut self, manager: &ChunkManager, pos: BlockPos) {
+    pub fn mark_container_changed(&mut self, manager: &WorldColumns, pos: BlockPos) {
         self.mark_neighbors_dirty(manager, pos);
     }
 
@@ -655,7 +655,7 @@ impl RedstoneSystem {
         self.transition_positions.remove(&pos);
     }
 
-    pub fn on_block_changed(&mut self, manager: &ChunkManager, pos: BlockPos, facing: Direction) {
+    pub fn on_block_changed(&mut self, manager: &WorldColumns, pos: BlockPos, facing: Direction) {
         let block = get_block(manager, pos);
         if is_component(block) {
             self.components
@@ -673,7 +673,7 @@ impl RedstoneSystem {
         self.mark_neighbors_dirty(manager, pos);
     }
 
-    pub fn interact(&mut self, manager: &mut ChunkManager, pos: BlockPos) -> RedstoneUpdate {
+    pub fn interact(&mut self, manager: &mut WorldColumns, pos: BlockPos) -> RedstoneUpdate {
         self.sync_loaded_chunks(manager);
         let block = get_block(manager, pos);
         let mut update = RedstoneUpdate::default();
@@ -729,7 +729,7 @@ impl RedstoneSystem {
         update
     }
 
-    pub fn tick(&mut self, manager: &mut ChunkManager, occupants: &[BlockPos]) -> RedstoneUpdate {
+    pub fn tick(&mut self, manager: &mut WorldColumns, occupants: &[BlockPos]) -> RedstoneUpdate {
         self.tick = self.tick.wrapping_add(1);
 
         // Sleep early-out before sync / plate HashSet work when residency and
@@ -786,7 +786,7 @@ impl RedstoneSystem {
         update
     }
 
-    fn refresh_container_revisions(&mut self, manager: &ChunkManager) {
+    fn refresh_container_revisions(&mut self, manager: &WorldColumns) {
         #[cfg(test)]
         {
             self.container_revision_scans += 1;
@@ -817,7 +817,7 @@ impl RedstoneSystem {
     /// intentionally skipped so streaming cannot create a false edge.
     fn update_observers(
         &mut self,
-        manager: &mut ChunkManager,
+        manager: &mut WorldColumns,
         block_entity_changes: &mut Vec<(BlockPos, crate::block_entity::BlockEntity)>,
     ) {
         let mut observers: Vec<BlockPos> = self
@@ -915,7 +915,7 @@ impl RedstoneSystem {
         }
     }
 
-    fn sync_loaded_chunks(&mut self, manager: &ChunkManager) {
+    fn sync_loaded_chunks(&mut self, manager: &WorldColumns) {
         if self.known_load_generation == manager.load_generation() {
             return;
         }
@@ -943,7 +943,7 @@ impl RedstoneSystem {
         }
         self.dirty.retain(|pos| self.components.contains_key(pos));
 
-        for (&(cx, cz), chunk) in &manager.chunks {
+        for ((cx, cz), chunk) in manager.chunks.iter() {
             if !self.known_chunks.insert((cx, cz)) {
                 continue;
             }
@@ -975,7 +975,7 @@ impl RedstoneSystem {
         self.known_load_generation = manager.load_generation();
     }
 
-    fn reconcile_mutations(&mut self, manager: &ChunkManager, mutations: &[BlockMutation]) {
+    fn reconcile_mutations(&mut self, manager: &WorldColumns, mutations: &[BlockMutation]) {
         for mutation in mutations {
             if is_component(mutation.new_block) {
                 self.components
@@ -1003,7 +1003,7 @@ impl RedstoneSystem {
         }
     }
 
-    fn process_scheduled(&mut self, manager: &mut ChunkManager, update: &mut RedstoneUpdate) {
+    fn process_scheduled(&mut self, manager: &mut WorldColumns, update: &mut RedstoneUpdate) {
         let (due, future): (Vec<_>, Vec<_>) = std::mem::take(&mut self.scheduled)
             .into_iter()
             .partition(|s| s.due <= self.tick);
@@ -1121,7 +1121,7 @@ impl RedstoneSystem {
 
     fn update_pressure_plates(
         &mut self,
-        manager: &mut ChunkManager,
+        manager: &mut WorldColumns,
         occupants: &[BlockPos],
         mutations: &mut Vec<BlockMutation>,
     ) {
@@ -1154,7 +1154,7 @@ impl RedstoneSystem {
         }
     }
 
-    fn settle_power(&mut self, manager: &ChunkManager) -> (bool, HashSet<BlockPos>) {
+    fn settle_power(&mut self, manager: &WorldColumns) -> (bool, HashSet<BlockPos>) {
         // Positions evaluated this settle — transition scheduling (repeaters)
         // needs them even when own power did not change.
         let mut evaluated = HashSet::new();
@@ -1229,7 +1229,7 @@ impl RedstoneSystem {
 
     fn apply_component_transitions(
         &mut self,
-        manager: &mut ChunkManager,
+        manager: &mut WorldColumns,
         update: &mut RedstoneUpdate,
         settle_evaluated: &HashSet<BlockPos>,
     ) {
@@ -1340,7 +1340,7 @@ impl RedstoneSystem {
 
     fn extend_piston(
         &self,
-        manager: &mut ChunkManager,
+        manager: &mut WorldColumns,
         pos: BlockPos,
         facing: Direction,
         block: BlockType,
@@ -1364,7 +1364,7 @@ impl RedstoneSystem {
 
     fn retract_piston(
         &self,
-        manager: &mut ChunkManager,
+        manager: &mut WorldColumns,
         pos: BlockPos,
         facing: Direction,
         block: BlockType,
@@ -1387,7 +1387,7 @@ impl RedstoneSystem {
 
 /// Apply open/powered/lit bit. Redstone torch inverts: clear bit = lit.
 fn apply_powered_open_state(
-    manager: &mut ChunkManager,
+    manager: &mut WorldColumns,
     pos: BlockPos,
     block: BlockType,
     powered: bool,
@@ -1400,12 +1400,12 @@ fn apply_powered_open_state(
     set_open_flag(manager, pos, block, open, mutations);
 }
 
-fn block_open_at(manager: &ChunkManager, pos: BlockPos) -> bool {
+fn block_open_at(manager: &WorldColumns, pos: BlockPos) -> bool {
     crate::world::BlockState::decode(manager.get_block_state(pos.0, pos.1, pos.2)).is_open
 }
 
 fn set_open_flag(
-    manager: &mut ChunkManager,
+    manager: &mut WorldColumns,
     pos: BlockPos,
     block: BlockType,
     is_open: bool,
@@ -1421,7 +1421,7 @@ fn set_open_flag(
 }
 
 fn desired_power(
-    manager: &ChunkManager,
+    manager: &WorldColumns,
     states: &HashMap<BlockPos, ComponentState>,
     pos: BlockPos,
     block: BlockType,
@@ -1497,7 +1497,7 @@ fn desired_power(
 }
 
 fn incoming_power(
-    manager: &ChunkManager,
+    manager: &WorldColumns,
     states: &HashMap<BlockPos, ComponentState>,
     target: BlockPos,
     attenuate_wire: bool,
@@ -1513,7 +1513,7 @@ fn incoming_power(
 }
 
 fn signal_from_position(
-    manager: &ChunkManager,
+    manager: &WorldColumns,
     states: &HashMap<BlockPos, ComponentState>,
     source: BlockPos,
     target: BlockPos,
@@ -1571,7 +1571,7 @@ fn emitted_toward(
 }
 
 fn strong_power_into(
-    manager: &ChunkManager,
+    manager: &WorldColumns,
     states: &HashMap<BlockPos, ComponentState>,
     target: BlockPos,
 ) -> u8 {
@@ -1589,7 +1589,7 @@ fn strong_power_into(
         .unwrap_or(0)
 }
 
-fn source_power(manager: &ChunkManager, pos: BlockPos, block: BlockType) -> u8 {
+fn source_power(manager: &WorldColumns, pos: BlockPos, block: BlockType) -> u8 {
     let open = block_open_at(manager, pos);
     match block {
         BlockType::RedstoneTorch if !open => 15,
@@ -1628,7 +1628,7 @@ fn scheduled_kind_key(kind: ScheduledKind) -> u8 {
     }
 }
 
-fn container_revision(manager: &ChunkManager, pos: BlockPos) -> u64 {
+fn container_revision(manager: &WorldColumns, pos: BlockPos) -> u64 {
     let own = manager
         .get_block_entity(pos.0, pos.1, pos.2)
         .map(crate::block_entity::BlockEntity::revision)
@@ -1687,7 +1687,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     crate::rng::fnv1a(data)
 }
 
-fn is_strong_source(manager: &ChunkManager, pos: BlockPos, block: BlockType) -> bool {
+fn is_strong_source(manager: &WorldColumns, pos: BlockPos, block: BlockType) -> bool {
     let open = block_open_at(manager, pos);
     match block {
         BlockType::Lever | BlockType::StoneButton | BlockType::PressurePlate | BlockType::Repeater => {
@@ -1732,12 +1732,12 @@ fn is_movable(block: BlockType) -> bool {
         )
 }
 
-fn get_block(manager: &ChunkManager, pos: BlockPos) -> BlockType {
+fn get_block(manager: &WorldColumns, pos: BlockPos) -> BlockType {
     manager.get_block(pos.0, pos.1, pos.2)
 }
 
 fn set_block_record(
-    manager: &mut ChunkManager,
+    manager: &mut WorldColumns,
     pos: BlockPos,
     block: BlockType,
     mutations: &mut Vec<BlockMutation>,
@@ -1757,7 +1757,7 @@ fn set_block_record(
 }
 
 fn set_block_record_with_state(
-    manager: &mut ChunkManager,
+    manager: &mut WorldColumns,
     pos: BlockPos,
     block: BlockType,
     state: u8,
@@ -1788,7 +1788,7 @@ fn sub(a: BlockPos, b: BlockPos) -> BlockPos {
 fn fill_plate_occupants(
     scratch: &mut HashSet<BlockPos>,
     components: &HashMap<BlockPos, ComponentState>,
-    manager: &ChunkManager,
+    manager: &WorldColumns,
     occupants: &[BlockPos],
 ) {
     scratch.clear();
@@ -1834,15 +1834,15 @@ mod tests {
 
     const Y: i32 = 200;
 
-    fn manager() -> ChunkManager {
-        let mut manager = ChunkManager::new(2);
+    fn manager() -> WorldColumns {
+        let mut manager = WorldColumns::new(2);
         manager.insert_resident_chunk((0, 0), Chunk::new(0, 0));
         manager
     }
 
     fn place(
         system: &mut RedstoneSystem,
-        manager: &mut ChunkManager,
+        manager: &mut WorldColumns,
         x: i32,
         block: BlockType,
         facing: Direction,
@@ -2106,7 +2106,7 @@ mod tests {
         use crate::world::{BlockState, ChestType};
 
         let mut system = RedstoneSystem::new();
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager.insert_resident_chunk((0, 0), Chunk::new(0, 0));
 
         let initial_state = BlockState {
@@ -2738,7 +2738,7 @@ mod tests {
 
     #[test]
     fn collect_only_emits_components_inside_the_target_chunk() {
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager.insert_resident_chunk((0, 0), Chunk::new(0, 0));
         manager.insert_resident_chunk((1, 0), Chunk::new(1, 0));
         let mut system = RedstoneSystem::new();
@@ -2808,7 +2808,7 @@ mod tests {
 
     #[test]
     fn cross_chunk_redstone_line_propagation() {
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager.insert_resident_chunk((0, 0), Chunk::new(0, 0));
         manager.insert_resident_chunk((1, 0), Chunk::new(1, 0));
         let mut system = RedstoneSystem::new();
@@ -2904,13 +2904,13 @@ mod tests {
 
     fn reference_full_settle(
         components: &mut HashMap<BlockPos, ComponentState>,
-        manager: &ChunkManager,
+        manager: &WorldColumns,
     ) -> bool {
         // Deliberately small reference model.  Keep this independent from the
         // production evaluator: it only models the fixture primitives used by
         // the differential tests (sources, wires, repeaters and consumers).
         fn reference_output(
-            manager: &ChunkManager,
+            manager: &WorldColumns,
             snapshot: &HashMap<BlockPos, ComponentState>,
             pos: BlockPos,
             block: BlockType,
@@ -3003,7 +3003,7 @@ mod tests {
 
     #[test]
     fn differential_dirty_worklist_vs_full_settle_parity() {
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager.insert_resident_chunk((0, 0), Chunk::new(0, 0));
         manager.insert_resident_chunk((1, 0), Chunk::new(1, 0));
         let mut system = RedstoneSystem::new();

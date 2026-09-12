@@ -1,4 +1,4 @@
-use crate::chunk_manager::{mark_block_mesh_dependencies, ChunkManager};
+use crate::chunk_manager::{mark_block_mesh_dependencies, WorldColumns};
 use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_WIDTH, FLUID_LEVEL_MASK};
 use std::collections::{BTreeSet, HashSet};
 
@@ -27,7 +27,7 @@ pub struct FluidMutation {
 /// exact cells that changed so connected clients render the same flow without
 /// running the fluid simulation themselves.
 pub fn tick_fluids_in_columns(
-    chunk_manager: &mut ChunkManager,
+    chunk_manager: &mut WorldColumns,
     is_lava: bool,
     max_updates: usize,
     columns: Option<&BTreeSet<(i32, i32)>>,
@@ -93,7 +93,7 @@ pub fn tick_fluids_in_columns(
 }
 
 fn update_cell(
-    chunk_manager: &mut ChunkManager,
+    chunk_manager: &mut WorldColumns,
     pos: BlockPos,
     target_type: BlockType,
     other_type: BlockType,
@@ -169,7 +169,7 @@ fn update_cell(
 }
 
 fn desired_flow(
-    chunk_manager: &ChunkManager,
+    chunk_manager: &WorldColumns,
     (wx, wy, wz): BlockPos,
     target_type: BlockType,
     is_lava: bool,
@@ -233,7 +233,7 @@ fn desired_flow(
 }
 
 fn is_same_fluid_at(
-    chunk_manager: &ChunkManager,
+    chunk_manager: &WorldColumns,
     pos: BlockPos,
     target_type: BlockType,
     is_lava: bool,
@@ -246,7 +246,7 @@ fn is_same_fluid_at(
 }
 
 fn is_water_source_at(
-    chunk_manager: &ChunkManager,
+    chunk_manager: &WorldColumns,
     pos: BlockPos,
     target_type: BlockType,
     is_lava: bool,
@@ -261,7 +261,7 @@ fn is_water_source_at(
 }
 
 fn is_supported(
-    chunk_manager: &ChunkManager,
+    chunk_manager: &WorldColumns,
     wx: i32,
     wy: i32,
     wz: i32,
@@ -272,7 +272,7 @@ fn is_supported(
 }
 
 fn set_fluid_state(
-    chunk_manager: &mut ChunkManager,
+    chunk_manager: &mut WorldColumns,
     (wx, wy, wz): BlockPos,
     fluid_type: BlockType,
     level: u8,
@@ -299,12 +299,12 @@ mod tests {
     use crate::world::Chunk;
     use std::collections::BTreeSet;
 
-    fn all_loaded(manager: &ChunkManager) -> BTreeSet<(i32, i32)> {
-        manager.chunks.keys().copied().collect()
+    fn all_loaded(manager: &WorldColumns) -> BTreeSet<(i32, i32)> {
+        manager.chunks.keys().collect()
     }
 
     fn tick_fluids(
-        manager: &mut ChunkManager,
+        manager: &mut WorldColumns,
         is_lava: bool,
         max_updates: usize,
     ) -> (HashSet<(i32, i32)>, Vec<FluidMutation>) {
@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn generated_chunks_do_not_schedule_the_static_ocean() {
-        let mut manager = ChunkManager::new(1);
+        let mut manager = WorldColumns::new(1);
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
 
         assert_eq!(manager.pending_fluid_updates(false), 0);
@@ -324,7 +324,7 @@ mod tests {
 
     #[test]
     fn placed_source_flows_without_scanning_the_world() {
-        let mut manager = ChunkManager::new(1);
+        let mut manager = WorldColumns::new(1);
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
         let source = (8, 120, 8);
         manager.set_block(source.0, source.1, source.2, BlockType::Water);
@@ -342,7 +342,7 @@ mod tests {
 
     #[test]
     fn raw_fluid_change_is_reported_when_block_stays_water() {
-        let mut manager = ChunkManager::new(1);
+        let mut manager = WorldColumns::new(1);
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
         let source = (8, 120, 8);
         let flowing = (8, 119, 8);
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn waterlogged_slab_source_flows_into_adjacent_air() {
-        let mut manager = ChunkManager::new(1);
+        let mut manager = WorldColumns::new(1);
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
         let slab = (8, 120, 8);
         let below = (8, 119, 8);
@@ -386,7 +386,7 @@ mod tests {
 
     #[test]
     fn waterlogged_slab_flows_across_chunk_boundary() {
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
         manager.chunks.insert((1, 0), Chunk::new(1, 0));
         let slab = (15, 80, 8);
@@ -420,7 +420,7 @@ mod tests {
 
     #[test]
     fn removing_a_source_drains_its_incremental_flow() {
-        let mut manager = ChunkManager::new(1);
+        let mut manager = WorldColumns::new(1);
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
         let source = (8, 120, 8);
         manager.set_block(source.0, source.1, source.2, BlockType::Water);
@@ -447,7 +447,7 @@ mod tests {
 
     #[test]
     fn y_zero_is_not_automatic_support_for_infinite_source() {
-        let mut manager = ChunkManager::new(1);
+        let mut manager = WorldColumns::new(1);
         manager.chunks.insert((0, 0), Chunk::empty(0, 0));
         manager.set_block(8, 0, 8, BlockType::Water);
         manager.set_block(10, 0, 8, BlockType::Water);
@@ -467,7 +467,7 @@ mod tests {
 
     #[test]
     fn debug_waterfall_and_horizontal_spread() {
-        let mut manager = ChunkManager::new(1);
+        let mut manager = WorldColumns::new(1);
         manager.chunks.insert((0, 0), Chunk::empty(0, 0));
         manager.set_block(8, 120, 8, BlockType::Water);
         for y in 100..120 {
@@ -494,7 +494,7 @@ mod tests {
 
     #[test]
     fn source_on_ground_spreads_horizontally() {
-        let mut manager = ChunkManager::new(1);
+        let mut manager = WorldColumns::new(1);
         manager.chunks.insert((0, 0), Chunk::empty(0, 0));
         manager.set_block(8, 79, 8, BlockType::Stone);
         manager.set_block(9, 79, 8, BlockType::Stone);

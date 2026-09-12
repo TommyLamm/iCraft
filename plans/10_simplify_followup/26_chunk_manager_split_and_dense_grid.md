@@ -22,14 +22,51 @@ Plan 15（投影不再走 `set_block`）、Plan 17（lighting 走鄰域快取，
 
 ## 精確 acceptance
 
-- [ ] 兩個型別：`WorldColumns`（chunks + height + fluid queues + save dirty + simulation distance）給 `ServerWorld`；`PresentationChunks`（chunks + section mesh dirty + view radius）給 `State`。共用的純查詢（`get_block`／`highest_solid_y`／`column_neighborhood`）放 trait 或共用 inner struct。
-- [ ] 權威 `set_block` 不再維護 mesh invalidation；presentation 套用不 enqueue fluid／不跑權威 lighting。
-- [ ] `render_distance` 拆成 `view_distance`（presentation）與 `simulation_distance`（authority）。
-- [ ] **dense grid**：以 `(cx - origin_x, cz - origin_z)` 索引的滑動 2D `Vec<Option<Chunk>>`（大小 `2*(distance+RESIDENCY_HYSTERESIS)+1`）+ generation counter；HashMap 只留罕見出窗 debug 路徑（或完全移除，出窗即未載入）。
-- [ ] `chunk_schedule.rs` 16–24 的 hysteresis 與 grid origin 使用同一個中心；多玩家 server 的 grid 覆蓋所有 session union（或 per-session 視窗 + 共用 `Chunk` `Arc`——擇一並寫入 ARCHITECTURE）。
-- [ ] 「所有 loaded chunks」迭代順序不影響 RNG／checksum（authority 已用顯式 interest set；加測試鎖住）。
-- [ ] 所有 `ChunkManager::new(8)` 測試改對新型別；插入任意座標（`(-1,-1)`、`(4,-3)`）的測試改為窗內座標或顯式擴窗。
-- [ ] `ARCHITECTURE.md` Ownership／World 段改寫。
+- [x] 兩個型別：`WorldColumns`（chunks + height + fluid queues + save dirty + simulation distance）給 `ServerWorld`；`PresentationChunks`（chunks + section mesh dirty + view radius）給 `State`。共用的純查詢（`get_block`／`highest_solid_y`／`column_neighborhood`）放 trait 或共用 inner struct。
+- [x] 權威 `set_block` 不再維護 mesh invalidation；presentation 套用不 enqueue fluid／不跑權威 lighting。
+- [x] `render_distance` 拆成 `view_distance`（presentation）與 `simulation_distance`（authority）。
+- [x] **dense grid**：以 `(cx - origin_x, cz - origin_z)` 索引的滑動 2D `Vec<Option<Chunk>>`（大小 `2*(distance+RESIDENCY_HYSTERESIS)+1`）+ generation counter；HashMap 只留罕見出窗 debug 路徑（或完全移除，出窗即未載入）。
+- [x] `chunk_schedule.rs` 16–24 的 hysteresis 與 grid origin 使用同一個中心；多玩家 server 的 grid 覆蓋所有 session union（或 per-session 視窗 + 共用 `Chunk` `Arc`——擇一並寫入 ARCHITECTURE）。
+- [x] 「所有 loaded chunks」迭代順序不影響 RNG／checksum（authority 已用顯式 interest set；加測試鎖住）。
+- [x] 所有 `ChunkManager::new(8)` 測試改對新型別；插入任意座標（`(-1,-1)`、`(4,-3)`）的測試改為窗內座標或顯式擴窗。
+- [x] `ARCHITECTURE.md` Ownership／World 段改寫。
+
+## 實作與證據
+
+### 改了什麼
+
+- `src/chunk_manager/` 拆模組：`DenseColumnGrid`、`WorldColumns`、`PresentationChunks`、`ColumnQuery`／`LightColumnHost`。
+- 權威 `set_block`／fluid／light 只 mark `dirty_chunks`；presentation `apply_presentation_cell`／light 只 mark mesh dirty。
+- `render_distance` → `view_distance`（presentation）／`simulation_distance`（`WorldColumns`＋`AuthorityConfig`）。
+- Dense grid 以 `distance + RESIDENCY_HYSTERESIS` 定窗；presentation `recenter`；authority `cover_session_centers` 覆蓋 session union。出窗欄進 overflow，等 eviction flush 後再移除。
+- BlockAction on-demand 載入改 `materialize_chunk`（Async `ensure_chunk` 無法當 tick 結算）。
+- `ARCHITECTURE.md` Ownership 段改寫。
+
+### 測了什麼
+
+| 命令 | 結果 |
+| --- | --- |
+| `cargo test --lib chunk_manager::` | 26 passed |
+| `cargo test --lib lighting::` | 9 passed |
+| `cargo test --lib fluid::` | 9 passed |
+| `cargo test --lib` | 726 passed, 2 ignored |
+| `cargo test --test review_hardening_chunk_residency` | 4 passed |
+| `cargo check --all-targets` | ok |
+| `cargo check --bin icraft-server` | ok |
+
+決定性：`loaded_column_iteration_order_is_deterministic`；lighting checksum `fixed_seed_place_break_lighting_checksum_stable`；worldgen byte-identity 仍在 lib 測試內。
+
+### 死路徑證據
+
+- 權威 mesh invalidation：`WorldColumns` 無 `pending_mesh_*`／`record_mesh_invalidation`；`authority_set_block_marks_save_dirty_without_mesh_queue` 斷言只 dirty＋fluid。
+- presentation fluid：`apply_presentation_cell` 無 `schedule_fluid_neighbors`；`presentation_cell_marks_mesh_not_fluids`。
+
+### 留下的缺口
+
+- overflow 仍是 HashMap（出窗／測試／flush 前暫存）；熱路徑在窗內 dense 索引。
+- container 槽位 API 在 `WorldColumns`／`PresentationChunks` 各有一份（未再抽共用 helper）。
+- `settings.render_distance` UI 鍵名未改（仍對應 presentation `view_distance`）。
+
 
 ## 預計檔案與測試
 

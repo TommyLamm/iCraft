@@ -1,4 +1,4 @@
-use crate::chunk_manager::{mark_block_mesh_dependencies, ChunkManager};
+use crate::chunk_manager::{mark_block_mesh_dependencies, WorldColumns};
 use crate::entity::{EntityManager, EntityType};
 use crate::inventory::GameMode;
 use crate::physics::PlayerPhysics;
@@ -17,7 +17,7 @@ pub fn calculate_explosion_damage(center: Vec3, player_pos: Vec3) -> f32 {
 pub fn explode(
     center: Vec3,
     radius: f32,
-    chunk_manager: &mut ChunkManager,
+    chunk_manager: &mut WorldColumns,
     dirty_meshes: &mut std::collections::HashSet<(i32, i32)>,
     player_physics: &mut PlayerPhysics,
     player_state: &mut PlayerState,
@@ -135,7 +135,7 @@ pub enum AmbientSpawnRule {
 /// Shared ambient spawn attempt: cap / RNG / angle / distance / height / spawn.
 pub fn try_ambient_spawn(
     entity_manager: &mut EntityManager,
-    chunk_manager: &ChunkManager,
+    chunk_manager: &WorldColumns,
     player_pos: Vec3,
     time: f32,
     cap: usize,
@@ -202,7 +202,7 @@ pub fn try_ambient_spawn(
 
 pub fn spawn_mobs(
     entity_manager: &mut EntityManager,
-    chunk_manager: &ChunkManager,
+    chunk_manager: &WorldColumns,
     player_pos: Vec3,
     sky_light_level: u8,
     time: f32,
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn explosion_reports_authoritative_block_removals_and_can_be_visual_only() {
-        let mut manager = ChunkManager::new(1);
+        let mut manager = WorldColumns::new(1);
         manager
             .chunks
             .insert((0, 0), crate::world::Chunk::new(0, 0));

@@ -476,8 +476,10 @@ impl ServerRuntime {
                 let _ = self.authority.with_world(dimension, |world| {
                     let (tcx, tcz) = chunk_xz(target.0, target.1);
                     let (scx, scz) = chunk_xz(support.0, support.1);
-                    world.ensure_chunk(tcx, tcz);
-                    world.ensure_chunk(scx, scz);
+                    // Interest-gated BlockAction must see the column this tick;
+                    // async ensure_chunk only queues and would reject as InvalidState.
+                    world.materialize_chunk(tcx, tcz);
+                    world.materialize_chunk(scx, scz);
                 });
             }
         }

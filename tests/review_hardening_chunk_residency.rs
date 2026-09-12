@@ -192,7 +192,7 @@ fn portal_linked_columns_are_evict_candidates_when_nobody_is_present() {
     let linked: Vec<(i32, i32)> = runtime
         .authority
         .world_ref(Dimension::Nether)
-        .map(|world| world.chunks.chunks.keys().copied().collect())
+        .map(|world| world.chunks.chunks.keys().collect())
         .unwrap_or_default();
     assert!(
         !linked.is_empty(),

@@ -1,4 +1,4 @@
-use crate::chunk_manager::{ChunkManager, ColumnNeighborhood};
+use crate::chunk_manager::{WorldColumns, ColumnNeighborhood};
 use crate::physics::AABB;
 use glam::Vec3;
 
@@ -613,8 +613,8 @@ impl Entity {
         self.velocity.z *= friction;
     }
 
-    /// Convenience for tests / callers that still hold a full `ChunkManager`.
-    pub fn update_physics_in(&mut self, dt: f32, chunk_manager: &ChunkManager) {
+    /// Convenience for tests / callers that still hold a full `WorldColumns`.
+    pub fn update_physics_in(&mut self, dt: f32, chunk_manager: &WorldColumns) {
         let cx = (self.position.x / 16.0).floor() as i32;
         let cz = (self.position.z / 16.0).floor() as i32;
         let neighborhood = chunk_manager.column_neighborhood_view(cx, cz);
@@ -1178,8 +1178,8 @@ mod tests {
         );
     }
 
-    fn loaded_air_column() -> ChunkManager {
-        let mut chunk_manager = ChunkManager::new(4);
+    fn loaded_air_column() -> WorldColumns {
+        let mut chunk_manager = WorldColumns::new(4);
         chunk_manager
             .chunks
             .insert((0, 0), crate::world::Chunk::empty(0, 0));
@@ -1339,7 +1339,7 @@ mod tests {
     fn dropped_item_freezes_when_column_is_unloaded() {
         // Policy: skip physics this tick when any occupied/predicted column is
         // unloaded. Missing terrain must not be treated as air.
-        let chunk_manager = ChunkManager::new(4);
+        let chunk_manager = WorldColumns::new(4);
         let mut item = Entity::new(6, EntityType::DroppedItem, Vec3::new(0.5, -9.0, 0.5));
         item.dropped_item = Some(crate::inventory::Item::Stone);
         item.velocity = Vec3::new(0.0, -8.0, 0.0);

@@ -1,4 +1,4 @@
-use crate::chunk_manager::ChunkManager;
+use crate::chunk_manager::WorldColumns;
 use crate::dimension::WorldHeight;
 use crate::entity::EntityType;
 use crate::inventory::ItemStack;
@@ -307,7 +307,7 @@ where
 /// [`crate::world::Chunk::random_tick_sections`] index — this path never
 /// rescans every section or sorts a freshly built list.
 pub fn sample_random_ticks_in_columns(
-    chunk_manager: &ChunkManager,
+    chunk_manager: &WorldColumns,
     columns: &BTreeSet<(i32, i32)>,
     world_seed: u64,
     game_tick: u64,
@@ -405,7 +405,7 @@ pub struct HopperTickResult {
 /// `columns` is the simulation-union residency set. Authority always passes
 /// `Some(union)`; tests pass `Some(all_loaded)`.
 pub fn tick_hoppers_in_columns(
-    chunk_manager: &mut ChunkManager,
+    chunk_manager: &mut WorldColumns,
     mut entity_manager: Option<&mut crate::entity::EntityManager>,
     max_transfers_per_tick: usize,
     columns: Option<&BTreeSet<(i32, i32)>>,
@@ -443,7 +443,7 @@ pub fn tick_hoppers_in_columns(
             }
         }
     } else {
-        for (&(cx, cz), chunk) in &chunk_manager.chunks {
+        for ((cx, cz), chunk) in chunk_manager.chunks.iter() {
             collect(cx, cz, chunk);
         }
     }
@@ -561,7 +561,7 @@ pub fn tick_hoppers_in_columns(
 }
 
 fn try_container_transfer(
-    chunk_manager: &mut ChunkManager,
+    chunk_manager: &mut WorldColumns,
     source_pos: (i32, i32, i32),
     source_side: Option<crate::redstone::Direction>,
     target_pos: (i32, i32, i32),
@@ -628,17 +628,17 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    fn all_loaded(manager: &ChunkManager) -> BTreeSet<(i32, i32)> {
-        manager.chunks.keys().copied().collect()
+    fn all_loaded(manager: &WorldColumns) -> BTreeSet<(i32, i32)> {
+        manager.chunks.keys().collect()
     }
 
-    fn tick_hoppers(manager: &mut ChunkManager, max_transfers_per_tick: usize) -> usize {
+    fn tick_hoppers(manager: &mut WorldColumns, max_transfers_per_tick: usize) -> usize {
         let columns = all_loaded(manager);
         tick_hoppers_in_columns(manager, None, max_transfers_per_tick, Some(&columns)).transfers
     }
 
     fn tick_hoppers_with_entities(
-        manager: &mut ChunkManager,
+        manager: &mut WorldColumns,
         entity_manager: Option<&mut crate::entity::EntityManager>,
         max_transfers_per_tick: usize,
     ) -> HopperTickResult {
@@ -788,7 +788,7 @@ mod tests {
 
     #[test]
     fn sample_random_ticks_uses_chunk_eligible_index() {
-        let mut manager = ChunkManager::new(4);
+        let mut manager = WorldColumns::new(4);
         manager
             .chunks
             .insert((0, 0), crate::world::Chunk::empty(0, 0));
@@ -825,7 +825,7 @@ mod tests {
 
     #[test]
     fn sample_random_ticks_preserves_ordered_section_budget() {
-        let mut manager = ChunkManager::new(4);
+        let mut manager = WorldColumns::new(4);
         for cz in 0..3 {
             manager
                 .chunks
@@ -851,7 +851,7 @@ mod tests {
         use crate::inventory::{Item, ItemStack};
         use crate::redstone::Direction;
 
-        let mut manager = ChunkManager::new(8);
+        let mut manager = WorldColumns::new(8);
         manager
             .chunks
             .insert((0, 0), crate::world::Chunk::new(0, 0));
@@ -915,7 +915,7 @@ mod tests {
         use crate::recipes::RecipeManager;
         use crate::redstone::Direction;
 
-        let mut manager = ChunkManager::new(8);
+        let mut manager = WorldColumns::new(8);
         manager
             .chunks
             .insert((0, 0), crate::world::Chunk::new(0, 0));
@@ -984,7 +984,7 @@ mod tests {
         use crate::inventory::{Item, ItemStack};
         use crate::redstone::Direction;
 
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager
             .chunks
             .insert((0, 0), crate::world::Chunk::new(0, 0));
@@ -1023,7 +1023,7 @@ mod tests {
         use crate::inventory::{Item, ItemStack};
         use crate::redstone::Direction;
 
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager
             .chunks
             .insert((0, 0), crate::world::Chunk::new(0, 0));
@@ -1067,7 +1067,7 @@ mod tests {
         use crate::inventory::{Item, ItemStack};
         use crate::redstone::Direction;
 
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager
             .chunks
             .insert((0, 0), crate::world::Chunk::new(0, 0));
@@ -1104,7 +1104,7 @@ mod tests {
         use crate::inventory::{Item, ItemStack};
         use crate::redstone::Direction;
 
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager
             .chunks
             .insert((0, 0), crate::world::Chunk::new(0, 0));
@@ -1134,7 +1134,7 @@ mod tests {
         use crate::inventory::{Item, ItemStack};
         use crate::redstone::Direction;
 
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager
             .chunks
             .insert((0, 0), crate::world::Chunk::new(0, 0));
@@ -1179,7 +1179,7 @@ mod tests {
         use crate::inventory::{Item, ItemStack};
         use crate::redstone::Direction;
 
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager
             .chunks
             .insert((0, 0), crate::world::Chunk::new(0, 0));
@@ -1215,7 +1215,7 @@ mod tests {
         use crate::inventory::{Item, ItemStack};
         use crate::redstone::Direction;
 
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager
             .chunks
             .insert((0, 0), crate::world::Chunk::new(0, 0));
@@ -1249,7 +1249,7 @@ mod tests {
         use crate::inventory::{Item, ItemStack};
         use crate::redstone::Direction;
 
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager
             .chunks
             .insert((0, 0), crate::world::Chunk::new(0, 0));
@@ -1280,7 +1280,7 @@ mod tests {
     fn zero_hopper_sim_columns_do_not_scan_block_entities() {
         use crate::block_entity::{BlockEntity, ChestBlockEntity};
 
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager
             .chunks
             .insert((0, 0), crate::world::Chunk::new(0, 0));
@@ -1293,7 +1293,12 @@ mod tests {
                 Some(BlockEntity::Chest(ChestBlockEntity::new())),
             );
         }
-        assert!(manager.chunks[&(0, 0)].hopper_positions().is_empty());
+        assert!(manager
+            .chunks
+            .get(&(0, 0))
+            .unwrap()
+            .hopper_positions()
+            .is_empty());
         let columns = all_loaded(&manager);
         let result =
             tick_hoppers_in_columns(&mut manager, None, MAX_HOPPER_TRANSFERS_PER_TICK, Some(&columns));

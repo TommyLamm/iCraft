@@ -12,7 +12,7 @@ use crate::authority::fishing::FishingDomainContext;
 use crate::authority::interest::chunks_around;
 use crate::authority::transactions::{self, WorkstationContext};
 use crate::block_entity::{default_stub_for_block, BlockEntity, ContainerAccess};
-use crate::chunk_manager::ChunkManager;
+use crate::chunk_manager::WorldColumns;
 use crate::dimension::{generate_chunk_with_options, Dimension, WorldGenerationOptions};
 use crate::entity::{Entity, EntityManager, EntityType};
 use crate::fluid::FluidMutation;
@@ -63,7 +63,7 @@ pub struct ServerWorld {
     pub difficulty: Difficulty,
     pub time: u64,
     pub revisions: RevisionClock,
-    pub chunks: ChunkManager,
+    pub chunks: WorldColumns,
     pub entities: EntityManager,
     pub redstone: RedstoneSystem,
     pub recipe_manager: crate::recipes::RecipeManager,
@@ -115,7 +115,7 @@ impl ServerWorld {
         world_type: WorldType,
         generate_structures: bool,
         rules: WorldRules,
-        render_distance: i32,
+        simulation_distance: i32,
         difficulty: Difficulty,
     ) -> Self {
         let mut world = Self {
@@ -127,7 +127,7 @@ impl ServerWorld {
             difficulty,
             time: 0,
             revisions: RevisionClock::new(),
-            chunks: ChunkManager::new_in_dimension(render_distance.max(1), dimension),
+            chunks: WorldColumns::new_in_dimension(simulation_distance.max(1), dimension),
             // Network player ids occupy the low numeric lane while authority-
             // created transient ids reserve the high bit. Persistent world
             // entities use the middle lane so a combat target can never be
@@ -421,7 +421,6 @@ impl ServerWorld {
             .chunks
             .chunks
             .keys()
-            .copied()
             .filter(|key| !keep.contains(key))
             .collect();
         evict.sort_unstable();
@@ -1480,7 +1479,7 @@ impl ServerWorld {
 
     /// Record a fluid-only (or fluid-plus-block) mutation that has already
     /// been applied by the authoritative fluid carrier.  Fluid ticking writes
-    /// directly to `ChunkManager` so it can schedule neighboring cells; this
+    /// directly to `WorldColumns` so it can schedule neighboring cells; this
     /// helper is the single revision/publication seam for that write.
     fn record_fluid_mutation(&mut self, mutation: FluidMutation) -> WorldMutation {
         let (x, y, z) = mutation.position;
@@ -1504,7 +1503,7 @@ impl ServerWorld {
         &self,
         players: &[(PlayerId, [f32; 3], f32, f32)],
     ) -> BTreeSet<(i32, i32)> {
-        let simulation_distance = self.chunks.render_distance.clamp(0, 32) as u8;
+        let simulation_distance = self.chunks.simulation_distance.clamp(0, 32) as u8;
         let mut simulation_chunks = BTreeSet::new();
         for (_, position, _, _) in players {
             if position.iter().all(|value| value.is_finite()) {

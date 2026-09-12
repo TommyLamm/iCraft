@@ -1,3 +1,12 @@
+//! Column storage split into authority [`WorldColumns`] and presentation
+//! [`PresentationChunks`], sharing [`DenseColumnGrid`] for O(1) index lookups.
+
+mod grid;
+mod presentation;
+
+pub use grid::DenseColumnGrid;
+pub use presentation::PresentationChunks;
+
 use crate::block_entity::BlockEntity;
 use crate::dimension::WorldHeight;
 use crate::inventory::{ContainerInventory, ItemStack};
@@ -6,9 +15,121 @@ use crate::world::{
     CHUNK_WIDTH, FLUID_FALLING_BIT, FLUID_LEVEL_MASK, FLUID_RESERVED_MASK, FLUID_WATERLOGGED_BIT,
     SECTION_SIZE,
 };
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 
 type BlockPos = (i32, i32, i32);
+
+/// Shared read queries implemented by both authority and presentation stores.
+pub trait ColumnQuery {
+    fn column_grid(&self) -> &DenseColumnGrid;
+    fn column_dimension(&self) -> crate::dimension::Dimension;
+
+    fn get_block(&self, wx: i32, wy: i32, wz: i32) -> BlockType {
+        self.get_loaded_block(wx, wy, wz).unwrap_or(BlockType::Air)
+    }
+
+    fn get_loaded_block(&self, wx: i32, wy: i32, wz: i32) -> Option<BlockType> {
+        let ((cx, cz), (bx, by, bz)) = world_to_local(self.column_dimension(), wx, wy, wz)?;
+        let chunk = self.column_grid().get(&(cx, cz))?;
+        Some(chunk.get_block_local(bx, by, bz))
+    }
+
+    fn is_block_loaded(&self, x: i32, _y: i32, z: i32) -> bool {
+        let cx = x.div_euclid(CHUNK_WIDTH as i32);
+        let cz = z.div_euclid(CHUNK_DEPTH as i32);
+        self.column_grid().contains_key(&(cx, cz))
+    }
+
+    fn get_block_state(&self, wx: i32, wy: i32, wz: i32) -> u8 {
+        if let Some(((cx, cz), (bx, by, bz))) = world_to_local(self.column_dimension(), wx, wy, wz)
+        {
+            if let Some(chunk) = self.column_grid().get(&(cx, cz)) {
+                return chunk.get_block_state(bx as i32, by as i32, bz as i32);
+            }
+        }
+        0
+    }
+
+    fn highest_solid_y(&self, wx: i32, wz: i32) -> Option<i32> {
+        let height = self.column_dimension().height();
+        let cx = wx.div_euclid(CHUNK_WIDTH as i32);
+        let cz = wz.div_euclid(CHUNK_DEPTH as i32);
+        let bx = wx.rem_euclid(CHUNK_WIDTH as i32) as usize;
+        let bz = wz.rem_euclid(CHUNK_DEPTH as i32) as usize;
+        let chunk = self.column_grid().get(&(cx, cz))?;
+        let mapped = chunk.heightmap[bx][bz];
+        if mapped == crate::world::NO_HEIGHT {
+            return None;
+        }
+        let start_y = (mapped as i32).clamp(height.min_y(), height.max_y_exclusive() - 1);
+        for y in (height.min_y()..=start_y).rev() {
+            if chunk.get_block_local(bx, y, bz).properties().is_solid {
+                return Some(y);
+            }
+        }
+        None
+    }
+
+    fn column_neighborhood(&self, cx: i32, cz: i32) -> [[Option<&Chunk>; 3]; 3] {
+        std::array::from_fn(|iz| {
+            std::array::from_fn(|ix| {
+                self.column_grid()
+                    .get(&(cx + ix as i32 - 1, cz + iz as i32 - 1))
+            })
+        })
+    }
+
+    fn column_neighborhood_view(&self, cx: i32, cz: i32) -> ColumnNeighborhood<'_> {
+        ColumnNeighborhood {
+            origin_cx: cx,
+            origin_cz: cz,
+            columns: self.column_neighborhood(cx, cz),
+            height: self.column_dimension().height(),
+        }
+    }
+
+    fn get_block_entity(
+        &self,
+        wx: i32,
+        wy: i32,
+        wz: i32,
+    ) -> Option<&crate::block_entity::BlockEntity> {
+        let ((cx, cz), (bx, by, bz)) = world_to_local(self.column_dimension(), wx, wy, wz)?;
+        let chunk = self.column_grid().get(&(cx, cz))?;
+        chunk.get_block_entity(bx as u8, by as i16, bz as u8)
+    }
+}
+
+/// Host surface for lighting BFS take/restore + dirty/mesh side effects.
+pub trait LightColumnHost {
+    fn dimension(&self) -> crate::dimension::Dimension;
+    fn chunks(&self) -> &DenseColumnGrid;
+    fn chunks_mut(&mut self) -> &mut DenseColumnGrid;
+    fn note_light_cell_change(&mut self, wx: i32, wy: i32, wz: i32);
+    fn get_block(&self, wx: i32, wy: i32, wz: i32) -> BlockType;
+    fn get_sky_light(&self, wx: i32, wy: i32, wz: i32) -> u8;
+    fn set_sky_light(&mut self, wx: i32, wy: i32, wz: i32, val: u8);
+    fn get_block_light(&self, wx: i32, wy: i32, wz: i32) -> u8;
+    fn set_block_light(&mut self, wx: i32, wy: i32, wz: i32, val: u8);
+    fn column_neighborhood(&self, cx: i32, cz: i32) -> [[Option<&Chunk>; 3]; 3];
+}
+
+pub(crate) fn world_to_local(
+    dimension: crate::dimension::Dimension,
+    wx: i32,
+    wy: i32,
+    wz: i32,
+) -> Option<((i32, i32), (usize, i32, usize))> {
+    let height = dimension.height();
+    if !height.contains_y(wy) {
+        return None;
+    }
+    let cx = wx.div_euclid(CHUNK_WIDTH as i32);
+    let cz = wz.div_euclid(CHUNK_DEPTH as i32);
+    let bx = wx.rem_euclid(CHUNK_WIDTH as i32) as usize;
+    let bz = wz.rem_euclid(CHUNK_DEPTH as i32) as usize;
+    Some(((cx, cz), (bx, wy, bz)))
+}
 
 /// Immutable 3×3 column halo for entity physics. Built once per mover so the
 /// collision loop never does a per-voxel `chunks.get`.
@@ -177,9 +298,11 @@ impl FluidUpdateQueue {
     }
 }
 
-pub struct ChunkManager {
-    pub chunks: HashMap<(i32, i32), Chunk>,
-    pub render_distance: i32,
+/// Authority-owned resident columns: dense grid, fluid queues, save dirty, and
+/// simulation distance. Does not track mesh invalidation.
+pub struct WorldColumns {
+    pub chunks: DenseColumnGrid,
+    pub simulation_distance: i32,
     pub dimension: crate::dimension::Dimension,
     pub dirty_chunks: crate::save::DirtyChunkSet,
     /// Monotonic counter bumped whenever the resident column set changes.
@@ -187,27 +310,93 @@ pub struct ChunkManager {
     load_generation: u64,
     water_updates: FluidUpdateQueue,
     lava_updates: FluidUpdateQueue,
-    pending_mesh_invalidations: HashSet<(i32, i32)>,
-    pending_section_mesh_invalidations: HashSet<SectionKey>,
 }
 
-impl ChunkManager {
-    pub fn new(render_distance: i32) -> Self {
-        Self::new_in_dimension(render_distance, crate::dimension::Dimension::Overworld)
+impl ColumnQuery for WorldColumns {
+    fn column_grid(&self) -> &DenseColumnGrid {
+        &self.chunks
     }
 
-    pub fn new_in_dimension(render_distance: i32, dimension: crate::dimension::Dimension) -> Self {
+    fn column_dimension(&self) -> crate::dimension::Dimension {
+        self.dimension
+    }
+}
+
+impl LightColumnHost for WorldColumns {
+    fn dimension(&self) -> crate::dimension::Dimension {
+        self.dimension
+    }
+
+    fn chunks(&self) -> &DenseColumnGrid {
+        &self.chunks
+    }
+
+    fn chunks_mut(&mut self) -> &mut DenseColumnGrid {
+        &mut self.chunks
+    }
+
+    fn note_light_cell_change(&mut self, wx: i32, wy: i32, wz: i32) {
+        if world_to_local(self.dimension, wx, wy, wz).is_some() {
+            let cx = wx.div_euclid(CHUNK_WIDTH as i32);
+            let cz = wz.div_euclid(CHUNK_DEPTH as i32);
+            self.dirty_chunks.mark_dirty(cx, cz);
+        }
+    }
+
+    fn get_block(&self, wx: i32, wy: i32, wz: i32) -> BlockType {
+        WorldColumns::get_block(self, wx, wy, wz)
+    }
+
+    fn get_sky_light(&self, wx: i32, wy: i32, wz: i32) -> u8 {
+        WorldColumns::get_sky_light(self, wx, wy, wz)
+    }
+
+    fn set_sky_light(&mut self, wx: i32, wy: i32, wz: i32, val: u8) {
+        WorldColumns::set_sky_light(self, wx, wy, wz, val)
+    }
+
+    fn get_block_light(&self, wx: i32, wy: i32, wz: i32) -> u8 {
+        WorldColumns::get_block_light(self, wx, wy, wz)
+    }
+
+    fn set_block_light(&mut self, wx: i32, wy: i32, wz: i32, val: u8) {
+        WorldColumns::set_block_light(self, wx, wy, wz, val)
+    }
+
+    fn column_neighborhood(&self, cx: i32, cz: i32) -> [[Option<&Chunk>; 3]; 3] {
+        WorldColumns::column_neighborhood(self, cx, cz)
+    }
+}
+
+impl WorldColumns {
+    pub fn new(simulation_distance: i32) -> Self {
+        Self::new_in_dimension(simulation_distance, crate::dimension::Dimension::Overworld)
+    }
+
+    pub fn new_in_dimension(
+        simulation_distance: i32,
+        dimension: crate::dimension::Dimension,
+    ) -> Self {
+        let simulation_distance = simulation_distance.max(0);
         Self {
-            chunks: HashMap::new(),
-            render_distance,
+            chunks: DenseColumnGrid::with_distance(simulation_distance),
+            simulation_distance,
             dimension,
             dirty_chunks: crate::save::DirtyChunkSet::new(),
             load_generation: 0,
             water_updates: FluidUpdateQueue::new(),
             lava_updates: FluidUpdateQueue::new(),
-            pending_mesh_invalidations: HashSet::new(),
-            pending_section_mesh_invalidations: HashSet::new(),
         }
+    }
+
+    /// Slide the dense window so it covers every session-center ± radius.
+    pub fn cover_session_centers(&mut self, centers: &[(i32, i32)]) {
+        self.chunks.cover_centers(centers);
+    }
+
+    /// Re-center on a single player / camera chunk.
+    pub fn recenter(&mut self, center_cx: i32, center_cz: i32) {
+        self.chunks.recenter(center_cx, center_cz);
     }
 
     /// Resident-column generation observed by redstone sleep / sync.
@@ -234,62 +423,8 @@ impl ChunkManager {
         Some(removed)
     }
 
-    fn record_mesh_invalidation(&mut self, wx: i32, wy: i32, wz: i32) {
-        mark_block_mesh_dependencies(&mut self.pending_mesh_invalidations, wx, wz);
-        mark_section_mesh_dependencies(&mut self.pending_section_mesh_invalidations, wx, wy, wz);
-    }
-
-    /// Save-dirty + mesh invalidation for a light cell mutated via a temporary
-    /// taken neighborhood (BFS no longer goes through `set_*_light` per hop).
-    pub(crate) fn note_light_cell_change(&mut self, wx: i32, wy: i32, wz: i32) {
-        if let Some(((cx, cz), _)) = self.world_to_local(wx, wy, wz) {
-            self.dirty_chunks.mark_dirty(cx, cz);
-            self.record_mesh_invalidation(wx, wy, wz);
-        }
-    }
-
-    pub fn acknowledge_mesh_invalidation(&mut self, coord: &(i32, i32)) {
-        self.pending_mesh_invalidations.remove(coord);
-    }
-
-    pub fn drain_mesh_invalidations(&mut self) -> HashSet<(i32, i32)> {
-        std::mem::take(&mut self.pending_mesh_invalidations)
-    }
-
-    pub fn acknowledge_section_mesh_invalidation(&mut self, key: &SectionKey) {
-        self.pending_section_mesh_invalidations.remove(key);
-    }
-
-    pub fn drain_section_mesh_invalidations(&mut self) -> HashSet<SectionKey> {
-        std::mem::take(&mut self.pending_section_mesh_invalidations)
-    }
-
     pub fn mark_dirty(&mut self, cx: i32, cz: i32) {
         self.dirty_chunks.mark_dirty(cx, cz);
-    }
-
-    /// Insert a join-client column from a revision-gated `ChunkData` payload.
-    /// Never generates terrain; missing streams fail closed via restore.
-    pub fn insert_authoritative_chunk_payload(
-        &mut self,
-        cx: i32,
-        cz: i32,
-        blocks: &[u8],
-        block_states: &[u8],
-        fluid_levels: &[u8],
-        block_entities: &[u8],
-    ) -> std::io::Result<()> {
-        let mut chunk = Chunk::empty_in_dimension(self.dimension, cx, cz);
-        crate::save::ChunkSaveData::restore_network_payload(
-            &mut chunk,
-            blocks,
-            block_states,
-            fluid_levels,
-            block_entities,
-        )?;
-        self.chunks.insert((cx, cz), chunk);
-        self.bump_load_generation();
-        Ok(())
     }
 
     fn schedule_fluid_neighbors(&mut self, wx: i32, wy: i32, wz: i32) {
@@ -693,7 +828,6 @@ impl ChunkManager {
                 if chunk.get_block_state(bx as i32, by as i32, bz as i32) != state {
                     chunk.set_block_state(bx as i32, by as i32, bz as i32, state);
                     self.dirty_chunks.mark_dirty(cx, cz);
-                    self.record_mesh_invalidation(wx, wy, wz);
                 }
             }
         }
@@ -715,48 +849,8 @@ impl ChunkManager {
                 chunk.update_heightmap(bx, bz);
                 self.schedule_fluid_neighbors(wx, wy, wz);
                 self.dirty_chunks.mark_dirty(cx, cz);
-                self.record_mesh_invalidation(wx, wy, wz);
             }
         }
-    }
-
-    /// Write a revision-gated projection cell without authority fluid side
-    /// effects. Presentation applies host payloads here; it must not enqueue
-    /// fluid neighbors or re-run world simulation on the GPU thread.
-    pub fn apply_presentation_cell(
-        &mut self,
-        wx: i32,
-        wy: i32,
-        wz: i32,
-        block: BlockType,
-        state: u8,
-        raw_fluid: u8,
-    ) -> bool {
-        let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) else {
-            return false;
-        };
-        let Some(chunk) = self.chunks.get_mut(&(cx, cz)) else {
-            return false;
-        };
-        let previous = chunk.get_block_local(bx, by, bz);
-        let previous_state = chunk.get_block_state(bx as i32, by as i32, bz as i32);
-        let previous_fluid = chunk.get_fluid_level(bx, by, bz);
-        if previous == block && previous_state == state && previous_fluid == raw_fluid {
-            return false;
-        }
-        if previous != block {
-            chunk.set_block_local(bx, by, bz, block);
-            chunk.update_heightmap(bx, bz);
-        }
-        if previous_state != state || previous != block {
-            chunk.set_block_state(bx as i32, by as i32, bz as i32, state);
-        }
-        if previous_fluid != raw_fluid {
-            chunk.set_fluid_level(bx, by, bz, raw_fluid);
-        }
-        self.dirty_chunks.mark_dirty(cx, cz);
-        self.record_mesh_invalidation(wx, wy, wz);
-        true
     }
 
     pub fn get_sky_light(&self, wx: i32, wy: i32, wz: i32) -> u8 {
@@ -778,7 +872,6 @@ impl ChunkManager {
                 if chunk.get_sky_light(bx, by, bz) != val {
                     chunk.set_sky_light(bx, by, bz, val);
                     self.dirty_chunks.mark_dirty(cx, cz);
-                    self.record_mesh_invalidation(wx, wy, wz);
                 }
             }
         }
@@ -799,7 +892,6 @@ impl ChunkManager {
                 if chunk.get_block_light(bx, by, bz) != val {
                     chunk.set_block_light(bx, by, bz, val);
                     self.dirty_chunks.mark_dirty(cx, cz);
-                    self.record_mesh_invalidation(wx, wy, wz);
                 }
             }
         }
@@ -823,7 +915,6 @@ impl ChunkManager {
                     chunk.set_fluid_level(bx, by, bz, updated);
                     self.schedule_fluid_neighbors(wx, wy, wz);
                     self.dirty_chunks.mark_dirty(cx, cz);
-                    self.record_mesh_invalidation(wx, wy, wz);
                 }
             }
         }
@@ -851,7 +942,6 @@ impl ChunkManager {
                     chunk.set_fluid_level(bx, by, bz, updated);
                     self.schedule_fluid_neighbors(wx, wy, wz);
                     self.dirty_chunks.mark_dirty(cx, cz);
-                    self.record_mesh_invalidation(wx, wy, wz);
                 }
             }
         }
@@ -979,7 +1069,6 @@ impl ChunkManager {
                     chunk.set_fluid_level(bx, by, bz, raw);
                     self.schedule_fluid_neighbors(wx, wy, wz);
                     self.dirty_chunks.mark_dirty(cx, cz);
-                    self.record_mesh_invalidation(wx, wy, wz);
                 }
             }
         }
@@ -1084,7 +1173,8 @@ mod tests {
         source.set_block_local(1, 70, 2, BlockType::GoldOre);
         let payload = crate::save::ChunkSaveData::from_chunk(&source).unwrap();
 
-        let mut manager = ChunkManager::new(2);
+        // (2,-3) is outside distance-0 window; distance 2 covers it in-window.
+        let mut manager = PresentationChunks::new(2);
         manager
             .insert_authoritative_chunk_payload(
                 2,
@@ -1133,35 +1223,27 @@ mod tests {
     }
 
     #[test]
-    fn direct_storage_mutations_emit_mesh_invalidation_dependencies() {
-        let mut manager = ChunkManager::new(2);
+    fn authority_set_block_marks_save_dirty_without_mesh_queue() {
+        let mut manager = WorldColumns::new(2);
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
         manager.chunks.insert((1, 0), Chunk::new(1, 0));
 
         manager.set_block(15, 80, 8, BlockType::Stone);
-
-        assert_eq!(
-            manager.drain_mesh_invalidations(),
-            HashSet::from([(0, 0), (1, 0)])
-        );
-        assert!(manager.drain_mesh_invalidations().is_empty());
+        assert!(manager.dirty_chunks.is_dirty(0, 0));
+        assert_eq!(manager.pending_fluid_updates(false), 7);
     }
 
     #[test]
-    fn raw_fluid_roundtrip_preserves_waterlogged_bit_and_boundary_mesh_dependencies() {
-        let mut manager = ChunkManager::new(2);
+    fn raw_fluid_roundtrip_preserves_waterlogged_bit() {
+        let mut manager = WorldColumns::new(2);
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
         manager.chunks.insert((1, 0), Chunk::new(1, 0));
         manager.set_block(15, 80, 8, BlockType::OakSlab);
-        manager.drain_mesh_invalidations();
 
         manager.set_fluid_raw(15, 80, 8, 0xff);
         assert_eq!(manager.get_fluid_raw(15, 80, 8), 0xff);
         assert!(manager.is_waterlogged(15, 80, 8));
-        assert_eq!(
-            manager.drain_mesh_invalidations(),
-            HashSet::from([(0, 0), (1, 0)])
-        );
+        assert!(manager.dirty_chunks.is_dirty(0, 0));
 
         assert!(manager.set_waterlogged(15, 80, 8, false));
         assert_eq!(manager.get_fluid_raw(15, 80, 8), FLUID_RESERVED_MASK);
@@ -1181,6 +1263,18 @@ mod tests {
     }
 
     #[test]
+    fn loaded_column_iteration_order_is_deterministic() {
+        let mut manager = WorldColumns::new(2);
+        manager.chunks.insert((1, 0), Chunk::empty(1, 0));
+        manager.chunks.insert((-1, -1), Chunk::empty(-1, -1));
+        manager.chunks.insert((0, 0), Chunk::empty(0, 0));
+        let keys: Vec<_> = manager.chunks.keys().collect();
+        assert_eq!(keys, vec![(-1, -1), (0, 0), (1, 0)]);
+        let again: Vec<_> = manager.chunks.keys().collect();
+        assert_eq!(keys, again);
+    }
+
+    #[test]
     fn section_dependencies_include_xyz_edges_and_corners() {
         let mut set = HashSet::new();
         mark_section_mesh_dependencies(&mut set, 15, 15, 15);
@@ -1194,7 +1288,7 @@ mod tests {
 
     #[test]
     fn capture_section_halo_uses_neighbor_columns() {
-        let mut manager = ChunkManager::new(0);
+        let mut manager = WorldColumns::new(0);
         let mut center = Chunk::empty(0, 0);
         let mut east = Chunk::empty(1, 0);
         center.set_block_local(15, 8, 8, BlockType::Stone);
@@ -1240,7 +1334,7 @@ mod tests {
 
     #[test]
     fn set_block_updates_torch_index_at_negative_world_coordinates() {
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager.chunks.insert((-1, -1), Chunk::new(-1, -1));
 
         manager.set_block(-1, 64, -1, BlockType::Torch);
@@ -1262,7 +1356,7 @@ mod tests {
 
     #[test]
     fn test_check_and_break_unsupported_above() {
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
         manager.set_block(5, 64, 5, BlockType::Dirt);
         manager.set_block(5, 65, 5, BlockType::Dandelion);
@@ -1283,7 +1377,7 @@ mod tests {
 
     #[test]
     fn player_placement_support_requires_water_for_cane_and_clear_sides_for_cactus() {
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
         manager.set_block(8, 99, 8, BlockType::Sand);
 
@@ -1298,7 +1392,7 @@ mod tests {
 
     #[test]
     fn removing_cane_water_breaks_the_entire_column() {
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
         manager.set_block(8, 99, 8, BlockType::Sand);
         manager.set_block(9, 99, 8, BlockType::Water);
@@ -1325,7 +1419,7 @@ mod tests {
 
     #[test]
     fn adding_a_lateral_cactus_obstruction_breaks_and_cascades() {
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
         manager.set_block(8, 99, 8, BlockType::Sand);
         manager.set_block(8, 100, 8, BlockType::Cactus);
@@ -1351,7 +1445,7 @@ mod tests {
 
     #[test]
     fn missing_boundary_chunk_is_unknown_until_loaded_and_never_forced() {
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager.chunks.insert((0, 0), Chunk::empty(0, 0));
         manager.set_block(15, 99, 8, BlockType::Sand);
         manager.set_block(15, 100, 8, BlockType::SugarCane);
@@ -1387,7 +1481,7 @@ mod tests {
 
     #[test]
     fn loading_a_boundary_obstruction_revalidates_neighboring_cactus() {
-        let mut manager = ChunkManager::new(2);
+        let mut manager = WorldColumns::new(2);
         manager.chunks.insert((0, 0), Chunk::empty(0, 0));
         manager.set_block(15, 99, 8, BlockType::Sand);
         manager.set_block(15, 100, 8, BlockType::Cactus);
@@ -1415,7 +1509,7 @@ mod tests {
 
     #[test]
     fn container_slot_commit_rejects_invalid_stack_without_partial_write() {
-        let mut chunk_manager = ChunkManager::new(2);
+        let mut chunk_manager = WorldColumns::new(2);
         chunk_manager
             .chunks
             .insert((0, 0), crate::world::Chunk::new(0, 0));

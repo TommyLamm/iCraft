@@ -55,7 +55,7 @@ pub struct AuthorityConfig {
     pub generate_structures: bool,
     pub rules: WorldRules,
     pub difficulty: Difficulty,
-    pub render_distance: i32,
+    pub simulation_distance: i32,
 }
 
 impl Default for AuthorityConfig {
@@ -70,7 +70,7 @@ impl Default for AuthorityConfig {
             generate_structures: false,
             rules: WorldRules::default(),
             difficulty: Difficulty::default(),
-            render_distance: 8,
+            simulation_distance: 8,
         }
     }
 }
@@ -237,7 +237,7 @@ impl AuthorityCore {
             config.world_type,
             config.generate_structures,
             config.rules,
-            config.render_distance,
+            config.simulation_distance,
             config.difficulty,
         );
         world.set_worldgen_mode(mode);

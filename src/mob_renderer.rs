@@ -1,4 +1,4 @@
-use crate::chunk_manager::ChunkManager;
+use crate::chunk_manager::PresentationChunks;
 use crate::entity::{Entity, EntityManager, EntityType};
 use crate::state::Vertex;
 use glam::Vec3;
@@ -248,7 +248,7 @@ fn add_flat_sprite(
 
 pub fn render_mobs<'a>(
     entities: impl IntoIterator<Item = &'a Entity>,
-    chunk_manager: &ChunkManager,
+    chunk_manager: &PresentationChunks,
     cuboid_instances: &mut Vec<MobInstance>,
     quad_instances: &mut Vec<MobInstance>,
     time: f32,
@@ -597,7 +597,7 @@ pub fn render_local_player(
     position: Vec3,
     yaw: f32,
     pitch: f32,
-    chunk_manager: &ChunkManager,
+    chunk_manager: &PresentationChunks,
     cuboid_instances: &mut Vec<MobInstance>,
     quad_instances: &mut Vec<MobInstance>,
     held_item: crate::inventory::Item,
@@ -765,7 +765,7 @@ mod tests {
     fn remote_player_renders_body_and_two_sleeve_layers() {
         let mut entities = EntityManager::new();
         entities.spawn(EntityType::RemotePlayer, Vec3::new(4.0, 8.0, -2.0));
-        let chunks = ChunkManager::new(1);
+        let chunks = PresentationChunks::new(1);
         let mut cuboids = Vec::new();
         let mut quads = Vec::new();
 
@@ -788,7 +788,7 @@ mod tests {
 
     #[test]
     fn local_player_renders_body_and_two_sleeve_layers() {
-        let chunks = ChunkManager::new(1);
+        let chunks = PresentationChunks::new(1);
         let mut instances = Vec::new();
         let mut quads = Vec::new();
 
@@ -815,7 +815,7 @@ mod tests {
 
     #[test]
     fn local_player_uses_player_skin_slots_instead_of_husk_head_slots() {
-        let chunks = ChunkManager::new(1);
+        let chunks = PresentationChunks::new(1);
         let mut instances = Vec::new();
         let mut quads = Vec::new();
         render_local_player(
@@ -848,7 +848,7 @@ mod tests {
 
     #[test]
     fn local_player_renders_selected_block_and_flat_item_in_right_hand() {
-        let chunks = ChunkManager::new(1);
+        let chunks = PresentationChunks::new(1);
 
         let mut block_instances = Vec::new();
         let mut block_quads = Vec::new();
@@ -891,7 +891,7 @@ mod tests {
         let camera_yaw = 0.3_f32;
         let model_yaw = std::f32::consts::FRAC_PI_2 - camera_yaw;
         let position = Vec3::new(10.0, 64.0, -3.0);
-        let chunks = ChunkManager::new(1);
+        let chunks = PresentationChunks::new(1);
         let mut instances = Vec::new();
         let mut quads = Vec::new();
 
@@ -922,7 +922,7 @@ mod tests {
         entities.spawn(EntityType::DroppedItem, Vec3::new(0.0, 64.0, 0.0));
         entities.entities.last_mut().unwrap().dropped_item = Some(crate::inventory::Item::Seeds);
 
-        let chunks = ChunkManager::new(1);
+        let chunks = PresentationChunks::new(1);
         let mut cuboids = Vec::new();
         let mut quads = Vec::new();
         render_mobs(
@@ -948,7 +948,7 @@ mod tests {
         entities.spawn(EntityType::DroppedItem, Vec3::new(0.0, 64.0, 0.0));
         entities.entities.last_mut().unwrap().dropped_item = Some(crate::inventory::Item::Stone);
 
-        let chunks = ChunkManager::new(1);
+        let chunks = PresentationChunks::new(1);
         let mut cuboids = Vec::new();
         let mut quads = Vec::new();
         render_mobs(
@@ -972,7 +972,7 @@ mod tests {
             (EntityType::Chicken, 7u32, 8u32),
         ];
 
-        let chunks = ChunkManager::new(1);
+        let chunks = PresentationChunks::new(1);
 
         for (mob_type, face_col, body_col) in test_cases {
             let mut entities = EntityManager::new();
@@ -1043,7 +1043,7 @@ mod tests {
         let mut entity_manager = EntityManager::new();
         let zombie_id = entity_manager.spawn(EntityType::Zombie, Vec3::new(0.0, 64.0, 0.0));
 
-        let chunk_manager = ChunkManager::new(1);
+        let chunk_manager = PresentationChunks::new(1);
         let mut cuboids_normal = Vec::new();
         let mut quads_normal = Vec::new();
         render_mobs(
@@ -1081,7 +1081,7 @@ mod tests {
     fn ender_dragon_uses_only_dedicated_opaque_atlas_tiles() {
         let mut entities = EntityManager::new();
         entities.spawn(EntityType::EnderDragon, Vec3::ZERO);
-        let chunks = ChunkManager::new(1);
+        let chunks = PresentationChunks::new(1);
         let mut cuboids = Vec::new();
         let mut quads = Vec::new();
         render_mobs(
@@ -1107,7 +1107,7 @@ mod tests {
     fn enderman_uses_tall_model_and_dedicated_skin_tiles() {
         let mut entities = EntityManager::new();
         entities.spawn(EntityType::Enderman, Vec3::ZERO);
-        let chunks = ChunkManager::new(1);
+        let chunks = PresentationChunks::new(1);
         let mut cuboids = Vec::new();
         let mut quads = Vec::new();
 
@@ -1144,7 +1144,7 @@ mod tests {
         let mut entity_manager = EntityManager::new();
         entity_manager.spawn(EntityType::Creeper, Vec3::ZERO);
 
-        let chunk_manager = ChunkManager::new(1);
+        let chunk_manager = PresentationChunks::new(1);
         let mut cuboids = Vec::new();
         let mut quads = Vec::new();
         render_mobs(

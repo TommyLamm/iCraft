@@ -1347,7 +1347,7 @@ impl Chunk {
     }
 
     /// Builds a section mesh exclusively from the immutable 18^3 worker
-    /// snapshot. This is the runtime entry point; no live Chunk/ChunkManager
+    /// snapshot. This is the runtime entry point; no live Chunk/WorldColumns
     /// state is consulted after dispatch.
     pub fn generate_section_mesh_bundle_from_halo(
         identity: SectionIdentity,
@@ -2523,7 +2523,7 @@ mod tests {
         assert!(BlockType::Torch.can_stay_on(BlockType::Stone));
         assert!(!BlockType::Torch.can_stay_on(BlockType::Air));
 
-        let mut manager = crate::chunk_manager::ChunkManager::new(2);
+        let mut manager = crate::chunk_manager::WorldColumns::new(2);
         manager.chunks.insert((0, 0), empty_test_chunk());
         manager.set_block(8, 64, 8, BlockType::Stone);
         manager.set_block(8, 65, 8, BlockType::Torch);

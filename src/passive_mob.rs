@@ -1,11 +1,11 @@
-use crate::chunk_manager::ChunkManager;
+use crate::chunk_manager::WorldColumns;
 use crate::entity::{EntityManager, EntityType};
 use crate::mob::{try_ambient_spawn, AmbientSpawnRule};
 use glam::Vec3;
 
 pub fn spawn_passive_mobs(
     entity_manager: &mut EntityManager,
-    chunk_manager: &ChunkManager,
+    chunk_manager: &WorldColumns,
     player_pos: Vec3,
     sky_light_level: u8,
     time: f32,
@@ -16,7 +16,7 @@ pub fn spawn_passive_mobs(
 
     let passive_count = entity_manager.count_passive();
     let attempt_modulus = if passive_count == 0 { 5 } else { 100 };
-    let max_dist = (chunk_manager.render_distance.max(1) as u32 * 16)
+    let max_dist = (chunk_manager.simulation_distance.max(1) as u32 * 16)
         .saturating_sub(4)
         .clamp(12, 64);
     // Former range: (8 + next_rand() % max_dist.saturating_sub(7))
@@ -50,7 +50,7 @@ mod tests {
     #[test]
     fn fresh_loaded_spawn_region_establishes_passive_population() {
         let seed = 2_563_678_733;
-        let mut chunks = crate::chunk_manager::ChunkManager::new_in_dimension(
+        let mut chunks = crate::chunk_manager::WorldColumns::new_in_dimension(
             2,
             crate::dimension::Dimension::Overworld,
         );

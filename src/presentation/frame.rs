@@ -15,9 +15,9 @@ impl State {
         let frustum = Frustum::from_view_projection(view_projection);
 
         let cam_pos = self.camera.position;
-        let render_blocks = self.chunk_manager.render_distance as f32 * CHUNK_WIDTH as f32;
+        let render_blocks = self.chunk_manager.view_distance as f32 * CHUNK_WIDTH as f32;
         let render_distance_sq = render_blocks * render_blocks;
-        let r_i32 = self.chunk_manager.render_distance as i32;
+        let r_i32 = self.chunk_manager.view_distance as i32;
 
         let cam_sec_x = (cam_pos.x / 16.0).floor() as i32;
         let cam_sec_y_raw = (cam_pos.y / 16.0).floor() as i32;
@@ -207,7 +207,7 @@ impl State {
 
     pub(super) fn prepare_entities(&mut self, _gpu_upload_elapsed: &mut Duration) {
         let cam_pos = self.camera.position;
-        let render_blocks = self.chunk_manager.render_distance as f32 * CHUNK_WIDTH as f32;
+        let render_blocks = self.chunk_manager.view_distance as f32 * CHUNK_WIDTH as f32;
         let render_distance_sq = render_blocks * render_blocks;
         let view_projection = Mat4::from_cols_array_2d(&self.camera_uniform.view_proj);
         let frustum = Frustum::from_view_projection(view_projection);
@@ -1093,7 +1093,7 @@ impl State {
             );
 
             // "RENDER DISTANCE < value >"
-            let rd_value = self.chunk_manager.render_distance.to_string();
+            let rd_value = self.chunk_manager.view_distance.to_string();
             let rd_text = self
                 .translation_catalog
                 .format_lookup("hud.render_distance", &[("value", &rd_value)]);
@@ -3089,7 +3089,7 @@ impl State {
             let view_proj = self.camera.build_view_projection_matrix(
                 aspect,
                 crate::camera::render_far_plane(
-                    self.chunk_manager.render_distance as u32,
+                    self.chunk_manager.view_distance as u32,
                     self.chunk_manager.dimension.height().height(),
                 ),
             );

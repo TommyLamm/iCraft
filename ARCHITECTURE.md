@@ -116,9 +116,21 @@ policy variants are gone.
 | --- | --- |
 | `ServerRuntime` | Transport, sessions, interest, tick schedule, projection, saves, metrics. |
 | `AuthorityCore` | Authenticated sessions, request sequencing, gameplay, dimension routing, fixed-tick order, `AuthoritySnapshot`, global entity IDs. |
-| `ServerWorld` | Chunks, blocks, fluids, block entities, entities, revisions, time, redstone, hoppers, random ticks, furnaces, spawning, AI/physics. `tick` returns a snapshot; `AuthorityCore` stores it. |
-| `State` / renderer `ChunkManager` | Presentation copies: streamed chunks, meshes, GPU, particles, UI, interpolation. |
+| `ServerWorld` | Dimension simulation via `WorldColumns` (dense grid, fluids, save dirty, `simulation_distance`), entities, revisions, time, redstone, hoppers, random ticks, furnaces, spawning, AI/physics. `tick` returns a snapshot; `AuthorityCore` stores it. |
+| `State` / `PresentationChunks` | Presentation copies: dense grid, section mesh dirty, `view_distance`, meshes, GPU, particles, UI, interpolation. |
 | `SaveManager` | Durable level, player, chunk, entity, dimension, mutation-revision data. |
+
+Resident columns use a sliding dense 2-D `Vec<Option<Chunk>>` indexed by
+`(cx - origin_x, cz - origin_z)`, sized `2 * (distance + RESIDENCY_HYSTERESIS) + 1`
+(same Chebyshev ring as `chunk_schedule::UNLOAD_HYSTERESIS`). Presentation
+recenters on the camera chunk; authority `cover_session_centers` grows the
+window to the session-center union. Columns that leave the window stay in a
+rare overflow map until eviction flushes dirty data and removes them.
+Shared reads (`get_block` / `highest_solid_y` / `column_neighborhood`) live on
+`ColumnQuery`. Authority `set_block` does not record mesh invalidation;
+presentation `apply_presentation_cell` does not enqueue fluids or mark save
+dirty. Loaded-column iteration is row-major then sorted overflow so order
+cannot feed RNG / checksum.
 
 Worlds live in a `BTreeMap` keyed by `Dimension`. Callers pass an explicit
 `Dimension` (or `&mut ServerWorld`); there is no ambient active-world pointer.
@@ -175,7 +187,7 @@ input
   -> AuthoritySnapshot / targeted presentation event
   -> embedded State: `ChunkColumn(Arc<Chunk>)` + snapshot `WorldMutation`
      (TCP/join: `ChunkData` / `BlockChange`)
-  -> presentation apply (no `ChunkManager::set_block` fluid side effects)
+  -> presentation apply (no `PresentationChunks` fluid side effects)
 ```
 
 - Reject before mutating. A rejection must not consume inventory, spawn
@@ -242,7 +254,7 @@ input
   rescanning empty sections or sorting each tick. Sleeping redstone skips
   comparator/observer refresh until a container mutation, plate occupancy
   change, scheduled/dirty work, or loaded-chunk set change wakes it.
-  `ChunkManager` carries a monotonic `load_generation` bumped on resident
+  `WorldColumns` carries a monotonic `load_generation` bumped on resident
   insert/remove; sleeping redstone compares that counter instead of probing
   every known chunk key. Awake redstone keeps comparator and transition-
   capable component indexes, runs transitions only for settle-evaluated /
@@ -323,7 +335,7 @@ pass.
 Terrain is derived only:
 
 ```text
-ChunkManager -> 9-column halo snapshot -> Rayon mesh (the currently
+PresentationChunks -> 9-column halo snapshot -> Rayon mesh (the currently
   selected LOD; L1/L2 wait until first selected) -> identity check
   -> GPU region upload -> visibility + LOD -> wgpu
 ```
@@ -408,7 +420,7 @@ LODs are filled the first time the camera selects them.
   (same Y as `origin_y_for(EndCity)`); there is no parallel
   `dimension::apply_fixed_end_city` path.
 - Column fill samples surface/biome once per (x, z), then `block_at_sampled`
-  per Y. Ambient spawn uses `ChunkManager::highest_solid_y`.
+  per Y. Ambient spawn uses `WorldColumns::highest_solid_y`.
 
 Join `ChunkData` that omits light streams zeros them then
 `Chunk::recompute_direct_column_lighting`. Disk restore of a full

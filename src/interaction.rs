@@ -1,4 +1,4 @@
-use crate::chunk_manager::ChunkManager;
+use crate::chunk_manager::{ColumnQuery, WorldColumns};
 use crate::world::BlockType;
 use glam::Vec3;
 
@@ -78,7 +78,7 @@ pub fn raycast(
     origin: Vec3,
     direction: Vec3,
     max_dist: f32,
-    chunk_manager: &ChunkManager,
+    chunk_manager: &impl ColumnQuery,
     target_policy: RaycastTargetPolicy,
 ) -> Option<RaycastResult> {
     // Avoid division by zero/NaN by ensuring direction components are non-zero
@@ -139,7 +139,7 @@ pub fn raycast(
                 block,
                 state,
                 (x, y, z),
-                Some(chunk_manager),
+                Some(&|wx, wy, wz| chunk_manager.get_block(wx, wy, wz)),
             );
             if let Some((hit_t, hit_norm)) = sel_shape.ray_intersects(origin, ray_dir, max_dist) {
                 if hit_t <= max_dist {
@@ -189,13 +189,13 @@ pub fn raycast(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunk_manager::ChunkManager;
+    use crate::chunk_manager::{ColumnQuery, WorldColumns};
     use crate::world::{BlockType, Chunk};
     use glam::Vec3;
 
     #[test]
     fn test_raycast_air() {
-        let mut chunk_manager = ChunkManager::new(8);
+        let mut chunk_manager = WorldColumns::new(8);
         chunk_manager.chunks.insert((0, 0), Chunk::new(0, 0));
         // Look up into the sky from the surface
         let hit = raycast(
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn test_raycast_hit() {
-        let mut chunk_manager = ChunkManager::new(8);
+        let mut chunk_manager = WorldColumns::new(8);
         let mut chunk = Chunk::new(0, 0);
         chunk.set_block_local(8, 72, 8, BlockType::Stone);
         chunk_manager.chunks.insert((0, 0), chunk);
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn test_raycast_hit_from_negative_direction_returns_front_face() {
-        let mut chunk_manager = ChunkManager::new(8);
+        let mut chunk_manager = WorldColumns::new(8);
         let mut chunk = Chunk::new(0, 0);
         chunk.set_block_local(8, 72, 8, BlockType::Stone);
         chunk_manager.chunks.insert((0, 0), chunk);
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn test_raycast_hits_passable_plants_when_breaking() {
-        let mut chunk_manager = ChunkManager::new(8);
+        let mut chunk_manager = WorldColumns::new(8);
         let mut chunk = Chunk::new(0, 0);
         chunk.set_block_local(8, 72, 8, BlockType::TallGrass);
         chunk_manager.chunks.insert((0, 0), chunk);
@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn place_raycast_can_target_open_door_and_trapdoor_for_interaction() {
         for block in [BlockType::OakDoor, BlockType::OakTrapdoor] {
-            let mut chunk_manager = ChunkManager::new(8);
+            let mut chunk_manager = WorldColumns::new(8);
             let mut chunk = Chunk::new(0, 0);
             chunk.set_block_local(8, 72, 8, block);
             chunk_manager.chunks.insert((0, 0), chunk);
@@ -330,7 +330,7 @@ mod tests {
 
     #[test]
     fn break_raycast_hits_each_explicit_passable_decoration() {
-        let mut chunk_manager = ChunkManager::new(8);
+        let mut chunk_manager = WorldColumns::new(8);
         chunk_manager.chunks.insert((0, 0), Chunk::new(0, 0));
 
         for block in [
@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn break_raycast_skips_water_and_lava_for_solid_behind_them() {
-        let mut chunk_manager = ChunkManager::new(8);
+        let mut chunk_manager = WorldColumns::new(8);
         let mut chunk = Chunk::new(0, 0);
         chunk.set_block_local(8, 71, 8, BlockType::Water);
         chunk.set_block_local(8, 72, 8, BlockType::Lava);
@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn break_raycast_returns_none_for_only_environmental_passables() {
-        let mut chunk_manager = ChunkManager::new(8);
+        let mut chunk_manager = WorldColumns::new(8);
         let mut chunk = Chunk::new(0, 0);
         chunk.set_block_local(8, 71, 8, BlockType::Water);
         chunk.set_block_local(8, 72, 8, BlockType::Lava);
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn place_raycast_ignores_passable_vegetation_and_fluids() {
-        let mut chunk_manager = ChunkManager::new(8);
+        let mut chunk_manager = WorldColumns::new(8);
         let mut chunk = Chunk::new(0, 0);
         chunk.set_block_local(8, 71, 8, BlockType::TallGrass);
         chunk.set_block_local(8, 72, 8, BlockType::Water);
@@ -421,7 +421,7 @@ mod tests {
 
     #[test]
     fn dda_crosses_exact_boundary_into_negative_coordinates() {
-        let mut chunk_manager = ChunkManager::new(8);
+        let mut chunk_manager = WorldColumns::new(8);
         let mut chunk = Chunk::new(-1, 0);
         for x in 0..crate::world::CHUNK_WIDTH {
             for y in chunk.world_y_range() {

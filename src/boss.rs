@@ -4,7 +4,7 @@
 //! [`BossEvents`] after the entity update, which keeps mesh/light invalidation in
 //! the normal block-placement and explosion paths.
 
-use crate::chunk_manager::ChunkManager;
+use crate::chunk_manager::WorldColumns;
 use crate::dimension::Dimension;
 use crate::entity::{EntityIterationKind, EntityManager, EntityType};
 use crate::inventory::{GameMode, Item};
@@ -133,7 +133,7 @@ pub struct BossHud {
 pub fn ensure_dimension_entities(
     dimension: Dimension,
     entities: &mut EntityManager,
-    chunks: &ChunkManager,
+    chunks: &WorldColumns,
     player_pos: Vec3,
     time: f32,
 ) {
@@ -146,7 +146,7 @@ pub fn ensure_dimension_entities(
 
 fn ensure_nether_mob(
     entities: &mut EntityManager,
-    chunks: &ChunkManager,
+    chunks: &WorldColumns,
     player_pos: Vec3,
     time: f32,
 ) {
@@ -174,7 +174,7 @@ fn ensure_nether_mob(
             ^ (player_pos.z.floor() as i64 as u64).rotate_left(39)
             ^ nether_count as u64,
     );
-    let loaded: Vec<(i32, i32)> = chunks.chunks.keys().copied().collect();
+    let loaded: Vec<(i32, i32)> = chunks.chunks.keys().collect();
     let (cx, cz) = loaded[(next_u64(&mut seed) as usize) % loaded.len()];
     let wx = cx * CHUNK_WIDTH as i32 + (next_u64(&mut seed) % CHUNK_WIDTH as u64) as i32;
     let wz = cz * CHUNK_DEPTH as i32 + (next_u64(&mut seed) % CHUNK_DEPTH as u64) as i32;
@@ -197,7 +197,7 @@ fn ensure_nether_mob(
 
 fn ensure_end_encounters(
     entities: &mut EntityManager,
-    chunks: &ChunkManager,
+    chunks: &WorldColumns,
     player_pos: Vec3,
     time: f32,
 ) {
@@ -243,7 +243,7 @@ fn ensure_end_encounters(
     let mut seed = mix64(time.to_bits() as u64 ^ shulker_count as u64);
     let mut city_chunks_seen = 0u64;
     let mut selected_city_chunk = None;
-    for (&coords, chunk) in &chunks.chunks {
+    for (coords, chunk) in chunks.chunks.iter() {
         if !chunk
             .sections
             .iter()
@@ -260,7 +260,7 @@ fn ensure_end_encounters(
     let Some((cx, cz)) = selected_city_chunk else {
         return;
     };
-    let chunk = &chunks.chunks[&(cx, cz)];
+    let chunk = chunks.chunks.get(&(cx, cz)).expect("chunk present");
     let mut candidate = None;
     'roof: for (section_index, section) in chunk.sections.iter().enumerate().rev() {
         let Some(section) = section else {
@@ -307,7 +307,7 @@ fn ensure_end_encounters(
 pub fn update_dimension_entities(
     dimension: Dimension,
     entities: &mut EntityManager,
-    chunks: &ChunkManager,
+    chunks: &WorldColumns,
     players: &[(Vec3, Vec3)],
     dt: f32,
     game_mode: GameMode,
@@ -525,7 +525,7 @@ pub fn update_dimension_entities(
 /// absent support column beneath a live crystal; existing or damaged towers
 /// are left untouched.
 fn repair_legacy_end_crystal_towers(
-    chunks: &ChunkManager,
+    chunks: &WorldColumns,
     live_crystals: &[Vec3],
     events: &mut BossEvents,
 ) {
@@ -672,7 +672,7 @@ fn update_dragon(
 
 fn ensure_enderman(
     entities: &mut EntityManager,
-    chunks: &ChunkManager,
+    chunks: &WorldColumns,
     player_pos: Vec3,
     time: f32,
 ) {
@@ -684,7 +684,7 @@ fn ensure_enderman(
         return;
     }
 
-    let loaded: Vec<(i32, i32)> = chunks.chunks.keys().copied().collect();
+    let loaded: Vec<(i32, i32)> = chunks.chunks.keys().collect();
     let mut seed = mix64(
         time.to_bits() as u64
             ^ (player_pos.x.floor() as i64 as u64).rotate_left(13)
@@ -777,7 +777,7 @@ fn update_wither(
 
 fn projectile_hit(
     projectile: &crate::entity::Entity,
-    chunks: &ChunkManager,
+    chunks: &WorldColumns,
     player_pos: Vec3,
     game_mode: GameMode,
     events: &mut BossEvents,
@@ -979,7 +979,7 @@ pub fn active_boss_hud(entities: &EntityManager) -> Option<BossHud> {
         })
 }
 
-fn open_surface_y(chunks: &ChunkManager, wx: i32, wz: i32) -> Option<i32> {
+fn open_surface_y(chunks: &WorldColumns, wx: i32, wz: i32) -> Option<i32> {
     let height = chunks.dimension.height();
     let min_y = height.min_y() + 1;
     let max_y = height.max_y_exclusive() - 2;
@@ -1015,7 +1015,7 @@ mod tests {
 
     #[test]
     fn legacy_live_crystal_without_tower_gets_obsidian_support_events() {
-        let mut chunks = ChunkManager::new(1);
+        let mut chunks = WorldColumns::new(1);
         let mut chunk = Chunk::new(2, 0);
         let local_x = 42usize.rem_euclid(CHUNK_WIDTH);
         for y in 1..78 {
@@ -1090,7 +1090,7 @@ mod tests {
         entities.spawn(EntityType::EnderDragon, Vec3::new(0.0, 80.0, 0.0));
         entities.spawn(EntityType::EndCrystal, Vec3::new(8.0, 80.0, 0.0));
         entities.entities[0].health = 100.0;
-        let chunks = ChunkManager::new(1);
+        let chunks = WorldColumns::new(1);
 
         update_dimension_entities(
             Dimension::End,
@@ -1136,7 +1136,7 @@ mod tests {
         let mut entities = EntityManager::new();
         let dragon_id = entities.spawn(EntityType::EnderDragon, Vec3::new(0.0, 80.0, 4.0));
         entities.get_by_id_mut(dragon_id).unwrap().ai_timer = 9.9;
-        let chunks = ChunkManager::new(1);
+        let chunks = WorldColumns::new(1);
 
         let events = update_dimension_entities(
             Dimension::End,
@@ -1159,7 +1159,7 @@ mod tests {
 
     #[test]
     fn end_dimension_spawns_enderman_on_end_stone() {
-        let mut chunks = ChunkManager::new(1);
+        let mut chunks = WorldColumns::new(1);
         let mut chunk = Chunk::new(0, 0);
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
@@ -1236,7 +1236,7 @@ mod tests {
         let mut entities = EntityManager::new();
         let id = entities.spawn(EntityType::Enderman, Vec3::new(0.0, 0.0, 10.0));
         entities.get_by_id_mut(id).unwrap().enderman_gaze_timer = 2.7;
-        let chunks = ChunkManager::new(1);
+        let chunks = WorldColumns::new(1);
         let player = Vec3::ZERO;
         let look = (Vec3::new(0.0, 2.62, 10.0) - Vec3::Y * 1.62).normalize();
 
@@ -1270,7 +1270,7 @@ mod tests {
         let mut entities = EntityManager::new();
         let id = entities.spawn(EntityType::Enderman, Vec3::new(0.0, 0.0, 10.0));
         entities.get_by_id_mut(id).unwrap().enderman_gaze_timer = 2.9;
-        let chunks = ChunkManager::new(1);
+        let chunks = WorldColumns::new(1);
 
         update_dimension_entities(
             Dimension::End,
@@ -1291,7 +1291,7 @@ mod tests {
     fn calm_enderman_wanders_without_targeting_player() {
         let mut entities = EntityManager::new();
         let id = entities.spawn(EntityType::Enderman, Vec3::new(0.0, 64.0, 10.0));
-        let chunks = ChunkManager::new(1);
+        let chunks = WorldColumns::new(1);
 
         update_dimension_entities(
             Dimension::End,
@@ -1313,7 +1313,7 @@ mod tests {
         let mut entities = EntityManager::new();
         let id = entities.spawn(EntityType::Enderman, Vec3::new(0.0, 0.0, 2.0));
         entities.get_by_id_mut(id).unwrap().enderman_gaze_timer = 2.95;
-        let chunks = ChunkManager::new(1);
+        let chunks = WorldColumns::new(1);
         let player = Vec3::ZERO;
         let head = entities.get_by_id(id).unwrap().position + Vec3::Y * 2.62;
         let look = head - (player + Vec3::Y * 1.62);
@@ -1341,7 +1341,7 @@ mod tests {
     fn enderman_enters_attack_mode_after_continuous_three_second_head_gaze() {
         let mut entities = EntityManager::new();
         let id = entities.spawn(EntityType::Enderman, Vec3::new(8.0, 64.0, 8.0));
-        let mut chunks = ChunkManager::new(1);
+        let mut chunks = WorldColumns::new(1);
         let mut chunk = Chunk::new(0, 0);
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
@@ -1376,7 +1376,7 @@ mod tests {
         let enderman = entities.get_by_id_mut(id).unwrap();
         enderman.ai_phase = 1;
         enderman.target_player = true;
-        let chunks = ChunkManager::new(1);
+        let chunks = WorldColumns::new(1);
 
         let events = update_dimension_entities(
             Dimension::End,
@@ -1414,7 +1414,7 @@ mod tests {
         let mut entities = EntityManager::new();
         entities.spawn(EntityType::Wither, Vec3::new(0.0, 8.0, 0.0));
         entities.entities[0].health = 140.0;
-        let chunks = ChunkManager::new(1);
+        let chunks = WorldColumns::new(1);
 
         update_dimension_entities(
             Dimension::Overworld,
@@ -1434,7 +1434,7 @@ mod tests {
         entities.spawn(EntityType::Blaze, Vec3::new(5.0, 0.0, 0.0));
         entities.spawn(EntityType::Piglin, Vec3::new(1.0, 0.0, 0.0));
         entities.spawn(EntityType::EnderDragon, Vec3::new(0.0, 80.0, 0.0));
-        let chunks = ChunkManager::new(1);
+        let chunks = WorldColumns::new(1);
 
         let events = update_dimension_entities(
             Dimension::Nether,
@@ -1458,7 +1458,7 @@ mod tests {
 
     #[test]
     fn nether_spawning_is_bounded_and_inside_loaded_chunks() {
-        let mut chunks = ChunkManager::new(1);
+        let mut chunks = WorldColumns::new(1);
         let mut chunk = Chunk::new(0, 0);
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {

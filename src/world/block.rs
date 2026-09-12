@@ -316,7 +316,7 @@ impl BlockState {
     }
 
     pub fn for_door_placement(
-        chunk_manager: &crate::chunk_manager::ChunkManager,
+        chunk_manager: &impl crate::chunk_manager::ColumnQuery,
         x: i32,
         y: i32,
         z: i32,

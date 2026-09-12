@@ -883,7 +883,7 @@ struct CachedSimulationUnion {
 struct CachedResidencyKeep {
     fingerprint: Vec<(u64, Option<crate::authority::interest::InterestChunkAnchor>, u8)>,
     keep: BTreeSet<(i32, i32)>,
-    /// `ChunkManager::load_generation` when every resident was inside `keep`.
+    /// `WorldColumns::load_generation` when every resident was inside `keep`.
     covered_generation: Option<u64>,
 }
 
@@ -977,7 +977,7 @@ impl ServerRuntime {
             generate_structures: level.generate_structures,
             rules: level.rules,
             difficulty,
-            render_distance: properties.simulation_distance as i32,
+            simulation_distance: properties.simulation_distance as i32,
         });
         authority
             .world_mut_expect(level.spawn_dimension)
@@ -1784,12 +1784,31 @@ impl ServerRuntime {
                 continue;
             }
             let mut pending = Vec::new();
+            let centers: Vec<(i32, i32)> = self
+                .players
+                .values()
+                .filter(|session| session.interest.dimension == dimension)
+                .map(|session| {
+                    crate::world::chunk_xz(
+                        session.last_pose_position[0].floor() as i32,
+                        session.last_pose_position[2].floor() as i32,
+                    )
+                })
+                .collect();
             self.authority.with_world(dimension, |world| {
+                // Multiplayer dense grid covers the session-center union.
+                if centers.is_empty() {
+                    world.chunks.cover_session_centers(&[chunk_xz(
+                        self.level.spawn_x,
+                        self.level.spawn_z,
+                    )]);
+                } else {
+                    world.chunks.cover_session_centers(&centers);
+                }
                 let mut unkept_dirty: Vec<_> = world
                     .chunks
                     .chunks
                     .keys()
-                    .copied()
                     .filter(|key| {
                         !keep.contains(key)
                             && !world.failed_restore_chunks().contains(key)
@@ -1831,7 +1850,7 @@ impl ServerRuntime {
                             io_error
                         })
                 });
-                any_unkept = world.chunks.chunks.keys().any(|key| !keep.contains(key));
+                any_unkept = world.chunks.chunks.keys().any(|key| !keep.contains(&key));
                 generation_after = world.chunks.load_generation();
             });
             // Only short-circuit future ticks when every resident is inside keep.
@@ -3582,7 +3601,7 @@ mod tests {
             runtime.level.spawn_z,
         );
         for key in world.chunks.chunks.keys() {
-            assert!(keep.contains(key));
+            assert!(keep.contains(&key));
         }
         let _ = runtime.shutdown();
         let _ = fs::remove_dir_all(&runtime.world_dir);
