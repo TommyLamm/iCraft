@@ -677,8 +677,8 @@ fn add_sprite_view(
     indices.push(start_idx + 0);
 }
 
-/// View-space cuboid helper. Identical to `mob_renderer::add_cuboid` except
-/// it does not need chunk light because the hand is always fully lit.
+/// View-space cuboid helper. Uses the shared unit-cuboid corner table from
+/// `mob_renderer` so hand and mob geometry stay winding/UV aligned.
 fn add_cuboid_view(
     vertices: &mut Vec<Vertex>,
     indices: &mut Vec<u32>,
@@ -690,41 +690,6 @@ fn add_cuboid_view(
     face_tiles: [(u32, u32); 6],
     light_val: f32,
 ) {
-    let half = size * 0.5;
-
-    let local_corners = [
-        // Face 0: South (+Z)
-        (Vec3::new(-half.x, -half.y, half.z), [0.0, 1.0]),
-        (Vec3::new(half.x, -half.y, half.z), [1.0, 1.0]),
-        (Vec3::new(half.x, half.y, half.z), [1.0, 0.0]),
-        (Vec3::new(-half.x, half.y, half.z), [0.0, 0.0]),
-        // Face 1: North (-Z)
-        (Vec3::new(half.x, -half.y, -half.z), [0.0, 1.0]),
-        (Vec3::new(-half.x, -half.y, -half.z), [1.0, 1.0]),
-        (Vec3::new(-half.x, half.y, -half.z), [1.0, 0.0]),
-        (Vec3::new(half.x, half.y, -half.z), [0.0, 0.0]),
-        // Face 2: West (-X)
-        (Vec3::new(-half.x, -half.y, -half.z), [0.0, 1.0]),
-        (Vec3::new(-half.x, -half.y, half.z), [1.0, 1.0]),
-        (Vec3::new(-half.x, half.y, half.z), [1.0, 0.0]),
-        (Vec3::new(-half.x, half.y, -half.z), [0.0, 0.0]),
-        // Face 3: East (+X)
-        (Vec3::new(half.x, -half.y, half.z), [0.0, 1.0]),
-        (Vec3::new(half.x, -half.y, -half.z), [1.0, 1.0]),
-        (Vec3::new(half.x, half.y, -half.z), [1.0, 0.0]),
-        (Vec3::new(half.x, half.y, half.z), [0.0, 0.0]),
-        // Face 4: Up (+Y)
-        (Vec3::new(-half.x, half.y, half.z), [0.0, 1.0]),
-        (Vec3::new(half.x, half.y, half.z), [1.0, 1.0]),
-        (Vec3::new(half.x, half.y, -half.z), [1.0, 0.0]),
-        (Vec3::new(-half.x, half.y, -half.z), [0.0, 0.0]),
-        // Face 5: Down (-Y)
-        (Vec3::new(-half.x, -half.y, -half.z), [0.0, 1.0]),
-        (Vec3::new(half.x, -half.y, -half.z), [1.0, 1.0]),
-        (Vec3::new(half.x, -half.y, half.z), [1.0, 0.0]),
-        (Vec3::new(-half.x, -half.y, half.z), [0.0, 0.0]),
-    ];
-
     let cos_pitch = rot_pitch.cos();
     let sin_pitch = rot_pitch.sin();
     let cos_yaw = rot_yaw.cos();
@@ -732,8 +697,13 @@ fn add_cuboid_view(
 
     let start_idx = vertices.len() as u32;
 
-    for (face_idx, (local_pos, uv)) in local_corners.iter().enumerate() {
-        let v1 = *local_pos + offset;
+    for &(unit_pos, uv, face_idx) in &crate::mob_renderer::UNIT_CUBOID_CORNERS {
+        let local_pos = Vec3::new(
+            unit_pos[0] * size.x,
+            unit_pos[1] * size.y,
+            unit_pos[2] * size.z,
+        );
+        let v1 = local_pos + offset;
         let v2 = Vec3::new(
             v1.x,
             v1.y * cos_pitch - v1.z * sin_pitch,
@@ -746,7 +716,7 @@ fn add_cuboid_view(
         );
         let final_pos = v3 + pivot;
 
-        let (col, row) = face_tiles[face_idx / 4];
+        let (col, row) = face_tiles[face_idx as usize];
         let u = (uv[0] + col as f32) * 0.0625;
         let v = (uv[1] + row as f32) * 0.0625;
 

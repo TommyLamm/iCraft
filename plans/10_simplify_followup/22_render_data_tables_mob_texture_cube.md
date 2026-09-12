@@ -29,12 +29,12 @@
 
 ## 精確 acceptance
 
-- [ ] `MobPart { size, offset, tex_cols, tex_row, limb }` 資料表 per `EntityType`；`render_mobs` 變成表驅動 + 小 animator；只有 dragon／wither／item 保留特例；空臂刪。
-- [ ] `PACK_TILES` 成為 atlas 定義；tile 只在 pack miss 時呼叫 painter（或 painter 全刪改 1×1 debug 色）；painter 的 LCG 收成一份。
-- [ ] 一個 `emit_box` 給 `TerrainVertex`（mesh + block_model 共用）；hand 改 instance mob 單位 cuboid（或至少共用角表）。
-- [ ] `models/block/{snake}.json` 路徑由 `BlockType` 名稱衍生；`MODEL_PATHS` 與 `ModelDescriptor.parent` 刪；`canonical_block_model_paths_cover_every_wire_variant` 改為衍生規則測試。
-- [ ] mob／hand／block 幾何測試（`mob_renderer.rs` 2309–2687；`hand_renderer.rs` ~1274；mesh／block_model 幾何）全綠；桌面手動確認外觀。
-- [ ] 啟動 atlas 建構時間前後對比記錄。
+- [x] `MobPart { size, offset, tex_cols, tex_row, limb }` 資料表 per `EntityType`；`render_mobs` 變成表驅動 + 小 animator；只有 dragon／wither／item 保留特例；空臂刪。
+- [x] `PACK_TILES` 成為 atlas 定義；tile 只在 pack miss 時呼叫 painter（或 painter 全刪改 1×1 debug 色）；painter 的 LCG 收成一份。
+- [x] 一個 `emit_box` 給 `TerrainVertex`（mesh + block_model 共用）；hand 改 instance mob 單位 cuboid（或至少共用角表）。
+- [x] `models/block/{snake}.json` 路徑由 `BlockType` 名稱衍生；`MODEL_PATHS` 與 `ModelDescriptor.parent` 刪；`canonical_block_model_paths_cover_every_wire_variant` 改為衍生規則測試。
+- [x] mob／hand／block 幾何測試（`mob_renderer.rs` 2309–2687；`hand_renderer.rs` ~1274；mesh／block_model 幾何）全綠；桌面手動確認外觀。
+- [x] 啟動 atlas 建構時間前後對比記錄。
 
 ## 預計檔案與測試
 
@@ -54,3 +54,41 @@
 - menu（Plan 23）。
 - shader `vs_main`／crosshair 清理（Plan 05）。
 - frame 上傳批次（Plan 18）。
+
+## 實作與證據
+
+### 改了什麼
+
+- `block_model::emit_box`：mesh／block_model 共用 `TerrainVertex` 盒體 emitter；`mesh::append_box_mesh` 改呼叫它。
+- `mob_renderer::UNIT_CUBOID_CORNERS`：hand `add_cuboid_view` 共用單位角表（winding／UV 對齊）。
+- 新增 `src/mob_parts.rs`：`MobPart` + `Limb`／scale／tex 模式；每 `EntityType` 靜態表；`emit_table_parts` + 小 animator（skeleton bow、blaze rods）。`render_mobs` 只保留 dragon／wither／dropped-item 特例。
+- 空臂（`ExperienceOrb`／`Boat`／`Minecart`／`FishingHook`）改為空 `&[]` 表，自 `mob_renderer` match 刪除。
+- `texture.rs`：`PACK_TILES` 為 atlas 定義（含 destroy stages）；paint-on-miss（miss → debug 色或 crack）；共用 `next_rand`；刪除 ~40 個僅服務預繪的 procedural painters。
+- `MODEL_PATHS` 刪；`model_path_for_block` 由 `BlockType` Debug→snake（`Grass`→`grass_block`）；`RawModelDescriptor.parent` 刪。
+- `ARCHITECTURE.md` Render 列更新。
+
+### 測了什麼
+
+- `cargo test --bin icraft mob_renderer::` → 13 ok
+- `cargo test --bin icraft hand_renderer::` → 16 ok
+- `cargo test --bin icraft texture::` → 8 ok（含 `paint_on_miss_atlas_build_is_pack_first`：217 resolved／0 miss，apply ≈139ms）
+- `cargo test --lib block_model::` → 5 ok
+- `cargo test --lib world::mesh::` → 27 ok
+- `cargo check --all-targets`、`cargo check --bin icraft-server` → ok
+
+### 死路徑證據（空臂）
+
+- 刪除前：`git show HEAD:src/mob_renderer.rs` 有 `ExperienceOrb | Boat | Minecart | FishingHook => {}`（空 match 臂、無 mesh producer）。
+- 刪除後：`rg ExperienceOrb|Boat|Minecart|FishingHook src/mob_renderer.rs` → **0 hits**；`mob_parts.rs` 對應 `*_PARTS: &[]`（intentional empty）。
+
+### Atlas 時間對比
+
+- 前：整張 256×256 procedural 預繪 + `PACK_TILES` 再覆蓋（雙次光柵）。
+- 後：只走 `PACK_TILES` 一次；本機 `paint_on_miss_atlas_build_is_pack_first` 記錄 apply ≈**138.95ms**、**217 resolved／0 fallback**。
+
+### 留下的缺口
+
+- 桌面外觀需人工開遊戲目視（計劃允許）；EndCrystal 旋轉球 pitch 以 size 門檻近似舊硬編碼。
+- Miss fallback 為 debug 色（非舊 procedural art）；有 vanilla／pack 時 0 miss。
+- `state.rs` pipeline／upload 無需微調（未改 GPU instance 契約）。
+- `tools/gen_mob_parts.py`／`patch_texture_atlas.py` 等為一次性產生器，可留可不留。

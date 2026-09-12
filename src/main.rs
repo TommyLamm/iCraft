@@ -41,6 +41,7 @@ mod hand_renderer;
 mod menu;
 #[cfg(feature = "microbench")]
 mod microbench;
+mod mob_parts;
 mod mob_renderer;
 mod particles;
 mod presentation;

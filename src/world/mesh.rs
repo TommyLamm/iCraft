@@ -542,33 +542,17 @@ fn append_box_mesh(
     atlas_tile: (u32, u32),
     region_coord: (i32, i32),
 ) {
-    let light_level = sky_light as f32 + block_light as f32 * 16.0;
-    let (min, max) = bounds;
-
-    for (_, (_, corner_data)) in BLOCK_FACES.iter().enumerate() {
-        let mut positions = [[0.0; 3]; 4];
-        let mut local_uvs = [[0.0; 2]; 4];
-
-        for (corner_idx, (offset, uv)) in corner_data.iter().enumerate() {
-            positions[corner_idx] = [
-                origin[0] + if offset[0] == 0.0 { min[0] } else { max[0] },
-                origin[1] + if offset[1] == 0.0 { min[1] } else { max[1] },
-                origin[2] + if offset[2] == 0.0 { min[2] } else { max[2] },
-            ];
-            local_uvs[corner_idx] = [uv[0], uv[1]];
-        }
-
-        push_terrain_quad(
-            vertices,
-            indices,
-            positions,
-            local_uvs,
-            atlas_tile,
-            light_level,
-            [1.0; 4],
-            region_coord,
-        );
-    }
+    crate::block_model::emit_box(
+        vertices,
+        indices,
+        origin,
+        bounds,
+        sky_light,
+        block_light,
+        atlas_tile,
+        region_coord,
+        None,
+    );
 }
 
 fn append_door_mesh(
@@ -768,6 +752,7 @@ impl Chunk {
                     let world_z = origin[2] + z as i32;
 
                     let custom_mesh = if let Some(registry) = registry {
+                        let model_path = crate::block_model::model_path_for_block(block);
                         crate::block_model::append_custom_block_mesh_with_registry(
                             block,
                             voxel.state,
@@ -779,7 +764,7 @@ impl Chunk {
                             &mut opaque_indices,
                             &mut trans_vertices,
                             &mut trans_indices,
-                            crate::block_model::model_path_for_block(block),
+                            &model_path,
                             registry,
                             |nx, ny, nz| get_block_at(nx, ny, nz).0,
                         )
