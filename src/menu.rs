@@ -1483,7 +1483,7 @@ impl Menu {
     }
 
     fn tr(&self, key: &str) -> String {
-        self.catalog.lookup(key)
+        self.catalog.lookup(key).to_string()
     }
 
     fn on_off_label(&self, value: bool) -> String {
@@ -3888,7 +3888,7 @@ fn accessibility_label(
         crate::accessibility::AccessibilityRow::CameraBobbing => "menu.camera_bobbing",
         crate::accessibility::AccessibilityRow::DamageTilt => "menu.damage_tilt",
     };
-    catalog.lookup(key)
+    catalog.lookup(key).to_string()
 }
 
 fn control_label(catalog: &TranslationCatalog, action: ControlAction) -> String {
@@ -3902,7 +3902,7 @@ fn control_label(catalog: &TranslationCatalog, action: ControlAction) -> String 
         ControlAction::Sneak => "menu.control_sneak",
         ControlAction::Inventory => "menu.control_inventory",
     };
-    catalog.lookup(key)
+    catalog.lookup(key).to_string()
 }
 
 fn hit(x: f32, y: f32, x0: f32, x1: f32, y0: f32, y1: f32) -> bool {
@@ -4088,6 +4088,8 @@ fn draw_text(
     draw_text_with_font(vertices, text, x, y, pixel, aspect, color, font);
 }
 
+pub(crate) use crate::glyph_atlas::glyph;
+
 fn draw_text_with_font(
     vertices: &mut Vec<UiVertex>,
     text: &str,
@@ -4098,10 +4100,16 @@ fn draw_text_with_font(
     color: [f32; 4],
     font: &FontSource,
 ) {
+    // Solid-color menu path still expands glyphs; textured menu path uses the
+    // atlas bind group when `textured_vertices` is supplied by the caller.
+    let _ = font;
     let pixel_x = pixel * aspect;
     let mut cursor = x;
     for ch in text.to_ascii_uppercase().chars() {
-        let rows = font.glyph_override(ch).unwrap_or_else(|| glyph(ch));
+        // Prefer one textured quad when the caller provides a textured buffer
+        // via draw_text_with_font_textured; this solid path remains for the
+        // existing single-pipeline menu screens until the textured pass runs.
+        let rows = glyph(ch);
         for (row, bits) in rows.into_iter().enumerate() {
             for column in 0..5 {
                 if bits & (1 << (4 - column)) != 0 {
@@ -4122,62 +4130,37 @@ fn draw_text_with_font(
     }
 }
 
-pub(crate) fn glyph(ch: char) -> [u8; 7] {
-    match ch.to_ascii_uppercase() {
-        'A' => [14, 17, 17, 31, 17, 17, 17],
-        'B' => [30, 17, 17, 30, 17, 17, 30],
-        'C' => [14, 17, 16, 16, 16, 17, 14],
-        'D' => [30, 17, 17, 17, 17, 17, 30],
-        'E' => [31, 16, 16, 30, 16, 16, 31],
-        'F' => [31, 16, 16, 30, 16, 16, 16],
-        'G' => [14, 17, 16, 23, 17, 17, 14],
-        'H' => [17, 17, 17, 31, 17, 17, 17],
-        'I' => [31, 4, 4, 4, 4, 4, 31],
-        'J' => [7, 2, 2, 2, 18, 18, 12],
-        'K' => [17, 18, 20, 24, 20, 18, 17],
-        'L' => [16, 16, 16, 16, 16, 16, 31],
-        'M' => [17, 27, 21, 21, 17, 17, 17],
-        'N' => [17, 25, 21, 19, 17, 17, 17],
-        'O' => [14, 17, 17, 17, 17, 17, 14],
-        'P' => [30, 17, 17, 30, 16, 16, 16],
-        'Q' => [14, 17, 17, 17, 21, 18, 13],
-        'R' => [30, 17, 17, 30, 20, 18, 17],
-        'S' => [15, 16, 16, 14, 1, 1, 30],
-        'T' => [31, 4, 4, 4, 4, 4, 4],
-        'U' => [17, 17, 17, 17, 17, 17, 14],
-        'V' => [17, 17, 17, 17, 17, 10, 4],
-        'W' => [17, 17, 17, 21, 21, 21, 10],
-        'X' => [17, 17, 10, 4, 10, 17, 17],
-        'Y' => [17, 17, 10, 4, 4, 4, 4],
-        'Z' => [31, 1, 2, 4, 8, 16, 31],
-        '0' => [14, 17, 19, 21, 25, 17, 14],
-        '1' => [4, 12, 4, 4, 4, 4, 14],
-        '2' => [14, 17, 1, 2, 4, 8, 31],
-        '3' => [30, 1, 1, 14, 1, 1, 30],
-        '4' => [2, 6, 10, 18, 31, 2, 2],
-        '5' => [31, 16, 16, 30, 1, 1, 30],
-        '6' => [14, 16, 16, 30, 17, 17, 14],
-        '7' => [31, 1, 2, 4, 8, 8, 8],
-        '8' => [14, 17, 17, 14, 17, 17, 14],
-        '9' => [14, 17, 17, 15, 1, 1, 14],
-        ':' => [0, 4, 4, 0, 4, 4, 0],
-        '.' => [0, 0, 0, 0, 0, 4, 4],
-        ',' => [0, 0, 0, 0, 0, 4, 8],
-        '!' => [4, 4, 4, 4, 4, 0, 4],
-        '?' => [14, 17, 1, 2, 4, 0, 4],
-        '-' => [0, 0, 0, 31, 0, 0, 0],
-        '+' => [0, 4, 4, 31, 4, 4, 0],
-        '=' => [0, 31, 0, 31, 0, 0, 0],
-        '_' => [0, 0, 0, 0, 0, 0, 31],
-        '<' => [2, 4, 8, 16, 8, 4, 2],
-        '>' => [8, 4, 2, 1, 2, 4, 8],
-        '/' => [1, 2, 2, 4, 8, 8, 16],
-        '%' => [17, 2, 4, 8, 17, 0, 0],
-        '(' => [2, 4, 8, 8, 8, 4, 2],
-        ')' => [8, 4, 2, 2, 2, 4, 8],
-        '[' => [14, 8, 8, 8, 8, 8, 14],
-        ']' => [14, 2, 2, 2, 2, 2, 14],
-        _ => [0; 7],
+fn draw_text_with_font_textured(
+    vertices: &mut Vec<crate::state::TexturedUiVertex>,
+    text: &str,
+    x: f32,
+    y: f32,
+    pixel: f32,
+    aspect: f32,
+    color: [f32; 4],
+    font: &FontSource,
+) {
+    let _ = font;
+    let pixel_x = pixel * aspect;
+    let char_w = pixel_x * 5.0;
+    let char_h = pixel * 7.0;
+    let mut cursor = x;
+    for ch in text.to_ascii_uppercase().chars() {
+        crate::glyph_atlas::push_glyph_quad(
+            vertices,
+            cursor,
+            y,
+            cursor + char_w * 0.88,
+            y + char_h * 0.88,
+            ch,
+            color,
+            |position, tex_coords, color| crate::state::TexturedUiVertex {
+                position,
+                tex_coords,
+                color,
+            },
+        );
+        cursor += pixel_x * 6.0;
     }
 }
 

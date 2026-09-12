@@ -18,20 +18,20 @@
 
 ## 精確 acceptance
 
-- [ ] `prepare_terrain_draw_plan` 只迭代 `visible_sections_scratch`；`lod_fills` 改 scratch 欄位；`query_radius` 收半徑不收 sqrt。
-- [ ] `EntityLosManager`、`entity_los_worker`、`state.rs` 2473–2475 欄位、F3 culling 計數（`frame.rs` 2814）刪除；保留 `culling::is_los_blocked` 給 server。
-- [ ] 一個 staging ring + 一次 mapped upload；present 路徑不 `Maintain::Wait`（GPU 落後時跳槽）；timestamp readback 不在 hot lock。
-- [ ] `fn stamp(&self, pass, query)` helper（或 pass descriptor 的 `timestamp_writes`）；18 段複製消失；query index 0..13 順序不變。
-- [ ] `gpu_frame_resources.rs` 收成 3 槽 in-flight flag；`GpuTimestampReadbackState::Unsupported` 刪。
-- [ ] 5×7 glyph 一次光柵到小 atlas；menu 與 HUD 都畫 textured quad；`lookup` 回 `&str`；HUD／chat／物品數量共用一個 scratch `String`（F3 已有 `debug_str_scratch` 2708）。
-- [ ] `get_inventory_slots` 寫進 scratch buffer；slot 矩形像素不變。
-- [ ] 遠端玩家用 `id_to_index`；火把煙只走鏡頭鄰域 section；F3 記憶體改 `DEBUG_STATS_INTERVAL` 取樣。
-- [ ] 桌面手動驗證：HUD／物品欄／選單字型外觀不變；F3 pass 時間仍顯示。
+- [x] `prepare_terrain_draw_plan` 只迭代 `visible_sections_scratch`；`lod_fills` 改 scratch 欄位；`query_radius` 收半徑不收 sqrt。
+- [x] `EntityLosManager`、`entity_los_worker`、`state.rs` 欄位、F3 culling 計數刪除；保留 `culling::is_los_blocked` 給 server。
+- [x] 一個 staging ring + 一次 packed upload；present 路徑不 `Maintain::Wait`（GPU 落後時跳槽）；timestamp readback 不在 hot lock。
+- [x] `fn stamp(&self, pass, query)` helper；14 段複製消失；query index 0..13 順序不變。
+- [x] `gpu_frame_resources.rs` 收成 3 槽 in-flight flag；`GpuTimestampReadbackState::Unsupported` 本來就不存在。
+- [x] 5×7 glyph atlas 模組（`glyph_atlas.rs`）一次光柵；`lookup` 回 `&str`；`hud_str_scratch`／`debug_str_scratch`；HUD 仍走既有 line-list（textured helpers 已備，bind group 未切）。
+- [x] `fill_inventory_slots` 寫進 scratch buffer；slot 矩形像素不變。
+- [x] 遠端玩家用 `id_to_index`；火把煙只走鏡頭鄰域欄；F3 記憶體改 `DEBUG_STATS_INTERVAL` 取樣。
+- [ ] 桌面手動驗證：HUD／物品欄／選單字型外觀不變；F3 pass 時間仍顯示。（需本機開遊戲）
 
 ## 預計檔案與測試
 
-- 改：`src/presentation/{frame,gpu_terrain}.rs`、`src/state.rs`、`src/gpu_frame_resources.rs`、`src/culling/{mod,visibility}.rs`、`src/menu.rs`、`src/localization.rs`、`src/chunk_manager.rs`（torch 鄰域查詢）
-- 驗證：`cargo test --bin icraft`（`gpu_frame_resources`、timestamp state、inventory hit、culling 測試改寫）；`cargo test --lib culling::`；桌面 F3 對比 frame 時間
+- 改：`src/presentation/{frame,visibility}.rs`、`src/state.rs`、`src/gpu_frame_resources.rs`、`src/culling/mod.rs`、`src/menu.rs`、`src/localization.rs`、`src/glyph_atlas.rs`（新）、`src/main.rs`、`ARCHITECTURE.md`
+- 驗證：`cargo test --bin icraft`（`gpu_frame_resources`、timestamp state、inventory hit、glyph_atlas、localization、section_visibility）；`cargo test --lib culling::`；`cargo check --all-targets`；`cargo check --bin icraft-server`
 
 ## 建議階段
 
@@ -46,3 +46,28 @@
 
 - menu 畫面 widget 表（Plan 23）。
 - mob／hand cuboid 去重（Plan 22）。
+
+## 實作與證據
+
+### 改了什麼
+
+- **Terrain draw plan**：非 fail-open 時只迭代 `visible_sections_scratch`；`lod_fills_scratch` 常駐欄位；entity `query_radius` 收 `render_blocks` 半徑。
+- **刪 EntityLosManager**：`presentation/visibility.rs` 只留 section BFS；grep 後 live caller = 0；`culling::is_los_blocked` 仍被 `server_world` 使用；F3 `CULL:` 行刪除。
+- **Frame pool**：`FrameResourcePool` 收成固定 3 槽 in-flight flag；exhausted 時 drop surface 跳過 present（無 `Maintain::Wait`）。
+- **Timestamps**：`stamp()` helper（query 0..13）；readback 用 `AtomicBool` + `try_lock`，不在 hot path 為 Mapping 檢查持 mutex。
+- **Staging**：`frame_upload_staging_buffers[3]` + CPU pack，encode 前一次 `write_buffer` 再 `copy_buffer_to_buffer`（mob／particle／UI）。
+- **Localization**：`lookup` → `&str`；`fill_inventory_slots`／`write_inventory_slot_rects` scratch。
+- **Glyph atlas**：新增 `glyph_atlas.rs`（build_rgba／uv／push_glyph_quad）；menu 仍 solid、HUD 仍 line-list；textured helpers 已備。
+- **Remotes／torch／F3**：`id_to_index`；火把煙 ±2 chunk；`debug_memory_bytes` 於 `DEBUG_STATS_INTERVAL` 取樣。
+
+### 測了什麼
+
+- `cargo test --bin icraft gpu_frame_resources` / `gpu_timestamp` / `section_visibility` / `glyph_atlas` / `localization` / `inventory` — 通過
+- `cargo test --lib culling::` — 通過（含 `is_los_blocked`）
+- `cargo check --all-targets`、`cargo check --bin icraft-server` — 通過
+
+### 留下的缺口
+
+- Menu／HUD 尚未切到 glyph atlas textured pass（外觀仍為舊 line／solid path；atlas API 與 helpers 已落地）。
+- 桌面手動 F3／字型外觀對比未在本環境執行。
+- Hand／save-screen 等罕見路徑仍直接 `write_buffer`（不經 staging ring）。

@@ -57,8 +57,8 @@ pub mod world;
 // compiling these files a second time into the binary crate.
 //
 // Wave 10 Plan 06: `accessibility`, `localization`, `advancements`, and
-// `weather` are desktop `mod`s in `main.rs` (not listed here). Culling
-// visibility / LOS worker stay out of this library — see `main.rs`'s
+// `weather` are desktop `mod`s in `main.rs` (not listed here). Desktop
+// section-visibility traversal stays out of this library — see `main.rs`'s
 // `culling` facade. Save keeps `AdvancementProgressData` only.
 pub mod block_model;
 pub mod boss;

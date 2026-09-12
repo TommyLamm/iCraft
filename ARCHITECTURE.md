@@ -17,9 +17,11 @@ desktop files keep `crate::world` paths. Shared source compiles once.
 
 **Do not add to `lib.rs`:** `menu`, `camera`, `audio`, `texture`,
 `gpu_frame_resources`, `presentation_click`, `src/presentation/`,
-`accessibility`, `localization`, `advancements`, `weather`, or culling
-`visibility` / `EntityLosManager`. That would compile wgpu/UI/lang/LOS
-worker / presentation climate into `icraft-server`.
+`accessibility`, `localization`, `advancements`, `weather`, or desktop
+section-visibility traversal (`presentation/visibility.rs`). That would
+compile wgpu/UI/lang / presentation climate into `icraft-server`.
+Lib `culling::is_los_blocked` stays shared for authority; the old desktop
+`EntityLosManager` worker is gone.
 `presentation_inventory_policy` is the thin, GPU-free policy cut used by
 server and tests. Save keeps only `AdvancementProgressData` (unlock set);
 the advancement tree UI is desktop-only. Presentation weather is a
@@ -478,7 +480,7 @@ from `saves/`).
 | Area | Files |
 | --- | --- |
 | Desktop loop | `src/main.rs` (`mod accessibility` / `localization` / `advancements` / `weather`; `culling` facade), `src/app.rs`, `src/menu.rs`, `src/state.rs`, `src/audio.rs` |
-| Presentation (desktop-only) | `src/presentation/` — `embedded_runtime.rs`, `network_event.rs`, `frame.rs` are `#[path]` children of `state`. `visibility.rs` (section visibility + entity LOS worker) is loaded via `main.rs`. `gpu_frame_resources` / `presentation_click` are `mod` in `main.rs`; `microbench` is the same behind feature `microbench`. |
+| Presentation (desktop-only) | `src/presentation/` — `embedded_runtime.rs`, `network_event.rs`, `frame.rs` are `#[path]` children of `state`. `visibility.rs` (section visibility BFS only; entity LOS worker removed) is loaded via `main.rs`. `gpu_frame_resources` / `presentation_click` are `mod` in `main.rs`; `microbench` is the same behind feature `microbench`. |
 | Authority | `src/authority/` (`tick.rs`, `portals.rs`, `dispatch.rs`, `combat.rs`, `contract.rs`, `fishing.rs`, `interest.rs`, `mining.rs`, `transactions.rs`) |
 | Runtime | `src/server_runtime.rs` plus `ingress.rs`, `projection.rs`, `session_sync.rs`; `src/server_world.rs`; `src/bin/icraft-server.rs` |
 | World | `src/world/` (`block.rs`, `section.rs`, `chunk.rs`, `mesh.rs`), `src/chunk_manager.rs`, `src/dimension.rs`, `src/worldgen/`, `src/structure/` |

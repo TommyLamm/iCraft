@@ -21,11 +21,11 @@ mod advancements;
 mod localization;
 mod weather;
 
-/// Section visibility + entity LOS worker (desktop-only; not in `icraft` lib).
+/// Section visibility traversal (desktop-only; not in `icraft` lib).
 #[path = "presentation/visibility.rs"]
 mod culling_visibility;
 
-/// Lib LOS/connectivity plus desktop section-visibility / entity LOS worker.
+/// Lib LOS/connectivity plus desktop section-visibility traversal.
 pub mod culling {
     pub use icraft::culling::*;
     pub use icraft::culling::{connectivity, los};
@@ -36,6 +36,7 @@ mod app;
 mod audio;
 mod camera;
 mod gpu_frame_resources;
+mod glyph_atlas;
 mod hand_renderer;
 mod menu;
 #[cfg(feature = "microbench")]

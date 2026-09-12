@@ -63,6 +63,8 @@ use embedded_runtime::EmbeddedRuntimeBridge;
 
 const UI_VERTEX_CAPACITY: usize = 4096;
 const UI_LINE_VERTEX_CAPACITY: usize = 16384;
+/// One packed CPU→GPU transfer per frame for mob/particle/UI ring uploads.
+const FRAME_UPLOAD_STAGING_BYTES: wgpu::BufferAddress = 8 * 1024 * 1024;
 const DEBUG_STATS_INTERVAL: f32 = 0.5;
 const RAIN_LOOP_ID: u64 = u64::MAX - 1;
 const CHAT_HISTORY_CAPACITY: usize = 50;
@@ -1880,6 +1882,8 @@ impl GpuTimestampReadbackStatus {
 struct GpuTimestampReadbackSlot {
     buffer: wgpu::Buffer,
     status: std::sync::Arc<std::sync::Mutex<GpuTimestampReadbackStatus>>,
+    /// Set by the map_async callback path; polled without taking the mutex.
+    mapping: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Capability gate used by the renderer and HUD. Pass-local timing is only
@@ -2153,7 +2157,6 @@ pub struct State {
     chunk_lifetimes: std::collections::HashMap<(i32, i32), u64>,
     next_chunk_lifetime: u64,
     terrain_generation: u64,
-    los_world_revision: u64,
     submitted_terrain_triangles: u64,
     submitted_terrain_draw_calls: usize,
     visible_chunk_count: usize,
@@ -2219,7 +2222,7 @@ pub struct State {
     mob_cuboid_instance_buffers: [wgpu::Buffer; 3],
     mob_quad_instance_buffers: [wgpu::Buffer; 3],
     particle_instance_buffers: [wgpu::Buffer; 3],
-    frame_resource_pool: crate::gpu_frame_resources::FrameResourcePool<()>,
+    frame_resource_pool: crate::gpu_frame_resources::FrameResourcePool,
     gpu_completion_tx: std::sync::mpsc::Sender<u64>,
     gpu_completion_rx: std::sync::mpsc::Receiver<u64>,
     next_gpu_submission_id: u64,
@@ -2227,6 +2230,9 @@ pub struct State {
     mob_cuboid_instances_scratch: Vec<crate::mob_renderer::MobInstance>,
     mob_quad_instances_scratch: Vec<crate::mob_renderer::MobInstance>,
     particle_instances_scratch: Vec<crate::particles::ParticleInstance>,
+    /// CPU pack for one write_buffer → ring staging → GPU copies per frame.
+    frame_upload_cpu: Vec<u8>,
+    frame_upload_staging_buffers: [wgpu::Buffer; 3],
     mob_cuboid_num_instances: u32,
     mob_quad_num_instances: u32,
     mob_num_indices: u32,
@@ -2270,6 +2276,7 @@ pub struct State {
     debug_frame_samples: u32,
     debug_fps: f32,
     debug_frame_ms: f32,
+    debug_memory_bytes: usize,
     perf_recorder: crate::perf::PerfRecorder,
     perf_summaries: [crate::perf::ScopeSummary; crate::perf::SCOPE_COUNT],
     perf_counters: crate::perf::PerfCounters,
@@ -2290,7 +2297,7 @@ pub struct State {
     gpu_timestamps_inside_passes: bool,
     terrain_candidates_scratch: Vec<crate::chunk_render::DrawCandidate>,
     terrain_draw_plan_scratch: crate::chunk_render::DrawPlan,
-    pub entity_los_manager: crate::culling::EntityLosManager,
+    lod_fills_scratch: Vec<crate::world::SectionKey>,
     visible_sections_scratch: std::collections::HashSet<(i32, i8, i32)>,
     section_visibility_scratch: crate::culling::SectionVisibilityScratch,
     hand_vertices_scratch: Vec<Vertex>,
@@ -2298,7 +2305,10 @@ pub struct State {
     last_hand_mesh_key: Option<crate::hand_renderer::HandMeshKey>,
     ui_vertices_scratch: Vec<UiVertex>,
     ui_line_vertices_scratch: Vec<UiVertex>,
+    ui_textured_vertices_scratch: Vec<TexturedUiVertex>,
     debug_str_scratch: String,
+    hud_str_scratch: String,
+    inventory_slots_scratch: Vec<(SlotType, f32, f32, f32, f32)>,
     pub active_station: Option<StationKind>,
     pub container_target: Option<(i32, i32, i32)>,
     pub container_is_double: bool,
@@ -2523,7 +2533,7 @@ impl State {
     }
 
     pub fn translate(&self, key: &str) -> String {
-        self.translation_catalog.lookup(key)
+        self.translation_catalog.lookup(key).to_string()
     }
 
     pub fn localized_item_name(&self, item: crate::inventory::Item) -> String {
@@ -2603,6 +2613,7 @@ impl State {
                         status: std::sync::Arc::new(std::sync::Mutex::new(
                             GpuTimestampReadbackStatus::unmapped(),
                         )),
+                        mapping: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     })
                     .collect();
                 (Some(query_set), Some(resolve_buffer), readback_slots)
@@ -3275,6 +3286,15 @@ impl State {
             })
         });
 
+        let frame_upload_staging_buffers = std::array::from_fn(|i| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("Frame Upload Staging {i}")),
+                size: FRAME_UPLOAD_STAGING_BYTES,
+                usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
+
         let mob_instanced_pipeline =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("Mob Instanced Render Pipeline"),
@@ -3455,7 +3475,6 @@ impl State {
             chunk_lifetimes,
             next_chunk_lifetime,
             terrain_generation: 0,
-            los_world_revision: 0,
             submitted_terrain_triangles: 0,
             submitted_terrain_draw_calls: 0,
             visible_chunk_count: 0,
@@ -3508,16 +3527,15 @@ impl State {
             mob_cuboid_instance_buffers,
             mob_quad_instance_buffers,
             particle_instance_buffers,
-            frame_resource_pool: crate::gpu_frame_resources::FrameResourcePool::with_initial(
-                3,
-                [(), (), ()],
-            ),
+            frame_resource_pool: crate::gpu_frame_resources::FrameResourcePool::new(),
             gpu_completion_tx,
             gpu_completion_rx,
             next_gpu_submission_id: 1,
             mob_cuboid_instances_scratch: Vec::with_capacity(1024),
             mob_quad_instances_scratch: Vec::with_capacity(512),
             particle_instances_scratch: Vec::with_capacity(4096),
+            frame_upload_cpu: Vec::with_capacity(256 * 1024),
+            frame_upload_staging_buffers,
             mob_cuboid_num_instances: 0,
             mob_quad_num_instances: 0,
             mob_num_indices: 0,
@@ -3552,6 +3570,7 @@ impl State {
             debug_frame_samples: 0,
             debug_fps: 0.0,
             debug_frame_ms: 0.0,
+            debug_memory_bytes: 0,
             perf_recorder: crate::perf::PerfRecorder::new(),
             perf_summaries:
                 crate::perf::PerfRecorder::<{ crate::perf::DEFAULT_HISTORY_CAPACITY }>::new()
@@ -3573,7 +3592,7 @@ impl State {
             gpu_timestamps_inside_passes,
             terrain_candidates_scratch: Vec::with_capacity(256),
             terrain_draw_plan_scratch: crate::chunk_render::DrawPlan::default(),
-            entity_los_manager: crate::culling::EntityLosManager::new(),
+            lod_fills_scratch: Vec::with_capacity(64),
             visible_sections_scratch: std::collections::HashSet::new(),
             section_visibility_scratch: crate::culling::SectionVisibilityScratch::with_capacity(
                 4096, 4096,
@@ -3583,7 +3602,10 @@ impl State {
             last_hand_mesh_key: None,
             ui_vertices_scratch: Vec::with_capacity(2048),
             ui_line_vertices_scratch: Vec::with_capacity(4096),
+            ui_textured_vertices_scratch: Vec::with_capacity(1024),
             debug_str_scratch: String::with_capacity(128),
+            hud_str_scratch: String::with_capacity(128),
+            inventory_slots_scratch: Vec::with_capacity(64),
             active_station: None,
             container_target: None,
             container_is_double: false,
@@ -5055,7 +5077,6 @@ impl State {
             return false;
         };
         section.invalidate();
-        self.los_world_revision = self.los_world_revision.wrapping_add(1);
         let identity = SectionIdentity::new(key, section.revision, lifetime);
         let player_chunk = (
             (self.player_physics.position.x / CHUNK_WIDTH as f32).floor() as i32,
@@ -5931,22 +5952,21 @@ impl State {
             let Some(snap) = remote.sample(target) else {
                 continue;
             };
-            if let Some(entity) = self
-                .entity_manager
-                .entities
-                .iter_mut()
-                .find(|e| e.id == remote.entity_id)
-            {
-                entity.velocity = if dt > f32::EPSILON {
-                    (snap.position - entity.position) / dt
-                } else {
-                    Vec3::ZERO
-                };
-                entity.position = snap.position;
-                entity.yaw = snap.yaw;
-                entity.pitch = snap.pitch;
-                entity.action_cooldown = (entity.action_cooldown - dt).max(0.0);
-            }
+            let Some(&index) = self.entity_manager.id_to_index.get(&remote.entity_id) else {
+                continue;
+            };
+            let Some(entity) = self.entity_manager.entities.get_mut(index) else {
+                continue;
+            };
+            entity.velocity = if dt > f32::EPSILON {
+                (snap.position - entity.position) / dt
+            } else {
+                Vec3::ZERO
+            };
+            entity.position = snap.position;
+            entity.yaw = snap.yaw;
+            entity.pitch = snap.pitch;
+            entity.action_cooldown = (entity.action_cooldown - dt).max(0.0);
         }
         self.update_replicated_entity_interpolation();
         self.update_network_position(dt);
@@ -5965,6 +5985,7 @@ impl State {
             self.debug_frame_time_accumulator = 0.0;
             self.debug_frame_samples = 0;
             self.perf_summaries = self.perf_recorder.snapshot();
+            self.debug_memory_bytes = self.estimated_debug_memory_bytes();
         }
 
         self.advancement_manager.update_toasts(dt);
@@ -5996,23 +6017,37 @@ impl State {
         };
         self.camera.fov = self.camera.fov + (target_fov - self.camera.fov) * dt * 10.0;
 
-        // Torch smoke presentation updates
+        // Torch smoke: only columns near the camera (not every loaded chunk).
         self.torch_smoke_timer += dt;
         if self.torch_smoke_timer >= 0.4 {
             self.torch_smoke_timer = 0.0;
             let mut rng = self.total_time.to_bits().wrapping_add(0x9E3779B9);
-            for chunk in self.chunk_manager.chunks.values() {
-                for &encoded in chunk.torch_positions() {
-                    let (bx, by, bz) = Chunk::decode_torch_position(encoded);
-                    if by % 2 != 0 {
+            let cam = self.camera.position;
+            let cam_cx = (cam.x / CHUNK_WIDTH as f32).floor() as i32;
+            let cam_cz = (cam.z / CHUNK_DEPTH as f32).floor() as i32;
+            const TORCH_SMOKE_CHUNK_RADIUS: i32 = 2;
+            for dz in -TORCH_SMOKE_CHUNK_RADIUS..=TORCH_SMOKE_CHUNK_RADIUS {
+                for dx in -TORCH_SMOKE_CHUNK_RADIUS..=TORCH_SMOKE_CHUNK_RADIUS {
+                    let Some(chunk) = self.chunk_manager.chunks.get(&(cam_cx + dx, cam_cz + dz))
+                    else {
                         continue;
+                    };
+                    for &encoded in chunk.torch_positions() {
+                        let (bx, by, bz) = Chunk::decode_torch_position(encoded);
+                        if by % 2 != 0 {
+                            continue;
+                        }
+                        let wx = chunk.chunk_x * CHUNK_WIDTH as i32 + bx as i32;
+                        let wz = chunk.chunk_z * CHUNK_DEPTH as i32 + bz as i32;
+                        let torch_pos =
+                            glam::Vec3::new(wx as f32 + 0.5, by as f32 + 0.6, wz as f32 + 0.5);
+                        crate::particles::spawn_torch_smoke(
+                            &mut self.particles,
+                            torch_pos,
+                            &mut rng,
+                        );
+                        rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
                     }
-                    let wx = chunk.chunk_x * CHUNK_WIDTH as i32 + bx as i32;
-                    let wz = chunk.chunk_z * CHUNK_DEPTH as i32 + bz as i32;
-                    let torch_pos =
-                        glam::Vec3::new(wx as f32 + 0.5, by as f32 + 0.6, wz as f32 + 0.5);
-                    crate::particles::spawn_torch_smoke(&mut self.particles, torch_pos, &mut rng);
-                    rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
                 }
             }
         }
@@ -7155,7 +7190,14 @@ impl State {
             ) == InventoryLayoutKind::CreativeCatalog
     }
 
-    pub fn get_inventory_slots(&self) -> Vec<(SlotType, f32, f32, f32, f32)> {
+    pub fn fill_inventory_slots(&mut self) {
+        let mut slots = std::mem::take(&mut self.inventory_slots_scratch);
+        self.write_inventory_slot_rects(&mut slots);
+        self.inventory_slots_scratch = slots;
+    }
+
+    fn write_inventory_slot_rects(&self, slots: &mut Vec<(SlotType, f32, f32, f32, f32)>) {
+        slots.clear();
         let aspect = self.size.width as f32 / self.size.height as f32;
         if inventory_layout_kind(
             self.game_mode,
@@ -7163,7 +7205,6 @@ impl State {
             self.inventory.is_table_open,
         ) == InventoryLayoutKind::CreativeCatalog
         {
-            let mut slots = Vec::with_capacity(CREATIVE_VISIBLE_SLOTS + 9);
             for (index, item) in self
                 .inventory
                 .creative_visible_items()
@@ -7177,13 +7218,12 @@ impl State {
                 let rect = creative_hotbar_slot_rect(index, aspect);
                 slots.push((SlotType::Hotbar(index), rect.x0, rect.x1, rect.y0, rect.y1));
             }
-            return slots;
+            return;
         }
 
         let slot_w = 0.08;
         let slot_h = 0.08 * aspect;
         let gap = 0.01;
-        let mut slots = Vec::new();
 
         // 1. Hotbar (0..9)
         for i in 0..9 {
@@ -7367,6 +7407,11 @@ impl State {
             None | Some(StationKind::Merchant) => {}
         }
 
+    }
+
+    pub fn get_inventory_slots(&self) -> Vec<(SlotType, f32, f32, f32, f32)> {
+        let mut slots = Vec::with_capacity(64);
+        self.write_inventory_slot_rects(&mut slots);
         slots
     }
 
@@ -7764,23 +7809,32 @@ impl State {
     }
 
     fn poll_gpu_timestamp_readbacks(&mut self) {
+        use std::sync::atomic::Ordering;
+
+        // Hot path: AtomicBool only — never take the status mutex just to decide
+        // whether a device poll is needed.
         if self
             .gpu_timestamp_readback_slots
             .iter()
-            .any(|slot| slot.status.lock().unwrap().state == GpuTimestampReadbackState::Mapping)
+            .any(|slot| slot.mapping.load(Ordering::Acquire))
         {
             self.device.poll(wgpu::Maintain::Poll);
         }
 
         let mut newest_sample = None;
         for slot in &self.gpu_timestamp_readback_slots {
-            let status = *slot.status.lock().unwrap();
+            // Skip while the map callback still owns the mutex.
+            let Ok(mut status) = slot.status.try_lock() else {
+                continue;
+            };
             if status.state != GpuTimestampReadbackState::Mapped {
                 continue;
             }
             let Some(submission_tag) = status.submission_tag else {
                 continue;
             };
+            // Drop the lock before touching the mapped range.
+            drop(status);
 
             let slice = slot.buffer.slice(..);
             let range = slice.get_mapped_range();
@@ -7809,7 +7863,12 @@ impl State {
             }
             drop(range);
             slot.buffer.unmap();
-            let consumed = slot.status.lock().unwrap().consume(submission_tag);
+            slot.mapping.store(false, Ordering::Release);
+            let consumed = slot
+                .status
+                .lock()
+                .unwrap()
+                .consume(submission_tag);
             debug_assert!(consumed, "mapped timestamp slot must be consumed once");
         }
 
@@ -7831,22 +7890,20 @@ impl State {
 
         self.prepare_terrain_draw_plan();
 
-        // Frame-slot acquire / wait must stay between terrain prepare and
-        // entity uploads. Do not reorder this with timestamp queries.
+        // Frame-slot acquire must stay between terrain prepare and entity
+        // uploads. Do not reorder this with timestamp queries. When the GPU is
+        // behind, skip the present rather than stalling with Maintain::Wait.
         while let Ok(completed) = self.gpu_completion_rx.try_recv() {
             self.frame_resource_pool.complete(completed);
         }
         let frame_submission_id = self.next_gpu_submission_id;
         self.next_gpu_submission_id = self.next_gpu_submission_id.wrapping_add(1).max(1);
-        self.frame_ring_index = loop {
-            match self.frame_resource_pool.acquire(frame_submission_id) {
-                Ok(lease) => break lease.slot_id,
-                Err(crate::gpu_frame_resources::AcquireError::Exhausted { .. }) => {
-                    self.device.poll(wgpu::Maintain::Wait);
-                    while let Ok(completed) = self.gpu_completion_rx.try_recv() {
-                        self.frame_resource_pool.complete(completed);
-                    }
-                }
+        self.frame_ring_index = match self.frame_resource_pool.acquire(frame_submission_id) {
+            Ok(lease) => lease.slot_id,
+            Err(crate::gpu_frame_resources::AcquireError::Exhausted { .. }) => {
+                drop(view);
+                drop(output);
+                return Ok(());
             }
         };
 
@@ -8442,7 +8499,7 @@ fn add_char_lines_with_source(
     let character = c.to_ascii_uppercase();
     let rows = font_source
         .glyph_override(character)
-        .unwrap_or_else(|| crate::menu::glyph(character));
+        .unwrap_or_else(|| crate::glyph_atlas::glyph(character));
 
     let cell_w = w / 5.0;
     let cell_h = h / 7.0;
@@ -8464,6 +8521,34 @@ fn add_char_lines_with_source(
     }
 }
 
+#[allow(dead_code)] // Wired when glyph atlas bind group replaces line-list HUD text.
+fn add_char_textured_with_source(
+    font_source: &crate::resources::FontSource,
+    c: char,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: [f32; 4],
+    vertices: &mut Vec<TexturedUiVertex>,
+) {
+    let _ = font_source;
+    crate::glyph_atlas::push_glyph_quad(
+        vertices,
+        x,
+        y,
+        x + w,
+        y + h,
+        c,
+        color,
+        |position, tex_coords, color| TexturedUiVertex {
+            position,
+            tex_coords,
+            color,
+        },
+    );
+}
+
 fn add_string_lines_with_source(
     font_source: &crate::resources::FontSource,
     s: &str,
@@ -8478,6 +8563,34 @@ fn add_string_lines_with_source(
     let mut current_x = start_x;
     for c in s.chars() {
         add_char_lines_with_source(
+            font_source,
+            c.to_ascii_uppercase(),
+            current_x,
+            y,
+            char_w,
+            char_h,
+            color,
+            vertices,
+        );
+        current_x += char_w + spacing;
+    }
+}
+
+#[allow(dead_code)] // Wired when glyph atlas bind group replaces line-list HUD text.
+fn add_string_textured_with_source(
+    font_source: &crate::resources::FontSource,
+    s: &str,
+    start_x: f32,
+    y: f32,
+    char_w: f32,
+    char_h: f32,
+    spacing: f32,
+    color: [f32; 4],
+    vertices: &mut Vec<TexturedUiVertex>,
+) {
+    let mut current_x = start_x;
+    for c in s.chars() {
+        add_char_textured_with_source(
             font_source,
             c.to_ascii_uppercase(),
             current_x,

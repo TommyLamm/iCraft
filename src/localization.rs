@@ -254,7 +254,7 @@ impl TranslationCatalog {
     }
 
     pub fn translate(&mut self, key: &str) -> String {
-        let value = self.lookup(key);
+        let value = self.lookup(key).to_string();
         if self.active.contains_key(key) {
             return value;
         }
@@ -280,7 +280,7 @@ impl TranslationCatalog {
         if value == key {
             display_name.to_string()
         } else {
-            value
+            value.to_string()
         }
     }
 
@@ -300,12 +300,12 @@ impl TranslationCatalog {
     /// Read a translated value without mutating missing-key diagnostics. UI
     /// render methods use this immutable view while the catalog remains
     /// owned by the menu/state runtime.
-    pub fn lookup(&self, key: &str) -> String {
+    pub fn lookup<'a>(&'a self, key: &'a str) -> &'a str {
         self.active
             .get(key)
             .or_else(|| self.english.get(key))
-            .cloned()
-            .unwrap_or_else(|| key.to_string())
+            .map(String::as_str)
+            .unwrap_or(key)
     }
 
     pub fn format(&mut self, key: &str, arguments: &[(&str, &str)]) -> String {
@@ -316,7 +316,7 @@ impl TranslationCatalog {
     /// set. Render paths are called every frame, so they use this immutable
     /// helper while command/test paths may continue to use `format`.
     pub fn format_lookup(&self, key: &str, arguments: &[(&str, &str)]) -> String {
-        replace_tokens(self.lookup(key), arguments)
+        replace_tokens(self.lookup(key).to_string(), arguments)
     }
 
     pub fn plural(&mut self, key: &str, count: u64) -> String {
@@ -414,7 +414,7 @@ fn builtin_catalog(language: Language) -> &'static TranslationCatalog {
 }
 
 pub fn translate(language: Language, key: &str) -> String {
-    builtin_catalog(language).lookup(key)
+    builtin_catalog(language).lookup(key).to_string()
 }
 
 pub fn format(language: Language, key: &str, arguments: &[(&str, &str)]) -> String {

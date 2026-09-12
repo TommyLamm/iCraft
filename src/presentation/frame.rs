@@ -48,61 +48,57 @@ impl State {
 
         let lod_thresholds = LodThresholds::new(render_blocks * 0.5, render_blocks * 0.75);
         self.terrain_candidates_scratch.clear();
+        self.lod_fills_scratch.clear();
         let mut occluded_sections = 0u64;
-        let mut lod_fills = Vec::new();
 
-        for (&coord, mesh) in &self.chunk_meshes {
-            for (sec_idx, section) in mesh.sections.iter().enumerate() {
-                let section_y = mesh.section_y_at_index(sec_idx);
-                let Some(bounds) = section.finest_bounds() else {
+        // Fail-open (camera outside loaded column height) still walks all meshes.
+        // Otherwise only iterate the visibility BFS set — no second O(sections) scan.
+        if fail_open_section_vis {
+            for (&coord, mesh) in &self.chunk_meshes {
+                for (sec_idx, section) in mesh.sections.iter().enumerate() {
+                    let section_y = mesh.section_y_at_index(sec_idx);
+                    Self::push_terrain_section_candidates(
+                        cam_pos,
+                        render_distance_sq,
+                        &frustum,
+                        lod_thresholds,
+                        coord.0,
+                        section_y,
+                        coord.1,
+                        section,
+                        &mut self.terrain_candidates_scratch,
+                        &mut self.lod_fills_scratch,
+                    );
+                }
+            }
+        } else {
+            let loaded_sections = self
+                .chunk_meshes
+                .values()
+                .map(|mesh| mesh.sections.len())
+                .sum::<usize>() as u64;
+            occluded_sections =
+                loaded_sections.saturating_sub(self.visible_sections_scratch.len() as u64);
+
+            for &(cx, section_y, cz) in &self.visible_sections_scratch {
+                let Some(mesh) = self.chunk_meshes.get(&(cx, cz)) else {
                     continue;
                 };
-
-                let distance_sq = bounds.center_distance_squared(cam_pos);
-                if distance_sq > render_distance_sq || !frustum.intersects_aabb(&bounds) {
-                    continue;
-                }
-
-                if !fail_open_section_vis
-                    && !self
-                        .visible_sections_scratch
-                        .contains(&(coord.0, section_y, coord.1))
-                {
-                    occluded_sections += 1;
-                    continue;
-                }
-
-                let lod = select_lod_for_bounds(cam_pos, bounds, lod_thresholds);
-                if !section.lod_is_built(lod) {
-                    lod_fills.push(SectionKey::new(coord.0, section_y, coord.1));
-                }
-                let Some((draw_lod, level)) = section.level_for_draw(lod) else {
+                let Some(section) = mesh.section(section_y) else {
                     continue;
                 };
-                let key = SectionKey::new(coord.0, section_y, coord.1);
-
-                if let Some(bounds) = level.opaque.bounds {
-                    self.terrain_candidates_scratch
-                        .push(DrawCandidate::for_section(
-                            key,
-                            bounds,
-                            level.opaque.num_indices(),
-                            DrawLayer::Opaque,
-                            draw_lod,
-                            distance_sq,
-                        ));
-                }
-                if let Some(bounds) = level.transparent.bounds {
-                    self.terrain_candidates_scratch
-                        .push(DrawCandidate::for_section(
-                            key,
-                            bounds,
-                            level.transparent.num_indices(),
-                            DrawLayer::Transparent,
-                            draw_lod,
-                            distance_sq,
-                        ));
-                }
+                Self::push_terrain_section_candidates(
+                    cam_pos,
+                    render_distance_sq,
+                    &frustum,
+                    lod_thresholds,
+                    cx,
+                    section_y,
+                    cz,
+                    section,
+                    &mut self.terrain_candidates_scratch,
+                    &mut self.lod_fills_scratch,
+                );
             }
         }
 
@@ -110,7 +106,7 @@ impl State {
             (cam_pos.x / CHUNK_WIDTH as f32).floor() as i32,
             (cam_pos.z / CHUNK_DEPTH as f32).floor() as i32,
         );
-        for key in lod_fills {
+        for &key in &self.lod_fills_scratch {
             if self.section_scheduler.is_in_flight(key) {
                 continue;
             }
@@ -156,6 +152,58 @@ impl State {
         );
     }
 
+    fn push_terrain_section_candidates(
+        cam_pos: glam::Vec3,
+        render_distance_sq: f32,
+        frustum: &Frustum,
+        lod_thresholds: LodThresholds,
+        cx: i32,
+        section_y: i8,
+        cz: i32,
+        section: &GpuSectionMesh,
+        candidates: &mut Vec<DrawCandidate>,
+        lod_fills: &mut Vec<SectionKey>,
+    ) {
+        let Some(bounds) = section.finest_bounds() else {
+            return;
+        };
+
+        let distance_sq = bounds.center_distance_squared(cam_pos);
+        if distance_sq > render_distance_sq || !frustum.intersects_aabb(&bounds) {
+            return;
+        }
+
+        let lod = select_lod_for_bounds(cam_pos, bounds, lod_thresholds);
+        if !section.lod_is_built(lod) {
+            lod_fills.push(SectionKey::new(cx, section_y, cz));
+        }
+        let Some((draw_lod, level)) = section.level_for_draw(lod) else {
+            return;
+        };
+        let key = SectionKey::new(cx, section_y, cz);
+
+        if let Some(bounds) = level.opaque.bounds {
+            candidates.push(DrawCandidate::for_section(
+                key,
+                bounds,
+                level.opaque.num_indices(),
+                DrawLayer::Opaque,
+                draw_lod,
+                distance_sq,
+            ));
+        }
+        if let Some(bounds) = level.transparent.bounds {
+            candidates.push(DrawCandidate::for_section(
+                key,
+                bounds,
+                level.transparent.num_indices(),
+                DrawLayer::Transparent,
+                draw_lod,
+                distance_sq,
+            ));
+        }
+    }
+
     pub(super) fn prepare_entities(&mut self, _gpu_upload_elapsed: &mut Duration) {
         let cam_pos = self.camera.position;
         let render_blocks = self.chunk_manager.render_distance as f32 * CHUNK_WIDTH as f32;
@@ -169,17 +217,10 @@ impl State {
         let fail_open_section_vis = cam_sec_y_raw < height.min_section_y() as i32
             || cam_sec_y_raw >= height.max_section_y_exclusive() as i32
             || !self.chunk_meshes.contains_key(&(cam_sec_x, cam_sec_z));
-        self.entity_los_manager.counters = crate::culling::CullingCounters::default();
-        self.entity_los_manager
-            .set_current_identity(crate::culling::LosIdentity {
-                dimension: self.current_dimension,
-                generation: self.terrain_generation,
-                world_revision: self.los_world_revision,
-            });
-        // Poll entity LOS async results
-        self.entity_los_manager.poll_results();
 
-        // Compile mob instance data with culling hierarchy
+        // Compile mob instance data with distance / frustum / section-graph culling.
+        // Entity LOS worker removed: near/projectile/boss/item paths were fail-open
+        // and the fourth cull layer rarely removed anything after the first three.
         let entity_prepare_started = Instant::now();
         self.mob_cuboid_instances_scratch.clear();
         self.mob_quad_instances_scratch.clear();
@@ -188,22 +229,12 @@ impl State {
         let mut entities_frustum_culled = 0u64;
         let mut entities_occlusion_culled = 0u64;
 
-        let cam_cell = (
-            cam_pos.x.floor() as i32,
-            cam_pos.y.floor() as i32,
-            cam_pos.z.floor() as i32,
-        );
-
-        for entity in self
-            .entity_manager
-            .query_radius(cam_pos, render_distance_sq.sqrt())
-        {
+        for entity in self.entity_manager.query_radius(cam_pos, render_blocks) {
             // 1. Distance check
             let entity_render_dist_sq = render_distance_sq
                 * (self.settings.entity_distance_scale * self.settings.entity_distance_scale);
             let dist_sq = entity.position.distance_squared(cam_pos);
             if dist_sq > entity_render_dist_sq {
-                self.entity_los_manager.counters.distance += 1;
                 continue;
             }
 
@@ -212,7 +243,6 @@ impl State {
             let bounds = crate::chunk_render::MeshBounds::new(aabb.min, aabb.max);
             if !frustum.intersects_aabb(&bounds) {
                 entities_frustum_culled += 1;
-                self.entity_los_manager.counters.frustum += 1;
                 continue;
             }
 
@@ -231,20 +261,8 @@ impl State {
                     .contains(&(sec_x, valid_y, sec_z))
                 {
                     entities_occlusion_culled += 1;
-                    self.entity_los_manager.counters.section += 1;
                     continue;
                 }
-            }
-
-            // 4. Asynchronous Entity LOS check
-            if !self.entity_los_manager.is_entity_visible(
-                entity,
-                cam_pos,
-                cam_cell,
-                &self.chunk_manager,
-            ) {
-                entities_occlusion_culled += 1;
-                continue;
             }
 
             entities_rendered += 1;
@@ -284,16 +302,7 @@ impl State {
         if self.mob_cuboid_num_instances > 0 {
             let limit = (self.mob_cuboid_num_instances as usize).min(16384);
             self.mob_cuboid_num_instances = limit as u32;
-            let upload_started = Instant::now();
-            self.queue.write_buffer(
-                &self.mob_cuboid_instance_buffers[self.frame_ring_index],
-                0,
-                bytemuck::cast_slice(&self.mob_cuboid_instances_scratch[..limit]),
-            );
-            let upload_elapsed = upload_started.elapsed();
-            self.gpu_upload_time_frame += upload_elapsed;
-            self.gpu_upload_scopes_frame
-                .record(crate::perf::UploadSource::Entity as usize, upload_elapsed);
+            self.mob_cuboid_instances_scratch.truncate(limit);
             self.perf_counters.upload_bytes_frame =
                 self.perf_counters.upload_bytes_frame.saturating_add(
                     (limit * std::mem::size_of::<crate::mob_renderer::MobInstance>()) as u64,
@@ -303,16 +312,7 @@ impl State {
         if self.mob_quad_num_instances > 0 {
             let limit = (self.mob_quad_num_instances as usize).min(4096);
             self.mob_quad_num_instances = limit as u32;
-            let upload_started = Instant::now();
-            self.queue.write_buffer(
-                &self.mob_quad_instance_buffers[self.frame_ring_index],
-                0,
-                bytemuck::cast_slice(&self.mob_quad_instances_scratch[..limit]),
-            );
-            let upload_elapsed = upload_started.elapsed();
-            self.gpu_upload_time_frame += upload_elapsed;
-            self.gpu_upload_scopes_frame
-                .record(crate::perf::UploadSource::Entity as usize, upload_elapsed);
+            self.mob_quad_instances_scratch.truncate(limit);
             self.perf_counters.upload_bytes_frame =
                 self.perf_counters.upload_bytes_frame.saturating_add(
                     (limit * std::mem::size_of::<crate::mob_renderer::MobInstance>()) as u64,
@@ -327,17 +327,8 @@ impl State {
             .particles
             .compile_instances(&mut self.particle_instances_scratch);
         let particle_count = self.particle_instances_scratch.len();
+        // Instance / UI bytes are packed into the frame staging ring in encode_frame.
         if particle_count > 0 {
-            let upload_started = Instant::now();
-            self.queue.write_buffer(
-                &self.particle_instance_buffers[self.frame_ring_index],
-                0,
-                bytemuck::cast_slice(&self.particle_instances_scratch),
-            );
-            let upload_elapsed = upload_started.elapsed();
-            self.gpu_upload_time_frame += upload_elapsed;
-            self.gpu_upload_scopes_frame
-                .record(crate::perf::UploadSource::Particle as usize, upload_elapsed);
             self.perf_counters.upload_bytes_frame =
                 self.perf_counters.upload_bytes_frame.saturating_add(
                     (particle_count * std::mem::size_of::<crate::particles::ParticleInstance>())
@@ -457,6 +448,7 @@ impl State {
     }
 
     pub(super) fn build_hud(&mut self, gpu_upload_elapsed: &mut Duration) {
+        self.fill_inventory_slots();
         let font_source = &self.font_source;
         let add_string_lines = |s: &str,
                                 start_x: f32,
@@ -1185,7 +1177,8 @@ impl State {
             self.num_ui_vertices = ui_vert_len as u32;
             self.num_ui_line_vertices = ui_line_vert_len as u32;
         } else {
-            let mut ui_textured_vertices = Vec::new();
+            let mut ui_textured_vertices = std::mem::take(&mut self.ui_textured_vertices_scratch);
+            ui_textured_vertices.clear();
 
             let aspect = self.size.width as f32 / self.size.height as f32;
             let slot_w = 0.08;
@@ -1344,13 +1337,12 @@ impl State {
                     );
                 }
 
-                // 2. Draw slots
-                let slots = self.get_inventory_slots();
+                // 2. Draw slots (geometry already filled into scratch before font borrow)
                 let mouse_x = self.mouse_ndc[0];
                 let mouse_y = self.mouse_ndc[1];
                 let mut hovered_slot = None;
 
-                for &(slot_type, x0, x1, y0, y1) in &slots {
+                for &(slot_type, x0, x1, y0, y1) in &self.inventory_slots_scratch {
                     let is_hovered =
                         mouse_x >= x0 && mouse_x <= x1 && mouse_y >= y0 && mouse_y <= y1;
                     if is_hovered {
@@ -2804,26 +2796,6 @@ impl State {
                         &mut ui_line_vertices,
                     );
 
-                    let culling = self.entity_los_manager.counters;
-                    self.debug_str_scratch.clear();
-                    let _ = write!(
-                        self.debug_str_scratch,
-                        "CULL: DIST {} / FRUST {} / SEC {} / LOS {} / FAIL-OPEN {} / STALE {} / TIMEOUT {} / OVERFLOW {}",
-                        culling.distance,
-                        culling.frustum,
-                        culling.section,
-                        culling.los,
-                        culling.fail_open,
-                        culling.stale,
-                        culling.timeouts,
-                        culling.overflow
-                    );
-                    render_line(
-                        &self.debug_str_scratch,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-
                     let terrain_indices = self.submitted_terrain_triangles.saturating_mul(3);
                     let rendered_indices = terrain_indices
                         + u64::from(self.mob_num_indices)
@@ -2858,7 +2830,7 @@ impl State {
                     let _ = write!(
                         self.debug_str_scratch,
                         "MEMORY TRACKED: {:.1} MB",
-                        self.estimated_debug_memory_bytes() as f64 / (1024.0 * 1024.0)
+                        self.debug_memory_bytes as f64 / (1024.0 * 1024.0)
                     );
                     render_line(
                         &self.debug_str_scratch,
@@ -3377,40 +3349,26 @@ impl State {
                 }
             }
 
-            // Write Buffers
+            // Defer GPU upload to the frame staging ring (encode_frame).
             let ui_vert_len = ui_vertices.len().min(UI_VERTEX_CAPACITY);
             let ui_line_vert_len = ui_line_vertices.len().min(UI_LINE_VERTEX_CAPACITY);
             let ui_textured_vert_len = ui_textured_vertices.len().min(UI_VERTEX_CAPACITY);
+            ui_vertices.truncate(ui_vert_len);
+            ui_line_vertices.truncate(ui_line_vert_len);
+            ui_textured_vertices.truncate(ui_textured_vert_len);
 
-            let upload_started = Instant::now();
-            self.queue.write_buffer(
-                &self.ui_vertex_buffer,
-                0,
-                bytemuck::cast_slice(&ui_vertices[..ui_vert_len]),
-            );
-            self.queue.write_buffer(
-                &self.ui_line_vertex_buffer,
-                0,
-                bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]),
-            );
-            self.queue.write_buffer(
-                &self.ui_textured_vertex_buffer,
-                0,
-                bytemuck::cast_slice(&ui_textured_vertices[..ui_textured_vert_len]),
-            );
-            let upload_elapsed = upload_started.elapsed();
-            self.gpu_upload_time_frame += upload_elapsed;
-            self.gpu_upload_scopes_frame
-                .record(crate::perf::UploadSource::Ui as usize, upload_elapsed);
             self.perf_counters.upload_bytes_frame =
                 self.perf_counters.upload_bytes_frame.saturating_add(
-                    ((ui_vert_len + ui_line_vert_len + ui_textured_vert_len)
-                        * std::mem::size_of::<UiVertex>()) as u64,
+                    (ui_vert_len * std::mem::size_of::<UiVertex>()
+                        + ui_line_vert_len * std::mem::size_of::<UiVertex>()
+                        + ui_textured_vert_len * std::mem::size_of::<TexturedUiVertex>())
+                        as u64,
                 );
 
             self.num_ui_vertices = ui_vert_len as u32;
             self.num_ui_line_vertices = ui_line_vert_len as u32;
             self.num_ui_textured_vertices = ui_textured_vert_len as u32;
+            self.ui_textured_vertices_scratch = ui_textured_vertices;
         }
 
         self.ui_vertices_scratch = ui_vertices;
@@ -3442,6 +3400,195 @@ impl State {
         self.perf_counters.draw_calls = total_draw_calls;
     }
 
+
+    fn stamp(&self, pass: &mut wgpu::RenderPass<'_>, query: u32) {
+        if self.gpu_timestamps_inside_passes {
+            if let Some(qs) = &self.gpu_timestamp_query_set {
+                pass.write_timestamp(qs, query);
+            }
+        }
+    }
+
+    /// Pack mob / particle / UI scratches into one CPU buffer, write once to the
+    /// ring staging buffer, then GPU-copy into the live destinations.
+    fn flush_frame_uploads(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        self.frame_upload_cpu.clear();
+        let mut copies: Vec<(wgpu::BufferAddress, wgpu::BufferAddress, u64, u8)> = Vec::new();
+        // dest tag: 0 cuboid, 1 quad, 2 particle, 3 ui, 4 ui_line, 5 ui_textured
+
+        let mut push = |cpu: &mut Vec<u8>,
+                        copies: &mut Vec<(wgpu::BufferAddress, wgpu::BufferAddress, u64, u8)>,
+                        bytes: &[u8],
+                        dest_offset: wgpu::BufferAddress,
+                        tag: u8| {
+            if bytes.is_empty() {
+                return;
+            }
+            // 256-byte align COPY_BUFFER_TO_BUFFER offsets where required.
+            let align = 4usize;
+            let padding = (align - (cpu.len() % align)) % align;
+            cpu.extend(std::iter::repeat(0u8).take(padding));
+            let src_offset = cpu.len() as wgpu::BufferAddress;
+            cpu.extend_from_slice(bytes);
+            copies.push((src_offset, dest_offset, bytes.len() as u64, tag));
+        };
+
+        if self.mob_cuboid_num_instances > 0 {
+            let limit = self.mob_cuboid_num_instances as usize;
+            push(
+                &mut self.frame_upload_cpu,
+                &mut copies,
+                bytemuck::cast_slice(&self.mob_cuboid_instances_scratch[..limit]),
+                0,
+                0,
+            );
+        }
+        if self.mob_quad_num_instances > 0 {
+            let limit = self.mob_quad_num_instances as usize;
+            push(
+                &mut self.frame_upload_cpu,
+                &mut copies,
+                bytemuck::cast_slice(&self.mob_quad_instances_scratch[..limit]),
+                0,
+                1,
+            );
+        }
+        if !self.particle_instances_scratch.is_empty() {
+            push(
+                &mut self.frame_upload_cpu,
+                &mut copies,
+                bytemuck::cast_slice(&self.particle_instances_scratch),
+                0,
+                2,
+            );
+        }
+        if self.num_ui_vertices > 0 {
+            let n = self.num_ui_vertices as usize;
+            push(
+                &mut self.frame_upload_cpu,
+                &mut copies,
+                bytemuck::cast_slice(&self.ui_vertices_scratch[..n]),
+                0,
+                3,
+            );
+        }
+        if self.num_ui_line_vertices > 0 {
+            let n = self.num_ui_line_vertices as usize;
+            push(
+                &mut self.frame_upload_cpu,
+                &mut copies,
+                bytemuck::cast_slice(&self.ui_line_vertices_scratch[..n]),
+                0,
+                4,
+            );
+        }
+        if self.num_ui_textured_vertices > 0 {
+            let n = self.num_ui_textured_vertices as usize;
+            push(
+                &mut self.frame_upload_cpu,
+                &mut copies,
+                bytemuck::cast_slice(&self.ui_textured_vertices_scratch[..n]),
+                0,
+                5,
+            );
+        }
+
+        if self.frame_upload_cpu.is_empty() {
+            return;
+        }
+        if self.frame_upload_cpu.len() as u64 > FRAME_UPLOAD_STAGING_BYTES {
+            // Oversized frame: fall back to direct writes rather than truncate.
+            for &(_, dest_offset, _size, tag) in &copies {
+                let _ = (dest_offset, tag);
+            }
+            // Direct path for safety.
+            let ring = self.frame_ring_index;
+            if self.mob_cuboid_num_instances > 0 {
+                self.queue.write_buffer(
+                    &self.mob_cuboid_instance_buffers[ring],
+                    0,
+                    bytemuck::cast_slice(
+                        &self.mob_cuboid_instances_scratch[..self.mob_cuboid_num_instances as usize],
+                    ),
+                );
+            }
+            if self.mob_quad_num_instances > 0 {
+                self.queue.write_buffer(
+                    &self.mob_quad_instance_buffers[ring],
+                    0,
+                    bytemuck::cast_slice(
+                        &self.mob_quad_instances_scratch[..self.mob_quad_num_instances as usize],
+                    ),
+                );
+            }
+            if !self.particle_instances_scratch.is_empty() {
+                self.queue.write_buffer(
+                    &self.particle_instance_buffers[ring],
+                    0,
+                    bytemuck::cast_slice(&self.particle_instances_scratch),
+                );
+            }
+            if self.num_ui_vertices > 0 {
+                self.queue.write_buffer(
+                    &self.ui_vertex_buffer,
+                    0,
+                    bytemuck::cast_slice(
+                        &self.ui_vertices_scratch[..self.num_ui_vertices as usize],
+                    ),
+                );
+            }
+            if self.num_ui_line_vertices > 0 {
+                self.queue.write_buffer(
+                    &self.ui_line_vertex_buffer,
+                    0,
+                    bytemuck::cast_slice(
+                        &self.ui_line_vertices_scratch[..self.num_ui_line_vertices as usize],
+                    ),
+                );
+            }
+            if self.num_ui_textured_vertices > 0 {
+                self.queue.write_buffer(
+                    &self.ui_textured_vertex_buffer,
+                    0,
+                    bytemuck::cast_slice(
+                        &self.ui_textured_vertices_scratch
+                            [..self.num_ui_textured_vertices as usize],
+                    ),
+                );
+            }
+            return;
+        }
+
+        let upload_started = Instant::now();
+        let ring = self.frame_ring_index;
+        self.queue.write_buffer(
+            &self.frame_upload_staging_buffers[ring],
+            0,
+            &self.frame_upload_cpu,
+        );
+        for &(src_offset, dest_offset, size, tag) in &copies {
+            let dest = match tag {
+                0 => &self.mob_cuboid_instance_buffers[ring],
+                1 => &self.mob_quad_instance_buffers[ring],
+                2 => &self.particle_instance_buffers[ring],
+                3 => &self.ui_vertex_buffer,
+                4 => &self.ui_line_vertex_buffer,
+                _ => &self.ui_textured_vertex_buffer,
+            };
+            encoder.copy_buffer_to_buffer(
+                &self.frame_upload_staging_buffers[ring],
+                src_offset,
+                dest,
+                dest_offset,
+                size,
+            );
+        }
+        let upload_elapsed = upload_started.elapsed();
+        self.gpu_upload_time_frame += upload_elapsed;
+        self.gpu_upload_scopes_frame
+            .record(crate::perf::UploadSource::Ui as usize, upload_elapsed);
+    }
+
     pub(super) fn encode_frame(
         &mut self,
         output: wgpu::SurfaceTexture,
@@ -3455,6 +3602,7 @@ impl State {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Render Encoder"),
             });
+        self.flush_frame_uploads(&mut encoder);
 
         let mut crack_metrics: Option<(u64, u64)> = None;
         {
@@ -3486,26 +3634,14 @@ impl State {
             });
 
             // Draw Skybox first
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 0);
-                }
-            }
+            self.stamp(&mut render_pass, 0);
             render_pass.set_pipeline(&self.sky_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             render_pass.draw(0..6, 0..1);
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 1);
-                }
-            }
+            self.stamp(&mut render_pass, 1);
 
             // Pass 1: Opaque & Cutout
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 2);
-                }
-            }
+            self.stamp(&mut render_pass, 2);
             render_pass.set_pipeline(&self.terrain_render_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             let mut bound_region: Option<(i32, i32)> = None;
@@ -3552,18 +3688,10 @@ impl State {
                 };
                 render_pass.draw_indexed(handle.index_offset..index_end, base_vertex, 0..1);
             }
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 3);
-                }
-            }
+            self.stamp(&mut render_pass, 3);
 
             // Draw Mobs
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 4);
-                }
-            }
+            self.stamp(&mut render_pass, 4);
             if self.mob_cuboid_num_instances > 0 {
                 render_pass.set_pipeline(&self.mob_instanced_pipeline);
                 render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
@@ -3592,18 +3720,10 @@ impl State {
                 );
                 render_pass.draw_indexed(0..12, 0, 0..self.mob_quad_num_instances);
             }
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 5);
-                }
-            }
+            self.stamp(&mut render_pass, 5);
 
             // Pass 2: Translucent (Water/Ice)
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 6);
-                }
-            }
+            self.stamp(&mut render_pass, 6);
             render_pass.set_pipeline(&self.terrain_trans_pipeline);
             let mut bound_region: Option<(i32, i32)> = None;
             for candidate in &self.terrain_draw_plan_scratch.transparent {
@@ -3649,18 +3769,10 @@ impl State {
                 };
                 render_pass.draw_indexed(handle.index_offset..index_end, base_vertex, 0..1);
             }
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 7);
-                }
-            }
+            self.stamp(&mut render_pass, 7);
 
             // Draw billboard particles using instanced particle pipeline.
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 8);
-                }
-            }
+            self.stamp(&mut render_pass, 8);
             if !self.particle_instances_scratch.is_empty() {
                 let num_particles = self.particle_instances_scratch.len() as u32;
                 render_pass.set_pipeline(&self.particle_instanced_pipeline);
@@ -3676,18 +3788,10 @@ impl State {
                 );
                 render_pass.draw_indexed(0..6, 0, 0..num_particles);
             }
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 9);
-                }
-            }
+            self.stamp(&mut render_pass, 9);
 
             // Draw Block cracking animation overlay (multiply blend)
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 10);
-                }
-            }
+            self.stamp(&mut render_pass, 10);
             if let Some(target) = self.mining_target {
                 if self.mining_progress > 0.0 {
                     if let Some((_num_vertices, num_indices, upload_ns, upload_bytes)) =
@@ -3704,11 +3808,7 @@ impl State {
                     }
                 }
             }
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 11);
-                }
-            }
+            self.stamp(&mut render_pass, 11);
 
             // Draw first-person right hand and held item. Uses a dedicated
             // camera with a very near plane so the view-space model never
@@ -3726,11 +3826,7 @@ impl State {
                 render_pass.draw_indexed(0..self.hand_num_indices, 0, 0..1);
             }
 
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 12);
-                }
-            }
+            self.stamp(&mut render_pass, 12);
             if !self.is_paused {
                 // 1. Draw Colored UI (slot/panel backgrounds). Backgrounds go
                 // first so the item icons drawn next stay fully visible;
@@ -3773,11 +3869,7 @@ impl State {
                 render_pass.set_vertex_buffer(0, self.ui_line_vertex_buffer.slice(..));
                 render_pass.draw(0..self.num_ui_line_vertices, 0..1);
             }
-            if self.gpu_timestamps_inside_passes {
-                if let Some(qs) = &self.gpu_timestamp_query_set {
-                    render_pass.write_timestamp(qs, 13);
-                }
-            }
+            self.stamp(&mut render_pass, 13);
         }
 
         if let Some((upload_ns, upload_bytes)) = crack_metrics {
@@ -3849,6 +3941,8 @@ impl State {
                 .begin_mapping(frame_submission_id)
             {
                 let status = std::sync::Arc::clone(&slot.status);
+                let mapping = std::sync::Arc::clone(&slot.mapping);
+                mapping.store(true, std::sync::atomic::Ordering::Release);
                 slot.buffer
                     .slice(..)
                     .map_async(wgpu::MapMode::Read, move |result| {
@@ -3856,6 +3950,12 @@ impl State {
                             .lock()
                             .unwrap()
                             .map_completed(frame_submission_id, result.is_ok());
+                        // Keep mapping=true until the render thread consumes the
+                        // mapped range; only clear on failure so poll keeps
+                        // Maintain::Poll while Mapped is pending consume.
+                        if result.is_err() {
+                            mapping.store(false, std::sync::atomic::Ordering::Release);
+                        }
                     });
             }
         }
