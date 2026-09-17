@@ -13,28 +13,19 @@ pub(super) const SAVE_QUEUE_CAPACITY: usize = 64;
 #[derive(Debug)]
 pub(super) enum SavePayload {
     Chunks {
-        job_id: u64,
         dimension: Dimension,
         /// `(cx, cz, dirty_revision, payload)` — payload is already flattened/
         /// compressed by the tick thread (`ChunkSaveData`).
         entries: Vec<(i32, i32, u64, ChunkSaveData)>,
     },
     Entities {
-        job_id: u64,
         dimension: Dimension,
         epoch: u64,
         bytes: Vec<u8>,
         path: PathBuf,
     },
     SidecarGroup {
-        job_id: u64,
         entries: Vec<(PathBuf, Vec<u8>)>,
-    },
-    PlayerFile {
-        job_id: u64,
-        player_id: u64,
-        path: PathBuf,
-        bytes: Vec<u8>,
     },
     /// Shutdown / `save_all` barrier: ack only after prior jobs finish.
     Barrier {
@@ -45,24 +36,16 @@ pub(super) enum SavePayload {
 #[derive(Debug)]
 pub(super) enum SaveAck {
     Chunks {
-        job_id: u64,
         dimension: Dimension,
         revisions: Vec<(i32, i32, u64)>,
         ok: bool,
     },
     Entities {
-        job_id: u64,
         dimension: Dimension,
         epoch: u64,
         ok: bool,
     },
     SidecarGroup {
-        job_id: u64,
-        ok: bool,
-    },
-    PlayerFile {
-        job_id: u64,
-        player_id: u64,
         ok: bool,
     },
     Barrier {
@@ -171,11 +154,7 @@ fn save_thread_main(
 ) {
     while let Ok(job) = job_rx.recv() {
         match job {
-            SavePayload::Chunks {
-                job_id,
-                dimension,
-                entries,
-            } => {
+            SavePayload::Chunks { dimension, entries } => {
                 let revisions: Vec<(i32, i32, u64)> = entries
                     .iter()
                     .map(|(cx, cz, revision, _)| (*cx, *cz, *revision))
@@ -186,14 +165,12 @@ fn save_thread_main(
                     .collect();
                 let ok = save_manager.save_chunks_in(dimension, chunks).is_ok();
                 let _ = ack_tx.send(SaveAck::Chunks {
-                    job_id,
                     dimension,
                     revisions,
                     ok,
                 });
             }
             SavePayload::Entities {
-                job_id,
                 dimension,
                 epoch,
                 bytes,
@@ -201,36 +178,127 @@ fn save_thread_main(
             } => {
                 let ok = atomic_write(&path, &bytes).is_ok();
                 let _ = ack_tx.send(SaveAck::Entities {
-                    job_id,
                     dimension,
                     epoch,
                     ok,
                 });
             }
-            SavePayload::SidecarGroup { job_id, entries } => {
+            SavePayload::SidecarGroup { entries } => {
                 let refs: Vec<_> = entries
                     .iter()
                     .map(|(path, bytes)| (path.as_path(), bytes.as_slice()))
                     .collect();
                 let ok = atomic_write_group(&refs).is_ok();
-                let _ = ack_tx.send(SaveAck::SidecarGroup { job_id, ok });
-            }
-            SavePayload::PlayerFile {
-                job_id,
-                player_id,
-                path,
-                bytes,
-            } => {
-                let ok = atomic_write(&path, &bytes).is_ok();
-                let _ = ack_tx.send(SaveAck::PlayerFile {
-                    job_id,
-                    player_id,
-                    ok,
-                });
+                let _ = ack_tx.send(SaveAck::SidecarGroup { ok });
             }
             SavePayload::Barrier { job_id } => {
                 let _ = ack_tx.send(SaveAck::Barrier { job_id });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::save::EntitySaveData;
+    use crate::world::Chunk;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_test_dir(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("icraft_worker_{label}_{}_{}", std::process::id(), unique));
+        let _ = fs::create_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn worker_persists_chunks_entities_sidecars_and_barrier_in_order() {
+        let world_dir = unique_test_dir("all_payloads");
+        let worker = SaveWorker::spawn(SaveManager::new(&world_dir));
+
+        let chunk = Chunk::empty_in_dimension(Dimension::Overworld, 0, 0);
+        let chunk_data = ChunkSaveData::from_chunk(&chunk).expect("chunk save data");
+        worker
+            .enqueue_blocking(SavePayload::Chunks {
+                dimension: Dimension::Overworld,
+                entries: vec![(0, 0, 10, chunk_data)],
+            })
+            .expect("enqueue chunks");
+
+        let entities_path = world_dir.join("entities.dat");
+        let entities_bytes = bincode::serialize(&Vec::<EntitySaveData>::new()).expect("serialize entities");
+        worker
+            .enqueue_blocking(SavePayload::Entities {
+                dimension: Dimension::Overworld,
+                epoch: 7,
+                bytes: entities_bytes,
+                path: entities_path.clone(),
+            })
+            .expect("enqueue entities");
+
+        let sidecar_path = world_dir.join("custom_sidecar.bin");
+        worker
+            .enqueue_blocking(SavePayload::SidecarGroup {
+                entries: vec![(sidecar_path.clone(), b"payload-test".to_vec())],
+            })
+            .expect("enqueue sidecars");
+
+        worker
+            .enqueue_blocking(SavePayload::Barrier { job_id: 42 })
+            .expect("enqueue barrier");
+
+        let acks = worker.wait_barrier(42);
+        assert_eq!(acks.len(), 4, "expected 4 acks including barrier");
+
+        match &acks[0] {
+            SaveAck::Chunks {
+                dimension,
+                revisions,
+                ok,
+            } => {
+                assert_eq!(*dimension, Dimension::Overworld);
+                assert_eq!(revisions, &[(0, 0, 10)]);
+                assert!(ok);
+            }
+            other => panic!("unexpected first ack: {:?}", other),
+        }
+
+        match &acks[1] {
+            SaveAck::Entities {
+                dimension,
+                epoch,
+                ok,
+            } => {
+                assert_eq!(*dimension, Dimension::Overworld);
+                assert_eq!(*epoch, 7);
+                assert!(ok);
+            }
+            other => panic!("unexpected second ack: {:?}", other),
+        }
+
+        match &acks[2] {
+            SaveAck::SidecarGroup { ok } => {
+                assert!(ok);
+            }
+            other => panic!("unexpected third ack: {:?}", other),
+        }
+
+        match &acks[3] {
+            SaveAck::Barrier { job_id } => {
+                assert_eq!(*job_id, 42);
+            }
+            other => panic!("unexpected fourth ack: {:?}", other),
+        }
+
+        assert!(sidecar_path.exists());
+        assert_eq!(fs::read(&sidecar_path).unwrap(), b"payload-test");
+
+        worker.shutdown();
+        let _ = fs::remove_dir_all(world_dir);
     }
 }

@@ -288,7 +288,7 @@ which `ServerWorld` applies; durable writes stay on `ServerRuntime`.
 
 `ServerRuntime::tick_with_output` (50 ms):
 
-1. Drain save-worker acks (clear dirty only after successful persist).
+1. Drain save-worker acks (clear chunk dirty revisions and entity epochs only after successful persist; player persistence is synchronous).
 2. Schedule pending async worldgen and collect completed Rayon results.
 3. Drain at most the bounded inbound budget.
 4. Build per-dimension simulation unions from cached interest
@@ -514,11 +514,13 @@ region is rewritten once. Region write hits take the cache entry by move
 (`remove` → mutate → reinsert) and trust a write-generation stamp instead of
 re-statting with `fs::metadata`; a cold load of a truncated or corrupt region
 still fail-closes and leaves `.bin.bak` semantics unchanged. Tick enqueues
-`SavePayload`s (flattened chunk payloads, dirty entity dumps, sidecar groups);
-zlib/region bincode/atomic write run on the save thread; dirty bits clear only
-after ack. Sidecar batches share one `sync_all`. Players persist only when
-their per-session dirty bit is set; entities skip rewrite while their checksum
-epoch matches the last persisted watermark. Disk chunk streams use zlib level 1
+`SavePayload`s (flattened chunk payloads, dirty entity dumps, sidecar groups;
+job IDs are carried on shutdown/barrier payloads only, not regular payloads);
+zlib/region bincode/atomic write run on the save thread; chunk dirty revisions
+and entity epochs clear only after ack. Sidecar batches share one `sync_all`.
+Players persist synchronously on the tick thread only when their per-session
+dirty bit is set (clearing dirty immediately upon successful write); entities
+skip rewrite while their checksum epoch matches the last persisted watermark. Disk chunk streams use zlib level 1
 (`Compression::fast`); the wrapper is unchanged so older level-6 payloads
 still inflate. Historical save payloads still treat Y as `0..256` world Y
 and must not be reinterpreted as signed-Y. Live `ChunkData` projection

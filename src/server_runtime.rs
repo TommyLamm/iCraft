@@ -530,13 +530,7 @@ impl ServerRuntime {
                     .iter()
                     .map(|(cx, cz, revision, _)| (*cx, *cz, *revision))
                     .collect();
-                let job_id = self
-                    .save_worker
-                    .as_mut()
-                    .map(|worker| worker.next_job_id())
-                    .unwrap_or(0);
                 if !self.enqueue_save_payload(save_worker::SavePayload::Chunks {
-                    job_id,
                     dimension,
                     entries: chunks,
                 }) {
@@ -558,13 +552,7 @@ impl ServerRuntime {
                 let path = self.save_manager.entities_file_path(dimension);
                 let bytes = bincode::serialize(&entities)
                     .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
-                let job_id = self
-                    .save_worker
-                    .as_mut()
-                    .map(|worker| worker.next_job_id())
-                    .unwrap_or(0);
                 if !self.enqueue_save_payload(save_worker::SavePayload::Entities {
-                    job_id,
                     dimension,
                     epoch: entities_epoch,
                     bytes,
@@ -622,13 +610,7 @@ impl ServerRuntime {
                 properties_text.into_bytes(),
             ),
         ];
-        let job_id = self
-            .save_worker
-            .as_mut()
-            .map(|worker| worker.next_job_id())
-            .unwrap_or(0);
         if !self.enqueue_save_payload(save_worker::SavePayload::SidecarGroup {
-            job_id,
             entries: sidecars,
         }) {
             return Err(io::Error::new(
@@ -686,8 +668,7 @@ impl ServerRuntime {
                         ack,
                         save_worker::SaveAck::Chunks { ok: false, .. }
                             | save_worker::SaveAck::Entities { ok: false, .. }
-                            | save_worker::SaveAck::SidecarGroup { ok: false, .. }
-                            | save_worker::SaveAck::PlayerFile { ok: false, .. }
+                            | save_worker::SaveAck::SidecarGroup { ok: false }
                     )
                 });
                 self.apply_save_acks(acks);
@@ -861,7 +842,6 @@ impl ServerRuntime {
                     dimension,
                     revisions,
                     ok,
-                    ..
                 } => {
                     self.authority.with_world(dimension, |world| {
                         for (cx, cz, revision) in revisions {
@@ -884,7 +864,6 @@ impl ServerRuntime {
                     dimension,
                     epoch,
                     ok,
-                    ..
                 } => {
                     if ok {
                         self.authority.with_world(dimension, |world| {
@@ -896,18 +875,7 @@ impl ServerRuntime {
                         autosave_failures = autosave_failures.saturating_add(1);
                     }
                 }
-                save_worker::SaveAck::PlayerFile {
-                    player_id, ok, ..
-                } => {
-                    if ok {
-                        if let Some(session) = self.players.get_mut(&player_id) {
-                            session.player_dirty = false;
-                        }
-                    } else {
-                        autosave_failures = autosave_failures.saturating_add(1);
-                    }
-                }
-                save_worker::SaveAck::SidecarGroup { ok, .. } => {
+                save_worker::SaveAck::SidecarGroup { ok } => {
                     if !ok {
                         autosave_failures = autosave_failures.saturating_add(1);
                     }

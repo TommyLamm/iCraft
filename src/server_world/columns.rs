@@ -358,19 +358,6 @@ impl ServerWorld {
         self.block_revision_checksum ^= block_revision_fingerprint(position, revision);
     }
 
-    #[allow(dead_code)]
-    pub(super) fn clear_block_revision(&mut self, position: (i32, i32, i32)) {
-        let column = chunk_xz(position.0, position.2);
-        let Some(column_map) = self.block_revisions.get_mut(&column) else {
-            return;
-        };
-        if let Some(old) = column_map.remove(&position) {
-            self.block_revision_checksum ^= block_revision_fingerprint(position, old);
-        }
-        if column_map.is_empty() {
-            self.block_revisions.remove(&column);
-        }
-    }
 
     /// Restore a persisted chunk into the authoritative map. The payload is
     /// decoded before any insert so a corrupt inner zlib cannot be replaced
