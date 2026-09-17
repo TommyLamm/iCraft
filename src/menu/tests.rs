@@ -311,11 +311,15 @@ use super::*;
 
     #[test]
     fn weather_options_row_is_distinct_from_language_controls_and_back() {
-        assert_eq!(options_row_at(-0.08), Some(3));
-        assert_eq!(options_row_at(-0.28), Some(4));
-        assert_eq!(options_row_at(-0.48), Some(5));
-        assert_eq!(options_row_at(-0.70), None);
-        assert!(hit(0.4, -0.08, 0.05, 0.82, -0.15, -0.02));
+        let rects = options_button_rects();
+        let weather_rect = rects[9];
+        let language_rect = rects[10];
+        let accessibility_rect = rects[11];
+        let done_rect = rects[14];
+        assert!(weather_rect.contains(0.4, -0.08));
+        assert!(!language_rect.contains(0.4, -0.08));
+        assert!(!accessibility_rect.contains(0.4, -0.08));
+        assert!(!done_rect.contains(0.4, -0.08));
     }
 
     #[test]
@@ -652,7 +656,6 @@ key_pause = ESC
             let cx = (rect.x0 + rect.x1) * 0.5;
             let cy = (rect.y0 + rect.y1) * 0.5;
             assert!(rect.contains(cx, cy));
-            assert!(hit(cx, cy, rect.x0, rect.x1, rect.y0, rect.y1));
             assert!(!rect.contains(rect.x0 - 0.1, cy));
             assert!(!rect.contains(rect.x1 + 0.1, cy));
             assert!(!rect.contains(cx, rect.y0 - 0.1));

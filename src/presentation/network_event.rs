@@ -57,7 +57,6 @@ impl State {
                 self.weather = crate::weather::WeatherPresentation::new(self.world_seed);
                 self.chunk_manager.chunks.clear();
                 self.teardown_terrain_runtime("network connect/reset");
-                self.pending_chunk_payloads.clear();
                 self.pending_block_changes.clear();
                 self.client_chunk_revisions.clear();
                 self.clear_replicated_entities();

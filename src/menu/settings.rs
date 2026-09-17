@@ -141,21 +141,15 @@ impl GameSettings {
         if let Ok(contents) = fs::read_to_string(CONTROLS_FILE) {
             settings.apply_file_contents(&contents);
         }
-        settings.sanitize_view_settings();
-        settings.render_distance = settings.render_distance.clamp(2, 16);
-        settings.clamp_audio_volumes();
-        settings.accessibility.sanitize();
+        settings.sanitize();
         settings
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn from_file_contents(contents: &str) -> Self {
         let mut settings = Self::default();
         settings.apply_file_contents(contents);
-        settings.sanitize_view_settings();
-        settings.render_distance = settings.render_distance.clamp(2, 16);
-        settings.clamp_audio_volumes();
-        settings.accessibility.sanitize();
+        settings.sanitize();
         settings
     }
 
@@ -474,6 +468,13 @@ impl GameSettings {
             settings.accessibility.damage_tilt,
             settings.resource_packs.join(","),
         )
+    }
+
+    fn sanitize(&mut self) {
+        self.sanitize_view_settings();
+        self.render_distance = self.render_distance.clamp(2, 16);
+        self.clamp_audio_volumes();
+        self.accessibility.sanitize();
     }
 
     pub fn clamp_audio_volumes(&mut self) {

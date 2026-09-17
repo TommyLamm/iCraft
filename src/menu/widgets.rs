@@ -26,24 +26,6 @@ impl Screen {
     pub const fn new(widgets: &'static [Widget]) -> Self {
         Self { widgets }
     }
-
-    pub fn focus_count(&self) -> usize {
-        self.widgets.len()
-    }
-
-    pub fn focus_rect(&self, index: usize) -> Option<[f32; 4]> {
-        self.widgets.get(index).map(|w| w.rect.as_array())
-    }
-
-    pub fn hit_index(&self, x: f32, y: f32) -> Option<usize> {
-        self.widgets
-            .iter()
-            .position(|widget| widget.rect.contains(x, y))
-    }
-
-    pub fn widget(&self, index: usize) -> Option<&Widget> {
-        self.widgets.get(index)
-    }
 }
 
 pub(super) const MAIN_SCREEN: Screen = Screen::new(&[

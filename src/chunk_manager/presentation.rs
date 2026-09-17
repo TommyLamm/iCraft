@@ -14,7 +14,6 @@ pub struct PresentationChunks {
     pub chunks: DenseColumnGrid,
     pub view_distance: i32,
     pub dimension: crate::dimension::Dimension,
-    load_generation: u64,
     pending_mesh_invalidations: HashSet<(i32, i32)>,
     pending_section_mesh_invalidations: HashSet<SectionKey>,
 }
@@ -87,29 +86,17 @@ impl PresentationChunks {
             chunks: DenseColumnGrid::with_distance(view_distance),
             view_distance,
             dimension,
-            load_generation: 0,
             pending_mesh_invalidations: HashSet::new(),
             pending_section_mesh_invalidations: HashSet::new(),
         }
     }
 
-    pub fn load_generation(&self) -> u64 {
-        self.load_generation
-    }
-
-    pub fn bump_load_generation(&mut self) {
-        self.load_generation = self.load_generation.wrapping_add(1);
-    }
-
     pub fn insert_resident_chunk(&mut self, key: (i32, i32), chunk: Chunk) {
         self.chunks.insert(key, chunk);
-        self.bump_load_generation();
     }
 
     pub fn remove_resident_chunk(&mut self, key: &(i32, i32)) -> Option<Chunk> {
-        let removed = self.chunks.remove(key)?;
-        self.bump_load_generation();
-        Some(removed)
+        self.chunks.remove(key)
     }
 
     pub fn recenter(&mut self, center_cx: i32, center_cz: i32) {
@@ -294,7 +281,6 @@ impl PresentationChunks {
             block_entities,
         )?;
         self.chunks.insert((cx, cz), chunk);
-        self.bump_load_generation();
         Ok(())
     }
 

@@ -51,12 +51,9 @@ fn accessibility_button_rects() -> [MenuRect; 11] {
 }
 
 const UI_VERTEX_CAPACITY: usize = 65_536;
-const SETTINGS_FILE: &str = "settings.txt";
-const CONTROLS_FILE: &str = "controls.config";
 const SAVES_DIR: &str = "saves";
 const META_FILE: &str = "world.meta";
 const CURRENT_WORLD_FORMAT_VERSION: u32 = 3;
-const OPTIONS_ROW_TOPS: [f32; 6] = [0.58, 0.38, 0.18, -0.02, -0.22, -0.42];
 
 pub use settings::{ControlBindings, GameSettings, Language};
 use settings::{cycle_fps_cap, fps_cap_label, key_name, parse_bool, parse_key};
@@ -704,11 +701,6 @@ impl Menu {
             gpu_timestamps_supported: self.gpu_timestamps_supported,
             gpu_timestamps_inside_passes: self.gpu_timestamps_inside_passes,
         }
-    }
-
-    pub async fn new(window: Arc<Window>, settings: GameSettings) -> Self {
-        let gpu = crate::presentation::bootstrap::create_gpu_context(&window, &settings).await;
-        Self::from_gpu(window, settings, gpu).await
     }
 
     pub async fn from_gpu(
@@ -3066,12 +3058,6 @@ fn percent(value: f32) -> u32 {
     (value.clamp(0.0, 1.0) * 100.0).round() as u32
 }
 
-fn options_row_at(y: f32) -> Option<usize> {
-    OPTIONS_ROW_TOPS
-        .iter()
-        .position(|top| y <= *top && y >= *top - 0.13)
-}
-
 fn accessibility_label(
     catalog: &TranslationCatalog,
     row: crate::accessibility::AccessibilityRow,
@@ -3097,10 +3083,6 @@ fn control_label(catalog: &TranslationCatalog, action: ControlAction) -> &str {
         .find(|meta| meta.action == action)
         .expect("control action must be in CONTROL_BINDINGS");
     catalog.lookup(meta.label_key)
-}
-
-fn hit(x: f32, y: f32, x0: f32, x1: f32, y0: f32, y1: f32) -> bool {
-    MenuRect::new(x0, x1, y0, y1).contains(x, y)
 }
 
 fn draw_rect(vertices: &mut Vec<UiVertex>, x0: f32, x1: f32, y0: f32, y1: f32, color: [f32; 4]) {

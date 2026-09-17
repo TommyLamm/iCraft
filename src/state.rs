@@ -602,7 +602,6 @@ impl State {
         self.chunk_manager = PresentationChunks::new_in_dimension(render_distance, target);
         self.entity_manager = crate::entity::EntityManager::new();
         self.particles = crate::particles::ParticleSystem::new();
-        self.pending_chunk_payloads.clear();
         self.pending_block_changes.clear();
         self.client_chunk_revisions.clear();
         self.mining_target = None;
@@ -1288,7 +1287,6 @@ pub struct State {
     ui_line_vertices_scratch: Vec<UiVertex>,
     ui_textured_vertices_scratch: Vec<TexturedUiVertex>,
     debug_str_scratch: String,
-    hud_str_scratch: String,
     inventory_slots_scratch: Vec<(SlotType, f32, f32, f32, f32)>,
     pub active_station: Option<StationKind>,
     pub container_target: Option<(i32, i32, i32)>,
@@ -1298,19 +1296,15 @@ pub struct State {
     pub anvil: crate::enchantment::AnvilState,
     pub potion_effects: crate::brewing::EffectManager,
     pub recipe_book_open: bool,
-    pub recipe_book_search: String,
     pub weather: crate::weather::WeatherPresentation,
     pub settings: GameSettings,
     /// Presentation-only timer for the End/dragon completion flash.
     pub end_flash_time: f32,
     pub world_seed: u32,
-    pub world_spawn: (i32, i32, i32),
-    pub difficulty: Difficulty,
     /// One authoritative snapshot consumed by simulation and commands.
     pub world_rules: crate::game_rules::WorldRules,
     pub world_type: crate::game_rules::WorldType,
     pub generate_structures: bool,
-    pub bonus_chest: bool,
     pub cheats_enabled: bool,
     pub current_dimension: crate::dimension::Dimension,
     portal_contact_time: f32,
@@ -1349,10 +1343,6 @@ pub struct State {
     pub active_merchant_level: crate::village::trade::VillagerLevel,
     pub active_merchant_xp: u32,
     network_time: f64,
-    /// Client-only: chunk payloads that arrived from the host before the chunk
-    /// was streamed in. Applied when `update_chunks` loads the coordinate.
-    pending_chunk_payloads:
-        std::collections::HashMap<(i32, i32), (u64, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)>,
     /// Client-only coalesced mutations for chunks that are not streamed in yet.
     /// The latest authoritative value wins for each world-space block.
     pending_block_changes: std::collections::HashMap<
@@ -1516,11 +1506,9 @@ impl State {
             camera_pitch,
             world_time,
             world_seed,
-            world_spawn,
             world_rules,
             world_type,
             generate_structures,
-            bonus_chest,
             cheats_enabled,
             advancement_progress,
         } = crate::presentation::bootstrap::load_launch_world_state(
@@ -2487,7 +2475,6 @@ impl State {
             ui_line_vertices_scratch: Vec::with_capacity(4096),
             ui_textured_vertices_scratch: Vec::with_capacity(1024),
             debug_str_scratch: String::with_capacity(128),
-            hud_str_scratch: String::with_capacity(128),
             inventory_slots_scratch: Vec::with_capacity(64),
             active_station: None,
             container_target: None,
@@ -2497,16 +2484,12 @@ impl State {
             anvil: crate::enchantment::AnvilState::default(),
             potion_effects: crate::brewing::EffectManager::default(),
             recipe_book_open: false,
-            recipe_book_search: String::new(),
             weather,
-            difficulty: launch.difficulty,
             world_rules,
             world_type,
             generate_structures,
-            bonus_chest,
             cheats_enabled,
             world_seed,
-            world_spawn,
             settings,
             end_flash_time: 0.0,
             current_dimension,
@@ -2538,7 +2521,6 @@ impl State {
             active_merchant_level: crate::village::trade::VillagerLevel::Novice,
             active_merchant_xp: 0,
             network_time: 0.0,
-            pending_chunk_payloads: std::collections::HashMap::new(),
             pending_block_changes: std::collections::HashMap::new(),
             client_chunk_revisions: std::collections::HashMap::new(),
         };
@@ -2547,9 +2529,6 @@ impl State {
         // particular Spectator noclip/flight) before the first simulation tick.
         let initial_mode = state.game_mode;
         state.set_game_mode(initial_mode);
-
-        let initial_mesh_coords: Vec<_> = state.chunk_meshes.keys().copied().collect();
-        state.invalidate_chunk_meshes(initial_mesh_coords, DependencyReason::ChunkLoad);
 
         state
     }
@@ -3235,26 +3214,10 @@ impl State {
                     integrated_loads += 1;
                     integrated_load_bytes = integrated_load_bytes.saturating_add(load_bytes);
 
-                    let mut pending_base_revision = 0;
-                    if let Some((revision, blocks, block_states, fluid_levels, block_entities)) =
-                        self.pending_chunk_payloads.remove(&result.coord)
-                    {
-                        pending_base_revision = revision;
-                        if let Some(chunk) = self.chunk_manager.chunks.get_mut(&result.coord) {
-                            Self::restore_chunk_payload(
-                                chunk,
-                                &blocks,
-                                &block_states,
-                                &fluid_levels,
-                                &block_entities,
-                            );
-                        }
-                        self.invalidate_chunk_mesh(result.coord, DependencyReason::Network);
-                    }
                     if let Some(changes) = self.pending_block_changes.remove(&result.coord) {
                         self.client_chunk_revisions.insert(
                             (self.current_dimension, result.coord.0, result.coord.1),
-                            pending_base_revision,
+                            0,
                         );
                         let mut changes: Vec<_> = changes.into_iter().collect();
                         changes.sort_by_key(|(_, (revision, _, _, _))| *revision);
