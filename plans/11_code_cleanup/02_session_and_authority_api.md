@@ -1,6 +1,6 @@
 # 02 — Session 單一定義與 authority API 清理
 
-狀態：待執行。基線：`83e751d`，2026-09-17。
+狀態：已完成。基線：`83e751d`，2026-09-17。
 前置：無。
 
 ## 定位與判定
@@ -31,5 +31,23 @@
 
 ## 實作紀錄
 
-尚未執行；完成時記錄實際修改、驗證結果、刪碼量及文件更新。
+- 改動細項：
+  1. `PlayerSessionState` 去重：保留唯一實作於 `src/server_runtime/session_state.rs`，`new` 改為 `pub(super)`，刪除 `src/server_runtime.rs` 中 148 行重複的 struct 與 impl 定義；`server_runtime.rs` 移除 glob re-export 改為具體 `pub use session_state::PlayerSessionState;`。
+  2. 刪除 `src/authority/dispatch/mod.rs` 中無 caller 的 `pub(crate) fn preflight` 包裝函式。
+  3. 將 `session_revision` 自正式 `src/server_runtime/ingress.rs` API 刪除，搬遷至 `src/server_runtime/tests.rs` 作為 test-only helper (`impl ServerRuntime { fn session_revision(...) }`)，既有測試 assertions 完整保留。
+  4. 清理拆檔後未用 imports 與收窄可見性：
+     - `src/authority/dispatch/mod.rs`：移除未使用的 `combat_logic`、`fishing`、`ServerWorld`、`MiningProgressState`、`position_to_milli`、`BlockActionKind` 等 imports。
+     - `CombatProfile`、`combat_profile`、`look_from_angles` 移至唯一呼叫者 `src/authority/dispatch/combat.rs` 作為私有項目；`combat.rs` 改為直接調用 `contract::quantize_health` 並移除 `mod.rs` 的轉接函式。
+     - `block_action.rs`、`container.rs`、`combat.rs` 補上明確匯入。
+     - `src/network/transport.rs`：將 `ConnectionWriter::send_payload`、`ConnectionWriter::send` 與 `ConnectionReader::recv` 收窄為 `pub(super)`。
+  5. 修正 `session_state.rs` 中的 `player_dirty` 註解，明確註記為 `save_all_inner` 同步 `save_player` 成功後清除。
+  6. 更新 `ARCHITECTURE.md` 的 Code map / Ownership 定位說明，註明 `PlayerSessionState` 定義於 `src/server_runtime/session_state.rs` 並由 `ServerRuntime` re-export。
+- 實際驗證命令與結果：
+  - `cargo test --lib server_runtime::tests`：31 passed; 0 failed (exit 0)
+  - `cargo test --lib authority::`：66 passed; 0 failed (exit 0)
+  - `cargo check --all-targets --all-features`：exit 0
+- 淨刪碼／保留原因：
+  - 統計：9 files changed, 78 insertions(+), 240 deletions(-)，淨刪除 162 行程式碼。
+  - 保留：`current_revision` 與 `revision_for_dimension` 在權威與 world 間均活躍使用，不作無謂改名 churn；測試 helper `session_revision` 移至測試模組以維持既有測試驗證深度。
+
 

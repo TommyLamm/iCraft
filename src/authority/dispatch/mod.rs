@@ -1,17 +1,13 @@
 use super::AuthorityCore;
-use crate::authority::combat as combat_logic;
 use crate::authority::contract::{
-    self, position_to_milli, MiningProgressState, SessionContract, SessionGameplayState,
-    SessionInventorySlot, WorldMutation,
+    self, SessionContract, SessionGameplayState, SessionInventorySlot, WorldMutation,
 };
-use crate::authority::fishing;
 use crate::authority::transactions;
 use crate::dimension::Dimension;
 use crate::network::protocol::{
-    BlockActionKind, ContainerAction, GameplayOperation, GameplayOutcome, GameplayRequest,
-    GameplayResponse, ItemWire, PlayerId, RejectReason, SessionSlotWire,
+    ContainerAction, GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse,
+    ItemWire, PlayerId, RejectReason, SessionSlotWire,
 };
-use crate::server_world::ServerWorld;
 
 #[derive(Debug, Clone, Copy)]
 struct PreflightContext {
@@ -57,17 +53,6 @@ fn preflight_session(
     })
 }
 
-/// Single authority-side gate: bounds, session checks, then world validate_request.
-pub(crate) fn preflight(
-    session: &SessionContract,
-    request: &GameplayRequest,
-    world: &ServerWorld,
-    current_revision: u64,
-) -> Result<(), RejectReason> {
-    request.validate_bounds()?;
-    let ctx = preflight_session(session, request, current_revision)?;
-    world.validate_request(request, ctx.dimension, ctx.position, ctx.operator)
-}
 
 
 mod block_action;
@@ -402,62 +387,4 @@ pub(super) fn preserves_brew_locks(before: &SessionGameplayState, after: &Sessio
         !transactions::brew_locks_slot(before, index as u8)
             || before.inventory[index] == after.inventory[index]
     })
-}
-
-
-
-#[derive(Debug, Clone, Copy)]
-struct CombatProfile {
-    base_damage_milli: u32,
-    used_axe: bool,
-    knockback_milli: u32,
-    fire_ticks: u16,
-    looting_level: u8,
-}
-
-pub(super) fn combat_profile(gameplay: &SessionGameplayState) -> Result<CombatProfile, RejectReason> {
-    use crate::enchantment::{attack_damage_bonus, Enchantment};
-    use crate::inventory::ToolType;
-
-    let selected = usize::from(gameplay.selected_hotbar_slot);
-    if selected >= 9 {
-        return Err(RejectReason::InvalidState);
-    }
-    let stack = gameplay.inventory[selected]
-        .map(|slot| slot.item.to_stack().ok_or(RejectReason::InvalidState))
-        .transpose()?;
-    let tool = stack
-        .as_ref()
-        .and_then(|stack| stack.item.tool_properties());
-    let enchantments = stack
-        .as_ref()
-        .map(|stack| stack.enchantments)
-        .unwrap_or_default();
-    let base = tool.map(|tool| tool.damage).unwrap_or(1.0) + attack_damage_bonus(&enchantments);
-    Ok(CombatProfile {
-        base_damage_milli: (base.max(0.001) * 1_000.0).round().clamp(1.0, 100_000.0) as u32,
-        used_axe: tool.is_some_and(|tool| tool.tool_type == ToolType::Axe),
-        knockback_milli: 400 + u32::from(enchantments.level_of(Enchantment::Knockback(1))) * 500,
-        fire_ticks: u16::from(enchantments.level_of(Enchantment::FireAspect(1))) * 80,
-        looting_level: enchantments.level_of(Enchantment::Looting(1)).min(3),
-    })
-}
-
-pub(super) fn look_from_angles(yaw: f32, pitch: f32) -> Result<[i16; 3], RejectReason> {
-    if !yaw.is_finite() || !pitch.is_finite() || pitch.abs() > 90.0 {
-        return Err(RejectReason::InvalidState);
-    }
-    let yaw = yaw.to_radians();
-    let pitch = pitch.to_radians();
-    let horizontal = pitch.cos();
-    let look = [
-        (-yaw.sin() * horizontal * 1_000.0).round() as i16,
-        (-pitch.sin() * 1_000.0).round() as i16,
-        (yaw.cos() * horizontal * 1_000.0).round() as i16,
-    ];
-    Ok(look)
-}
-
-pub(super) fn quantize_health(health: f32) -> u32 {
-    contract::quantize_health(health)
 }

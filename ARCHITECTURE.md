@@ -141,7 +141,8 @@ pose clocks, and the save codec cannot enter the deterministic core:
 - `SessionContract` in `AuthorityCore` owns username, pose, dimension,
   game mode, the accepted client sequence, and the single 128-deep
   `GameplayResponse` cache.
-- `PlayerSessionState` in `ServerRuntime` is keyed by `PlayerId` and owns
+- `PlayerSessionState` (defined in `src/server_runtime/session_state.rs` and
+  re-exported by `ServerRuntime`) is keyed by `PlayerId` and owns
   interest, the save codec (`PlayerData`), Instant pose clocks
   (`last_pose_position` / teleport allowance), and projection scratch.
   It does not mirror id / username / live pose / dimension / game_mode.

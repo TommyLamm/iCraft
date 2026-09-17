@@ -5,6 +5,16 @@ use crate::network::protocol::Packet;
 use crate::network::protocol::{BlockActionKind, RejectReason};
 use crate::world::BlockType;
 
+impl ServerRuntime {
+    fn session_revision(&self, id: u64) -> Option<u64> {
+        let dimension = self
+            .authority
+            .session(id)
+            .and_then(|session| Dimension::from_wire(session.dimension))?;
+        Some(self.authority.revision_for_dimension(dimension))
+    }
+}
+
 fn temp_dir(label: &str) -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)

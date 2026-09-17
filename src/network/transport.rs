@@ -71,7 +71,7 @@ impl ConnectionReader {
         Ok(())
     }
 
-    pub async fn recv(&mut self) -> io::Result<Packet> {
+    pub(super) async fn recv(&mut self) -> io::Result<Packet> {
         if self.frame_len.is_none() {
             self.read_exact_into(LEN_HEADER).await?;
             let len = u32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]);
@@ -98,7 +98,7 @@ impl ConnectionWriter {
     /// Write a pre-encoded bincode payload with the standard 4-byte BE length
     /// prefix. Callers that already hold shared outbound bytes use this so the
     /// socket path never re-serializes.
-    pub async fn send_payload(&mut self, payload: &[u8]) -> io::Result<()> {
+    pub(super) async fn send_payload(&mut self, payload: &[u8]) -> io::Result<()> {
         if payload.len() > MAX_PACKET_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -111,7 +111,7 @@ impl ConnectionWriter {
         Ok(())
     }
 
-    pub async fn send(&mut self, packet: &Packet) -> io::Result<()> {
+    pub(super) async fn send(&mut self, packet: &Packet) -> io::Result<()> {
         let payload = packet
             .encode_payload()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;

@@ -1,4 +1,6 @@
 use super::*;
+use crate::authority::contract::MiningProgressState;
+use crate::network::protocol::BlockActionKind;
 
 impl AuthorityCore {
     pub(super) fn apply_block_action(

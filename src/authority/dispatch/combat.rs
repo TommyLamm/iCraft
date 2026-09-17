@@ -1,5 +1,6 @@
 use super::*;
 use crate::authority::combat as combat_logic;
+use crate::authority::contract::position_to_milli;
 
 impl AuthorityCore {
     pub(super) fn apply_authoritative_combat(
@@ -116,8 +117,8 @@ impl AuthorityCore {
         let mut target_snapshot = EntityCombatSnapshot {
             entity_id: entity.id,
             entity_type: entity.entity_type,
-            health_milli: quantize_health(entity.health),
-            max_health_milli: quantize_health(entity.max_health),
+            health_milli: contract::quantize_health(entity.health),
+            max_health_milli: contract::quantize_health(entity.max_health),
             velocity_milli: position_to_milli(entity.velocity.to_array())?,
             armor_points_milli: 0,
             toughness_milli: 0,
@@ -205,5 +206,57 @@ impl AuthorityCore {
                     .spawn_authority_experience(id, death.experience, position);
         }
     }
-
 }
+
+#[derive(Debug, Clone, Copy)]
+struct CombatProfile {
+    base_damage_milli: u32,
+    used_axe: bool,
+    knockback_milli: u32,
+    fire_ticks: u16,
+    looting_level: u8,
+}
+
+fn combat_profile(gameplay: &SessionGameplayState) -> Result<CombatProfile, RejectReason> {
+    use crate::enchantment::{attack_damage_bonus, Enchantment};
+    use crate::inventory::ToolType;
+
+    let selected = usize::from(gameplay.selected_hotbar_slot);
+    if selected >= 9 {
+        return Err(RejectReason::InvalidState);
+    }
+    let stack = gameplay.inventory[selected]
+        .map(|slot| slot.item.to_stack().ok_or(RejectReason::InvalidState))
+        .transpose()?;
+    let tool = stack
+        .as_ref()
+        .and_then(|stack| stack.item.tool_properties());
+    let enchantments = stack
+        .as_ref()
+        .map(|stack| stack.enchantments)
+        .unwrap_or_default();
+    let base = tool.map(|tool| tool.damage).unwrap_or(1.0) + attack_damage_bonus(&enchantments);
+    Ok(CombatProfile {
+        base_damage_milli: (base.max(0.001) * 1_000.0).round().clamp(1.0, 100_000.0) as u32,
+        used_axe: tool.is_some_and(|tool| tool.tool_type == ToolType::Axe),
+        knockback_milli: 400 + u32::from(enchantments.level_of(Enchantment::Knockback(1))) * 500,
+        fire_ticks: u16::from(enchantments.level_of(Enchantment::FireAspect(1))) * 80,
+        looting_level: enchantments.level_of(Enchantment::Looting(1)).min(3),
+    })
+}
+
+fn look_from_angles(yaw: f32, pitch: f32) -> Result<[i16; 3], RejectReason> {
+    if !yaw.is_finite() || !pitch.is_finite() || pitch.abs() > 90.0 {
+        return Err(RejectReason::InvalidState);
+    }
+    let yaw = yaw.to_radians();
+    let pitch = pitch.to_radians();
+    let horizontal = pitch.cos();
+    let look = [
+        (-yaw.sin() * horizontal * 1_000.0).round() as i16,
+        (-pitch.sin() * 1_000.0).round() as i16,
+        (yaw.cos() * horizontal * 1_000.0).round() as i16,
+    ];
+    Ok(look)
+}
+

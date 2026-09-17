@@ -759,12 +759,4 @@ impl ServerRuntime {
             .saturating_add(new_duplicates);
         self.observed_transport_duplicates = snapshot.duplicate_requests;
     }
-
-    pub(super) fn session_revision(&self, id: u64) -> Option<u64> {
-        let dimension = self
-            .authority
-            .session(id)
-            .and_then(|session| Dimension::from_wire(session.dimension))?;
-        Some(self.authority.revision_for_dimension(dimension))
-    }
 }

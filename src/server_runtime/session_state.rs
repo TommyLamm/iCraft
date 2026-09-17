@@ -27,12 +27,12 @@ pub struct PlayerSessionState {
     pub last_pose_position: [f32; 3],
     pub(super) teleport_allowance: Option<[f32; 3]>,
     /// Set when pose / inventory / dimension / gameplay change; cleared after
-    /// a successful player-file ack from the save worker.
+    /// synchronous `save_player` succeeds in `save_all_inner`.
     pub(super) player_dirty: bool,
 }
 
 impl PlayerSessionState {
-    fn new(
+    pub(super) fn new(
         storage: LocalSessionStorage,
         data: PlayerData,
         dimension: Dimension,
