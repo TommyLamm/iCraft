@@ -4,6 +4,7 @@ use super::*;
 use crate::network::protocol::Packet;
 use crate::network::protocol::{BlockActionKind, RejectReason};
 use crate::world::BlockType;
+use crate::world::Chunk;
 
 impl ServerRuntime {
     fn session_revision(&self, id: u64) -> Option<u64> {
@@ -1610,3 +1611,182 @@ fn save_all_persists_only_dirty_resident_columns() {
     );
     let _ = fs::remove_dir_all(world_dir);
 }
+
+#[test]
+fn runtime_instances_have_isolated_worldgen_channels() {
+    let mut props_a = ServerProperties::default();
+    props_a.world_dir = temp_dir("isolated_worker_a");
+    let (mut runtime_a, _input_a) = ServerRuntime::new_embedded(
+        props_a,
+        EmbeddedRuntimeOptions {
+            transport: TransportMode::Disabled,
+            local_session: None,
+        },
+    )
+    .unwrap();
+
+    let mut props_b = ServerProperties::default();
+    props_b.world_dir = temp_dir("isolated_worker_b");
+    let (mut runtime_b, _input_b) = ServerRuntime::new_embedded(
+        props_b,
+        EmbeddedRuntimeOptions {
+            transport: TransportMode::Disabled,
+            local_session: None,
+        },
+    )
+    .unwrap();
+
+    // Schedule worldgen demand only in runtime_a
+    runtime_a.authority.with_world(Dimension::Overworld, |w| {
+        w.ensure_chunk(12, 34);
+    });
+    runtime_a.schedule_pending_worldgen();
+
+    // Runtime B schedules and polls: should have nothing completed
+    runtime_b.schedule_pending_worldgen();
+    runtime_b.collect_worldgen_results();
+    assert!(
+        !runtime_b
+            .authority
+            .world_ref(Dimension::Overworld)
+            .unwrap()
+            .chunk_is_resident(12, 34),
+        "runtime_b must not have resident chunk from runtime_a"
+    );
+
+    // Wait briefly for Rayon to finish the job for runtime_a
+    let mut attempts = 0;
+    while attempts < 100 {
+        runtime_a.collect_worldgen_results();
+        runtime_a.authority.tick();
+        if runtime_a
+            .authority
+            .world_ref(Dimension::Overworld)
+            .unwrap()
+            .chunk_is_resident(12, 34)
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        attempts += 1;
+    }
+    assert!(
+        runtime_a
+            .authority
+            .world_ref(Dimension::Overworld)
+            .unwrap()
+            .chunk_is_resident(12, 34),
+        "runtime_a should have received and applied its chunk"
+    );
+
+    // Runtime B must still not have received anything
+    runtime_b.collect_worldgen_results();
+    runtime_b.authority.tick();
+    assert!(
+        !runtime_b
+            .authority
+            .world_ref(Dimension::Overworld)
+            .unwrap()
+            .chunk_is_resident(12, 34),
+        "runtime_b channels must remain isolated"
+    );
+
+    let world_dir_a = runtime_a.world_dir.clone();
+    let world_dir_b = runtime_b.world_dir.clone();
+    let _ = runtime_a.shutdown();
+    let _ = runtime_b.shutdown();
+    let _ = fs::remove_dir_all(world_dir_a);
+    let _ = fs::remove_dir_all(world_dir_b);
+}
+
+#[test]
+fn materialized_mutated_column_survives_runtime_worldgen_collection() {
+    let mut props = ServerProperties::default();
+    props.world_dir = temp_dir("materialized_survives_gen");
+    let (mut runtime, _input) = ServerRuntime::new_embedded(
+        props,
+        EmbeddedRuntimeOptions {
+            transport: TransportMode::Disabled,
+            local_session: None,
+        },
+    )
+    .unwrap();
+
+    // Materialize chunk (1, 1) and mutate a block to Obsidian
+    runtime.authority.with_world(Dimension::Overworld, |world| {
+        world.materialize_chunk(1, 1);
+        world.set_block(16 + 4, 80, 16 + 4, BlockType::Obsidian, 0).unwrap();
+    });
+
+    // Directly queue late worldgen result for (1, 1) containing empty/default chunk
+    runtime.authority.queue_worldgen_results(vec![
+        crate::authority::PendingWorldgenColumn {
+            dimension: Dimension::Overworld,
+            chunk_x: 1,
+            chunk_z: 1,
+            chunk: Chunk::empty_in_dimension(Dimension::Overworld, 1, 1),
+        },
+    ]);
+
+    // Tick authority so it processes queued worldgen results
+    runtime.authority.tick();
+
+    // Verify Obsidian is intact
+    let block = runtime
+        .authority
+        .world_ref(Dimension::Overworld)
+        .unwrap()
+        .get_block(16 + 4, 80, 16 + 4);
+    assert_eq!(block, BlockType::Obsidian, "late worldgen must not overwrite materialized mutated chunk");
+
+    let world_dir = runtime.world_dir.clone();
+    let _ = runtime.shutdown();
+    let _ = fs::remove_dir_all(world_dir);
+}
+
+#[test]
+fn failed_restore_column_rejects_runtime_worldgen_collection() {
+    let mut props = ServerProperties::default();
+    props.world_dir = temp_dir("failed_restore_rejects_gen");
+    let (mut runtime, _input) = ServerRuntime::new_embedded(
+        props,
+        EmbeddedRuntimeOptions {
+            transport: TransportMode::Disabled,
+            local_session: None,
+        },
+    )
+    .unwrap();
+
+    // Mark (2, 2) as failed restore
+    runtime.authority.with_world(Dimension::Overworld, |world| {
+        let mut corrupt_data = crate::save::ChunkSaveData::from_chunk(&Chunk::empty(2, 2)).unwrap();
+        corrupt_data.chunk_x = 2;
+        corrupt_data.chunk_z = 2;
+        corrupt_data.blocks.clear();
+        assert!(world.restore_saved_chunk(&corrupt_data).is_err());
+        assert!(world.failed_restore_chunks().contains(&(2, 2)));
+    });
+
+    // Queue worldgen result for (2, 2)
+    runtime.authority.queue_worldgen_results(vec![
+        crate::authority::PendingWorldgenColumn {
+            dimension: Dimension::Overworld,
+            chunk_x: 2,
+            chunk_z: 2,
+            chunk: Chunk::empty_in_dimension(Dimension::Overworld, 2, 2),
+        },
+    ]);
+
+    // Tick authority
+    runtime.authority.tick();
+
+    // Verify (2, 2) was rejected and is not resident
+    let world = runtime.authority.world_ref(Dimension::Overworld).unwrap();
+    assert!(!world.chunk_is_resident(2, 2));
+    assert!(world.failed_restore_chunks().contains(&(2, 2)));
+
+    let world_dir = runtime.world_dir.clone();
+    let _ = runtime.shutdown();
+    let _ = fs::remove_dir_all(world_dir);
+}
+

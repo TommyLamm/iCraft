@@ -4,8 +4,7 @@ use crate::dimension::{generate_chunk_with_options, Dimension, WorldGenerationOp
 use crate::game_rules::WorldType;
 use crate::world::Chunk;
 use std::collections::HashSet;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 
 const MAX_WORLDGEN_IN_FLIGHT: usize = 32;
 
@@ -17,8 +16,6 @@ pub(super) struct WorldgenJob {
     pub seed: u32,
     pub world_type: WorldType,
     pub generate_structures: bool,
-    pub generation: u64,
-    pub lifetime: u64,
 }
 
 pub(super) struct WorldgenResult {
@@ -26,17 +23,12 @@ pub(super) struct WorldgenResult {
     pub chunk_x: i32,
     pub chunk_z: i32,
     pub chunk: Chunk,
-    pub generation: u64,
-    pub lifetime: u64,
 }
 
 pub(super) struct WorldgenWorker {
     result_rx: Receiver<WorldgenResult>,
-    result_tx: Arc<mpsc::Sender<WorldgenResult>>,
+    result_tx: Sender<WorldgenResult>,
     in_flight: HashSet<(Dimension, i32, i32)>,
-    /// Bumped to invalidate in-flight results (dimension teardown / mode flip).
-    pub generation: u64,
-    pub lifetime: u64,
 }
 
 impl WorldgenWorker {
@@ -44,21 +36,9 @@ impl WorldgenWorker {
         let (result_tx, result_rx) = mpsc::channel();
         Self {
             result_rx,
-            result_tx: Arc::new(result_tx),
+            result_tx,
             in_flight: HashSet::new(),
-            generation: 1,
-            lifetime: 1,
         }
-    }
-
-    pub fn bump_generation(&mut self) {
-        self.generation = self.generation.wrapping_add(1).max(1);
-        self.in_flight.clear();
-    }
-
-    pub fn bump_lifetime(&mut self) {
-        self.lifetime = self.lifetime.wrapping_add(1).max(1);
-        self.in_flight.clear();
     }
 
     pub fn schedule(&mut self, job: WorldgenJob) -> bool {
@@ -67,7 +47,7 @@ impl WorldgenWorker {
             return false;
         }
         self.in_flight.insert(key);
-        let tx = Arc::clone(&self.result_tx);
+        let tx = self.result_tx.clone();
         rayon::spawn(move || {
             let options = WorldGenerationOptions {
                 world_type: job.world_type,
@@ -85,8 +65,6 @@ impl WorldgenWorker {
                 chunk_x: job.chunk_x,
                 chunk_z: job.chunk_z,
                 chunk,
-                generation: job.generation,
-                lifetime: job.lifetime,
             });
         });
         true
@@ -106,8 +84,46 @@ impl WorldgenWorker {
         }
         out
     }
+}
 
-    pub fn is_current(&self, result: &WorldgenResult) -> bool {
-        result.generation == self.generation && result.lifetime == self.lifetime
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_channels_are_isolated_between_instances() {
+        let mut worker_a = WorldgenWorker::new();
+        let mut worker_b = WorldgenWorker::new();
+
+        let job_a = WorldgenJob {
+            dimension: Dimension::Overworld,
+            chunk_x: 10,
+            chunk_z: 20,
+            seed: 42,
+            world_type: WorldType::Superflat,
+            generate_structures: false,
+        };
+        assert!(worker_a.schedule(job_a));
+
+        // Poll worker_b: worker_b should never receive worker_a's result.
+        for _ in 0..10 {
+            let completed_b = worker_b.poll_completed();
+            assert!(completed_b.is_empty(), "worker_b should not receive worker_a's result");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Wait for worker_a to receive its completed job.
+        let mut completed_a = Vec::new();
+        for _ in 0..100 {
+            completed_a.extend(worker_a.poll_completed());
+            if !completed_a.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(completed_a.len(), 1);
+        assert_eq!(completed_a[0].chunk_x, 10);
+        assert_eq!(completed_a[0].chunk_z, 20);
+        assert!(worker_b.poll_completed().is_empty());
     }
 }

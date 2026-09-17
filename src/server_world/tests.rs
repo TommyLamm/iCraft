@@ -5,6 +5,7 @@ use super::*;
 use crate::authority::{AuthorityConfig, AuthorityCore};
 use crate::entity::EntityType;
 use crate::network::protocol::{GameplayOutcome, GameplayRequest};
+use crate::world::Chunk;
 
 #[test]
 fn block_mutation_changes_real_chunk_and_revision() {
@@ -1150,3 +1151,58 @@ fn do_fire_tick_false_filters_fire_random_ticks() {
     }
     assert_eq!(world.get_block(4, 65, 4), BlockType::Fire);
 }
+
+#[test]
+fn materialized_mutated_column_rejects_late_worldgen_result() {
+    let mut world = ServerWorld::new_with_difficulty(
+        13,
+        Dimension::Overworld,
+        WorldType::Superflat,
+        false,
+        WorldRules::default(),
+        2,
+        Difficulty::default(),
+    );
+    world.materialize_chunk(5, 5);
+    let wx = 5 * 16 + 2;
+    let wy = 80;
+    let wz = 5 * 16 + 2;
+    world.set_block(wx, wy, wz, BlockType::DiamondOre, 0).unwrap();
+    assert_eq!(world.get_block(wx, wy, wz), BlockType::DiamondOre);
+
+    // Apply late generated empty chunk
+    let late_chunk = Chunk::empty_in_dimension(Dimension::Overworld, 5, 5);
+    world.apply_generated_chunk(5, 5, late_chunk);
+
+    // The block must remain DiamondOre and not be overwritten by late chunk
+    assert_eq!(world.get_block(wx, wy, wz), BlockType::DiamondOre);
+}
+
+#[test]
+fn failed_restore_column_rejects_worldgen_result() {
+    let mut world = ServerWorld::new_with_difficulty(
+        13,
+        Dimension::Overworld,
+        WorldType::Superflat,
+        false,
+        WorldRules::default(),
+        2,
+        Difficulty::default(),
+    );
+    let mut corrupt_data = crate::save::ChunkSaveData::from_chunk(&Chunk::empty(7, 7)).unwrap();
+    corrupt_data.chunk_x = 7;
+    corrupt_data.chunk_z = 7;
+    corrupt_data.blocks.clear();
+    assert!(world.restore_saved_chunk(&corrupt_data).is_err());
+    assert!(world.failed_restore_chunks().contains(&(7, 7)));
+    assert!(!world.chunk_is_resident(7, 7));
+
+    // Worldgen worker arrives with a newly generated chunk for the failed coordinate
+    let generated = Chunk::empty_in_dimension(Dimension::Overworld, 7, 7);
+    world.apply_generated_chunk(7, 7, generated);
+
+    // Must still reject and remain non-resident
+    assert!(!world.chunk_is_resident(7, 7));
+    assert!(world.failed_restore_chunks().contains(&(7, 7)));
+}
+

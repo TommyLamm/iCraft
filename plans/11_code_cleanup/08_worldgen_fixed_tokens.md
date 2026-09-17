@@ -1,6 +1,6 @@
 # 08 — Runtime worldgen 固定 token 與空 metrics
 
-狀態：待執行。基線：`83e751d`，2026-09-17。
+狀態：已完成。基線：`83e751d`，2026-09-17。
 前置：無；20 另處理真正的工作生命週期。
 
 ## 定位與判定
@@ -25,5 +25,16 @@ worldgen_worker.rs:49/50 將 generation／lifetime 初始化為 1；bump_generat
 
 ## 實作紀錄
 
-尚未執行；完成時記錄實際修改、驗證結果、刪碼量及文件更新。
+- 修改內容：
+  - `src/server_runtime/worldgen_worker.rs`：移除 `WorldgenJob` / `WorldgenResult` / `WorldgenWorker` 上的 `generation` 與 `lifetime` 欄位；移除無 caller 的 `bump_generation`、`bump_lifetime` 與恆為真的 `is_current`；將 `result_tx` 由 `Arc<mpsc::Sender<WorldgenResult>>` 簡化為 `Sender<WorldgenResult>`（利用其內建的 `Clone`）；新增 `worker_channels_are_isolated_between_instances` 單元測試。
+  - `src/server_runtime.rs`：自 `ServerMetrics` 移除固定為零的 `worldgen_stale_discarded`；在 `schedule_pending_worldgen` 移除 job 上的 generation/lifetime 賦值；在 `collect_worldgen_results` 移除無效的 `!is_current` 丟棄檢查與指標累計。
+  - `ARCHITECTURE.md`：修正 runtime worldgen 與 network/mesh 的描述，指出 runtime worldgen 不攜帶 generation/lifetime，其防止過期覆蓋的保護由 `apply_generated_chunk` 依欄位是否已常駐或 failed restore 處理；保留桌面 mesh 的 SectionIdentity generation/lifetime/revision 機制。
+  - `src/server_world/tests.rs`：新增 `materialized_mutated_column_rejects_late_worldgen_result` 與 `failed_restore_column_rejects_worldgen_result` 測試。
+  - `src/server_runtime/tests.rs`：新增 `runtime_instances_have_isolated_worldgen_channels`、`materialized_mutated_column_survives_runtime_worldgen_collection` 與 `failed_restore_column_rejects_runtime_worldgen_collection` 測試。
+- 實際命令與結果：
+  - `cargo test --lib server_runtime::`：exit 0，36 passed, 0 failed。
+  - `cargo test --lib server_world::`：exit 0，31 passed, 0 failed。
+  - `cargo check --all-targets --all-features`：exit 0。
+- 淨刪碼／保留原因：
+  - 產品代碼淨刪除 39 行死 token、無用方法與 Arc 包裝。桌面 mesh 相關的 generation、lifetime 與 SectionIdentity 因在渲染生命週期中具備動態演進與淘汰邏輯，完全保留不更動。新增共 6 個保護行為測試覆蓋隔離與覆寫保護。
 

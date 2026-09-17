@@ -111,7 +111,6 @@ pub struct ServerMetrics {
     pub evict_flush_failures: u64,
     pub tick_over_budget: u64,
     pub save_queue_full: u64,
-    pub worldgen_stale_discarded: u64,
     pub restore_chunk_skipped: u64,
 }
 
@@ -778,8 +777,6 @@ impl ServerRuntime {
     }
 
     fn schedule_pending_worldgen(&mut self) {
-        let generation = self.worldgen_worker.generation;
-        let lifetime = self.worldgen_worker.lifetime;
         let dimensions: Vec<_> = self.authority.dimensions().collect();
         let mut jobs = Vec::new();
         for dimension in dimensions {
@@ -794,8 +791,6 @@ impl ServerRuntime {
                     seed: world.seed,
                     world_type: world.world_type,
                     generate_structures: world.generate_structures,
-                    generation,
-                    lifetime,
                 });
             }
         }
@@ -808,11 +803,6 @@ impl ServerRuntime {
         let completed = self.worldgen_worker.poll_completed();
         let mut columns = Vec::new();
         for result in completed {
-            if !self.worldgen_worker.is_current(&result) {
-                self.metrics.worldgen_stale_discarded =
-                    self.metrics.worldgen_stale_discarded.saturating_add(1);
-                continue;
-            }
             columns.push(crate::authority::PendingWorldgenColumn {
                 dimension: result.dimension,
                 chunk_x: result.chunk_x,

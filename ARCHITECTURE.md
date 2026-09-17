@@ -324,7 +324,8 @@ which `ServerWorld` applies; durable writes stay on `ServerRuntime`.
 
 Worldgen for interest projection is off the tick thread: `ensure_chunk` in
 `WorldgenMode::Async` only registers demand; Rayon workers generate; results
-carry `(dimension, generation, lifetime)` and are discarded when stale.
+are applied by authority tick to resident columns, ignoring late results if the
+column is already resident or failed restore.
 Gameplay mutations that need a missing column (`set_block`, fluid use, spawn
 Y, spawn bootstrap) still call `materialize_chunk` synchronously.
 
@@ -483,8 +484,9 @@ variants shifts later discriminants; handshake is protocol v21.
 `NetworkServer` / `NetworkClient` run Tokio on a background thread with
 bounded/metered channels. Reliable gameplay/lifecycle output is never
 silently replaced; a client that cannot accept it is evicted. Rayon
-generate/mesh results carry dimension/generation/lifetime/revision and are
-discarded if stale.
+mesh results carry dimension/generation/lifetime/revision and are discarded if
+stale; runtime worldgen results carry generated columns and are ignored when the
+column is already resident or failed restore.
 
 ## Persistence
 
