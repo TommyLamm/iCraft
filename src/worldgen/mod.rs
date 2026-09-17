@@ -9,17 +9,12 @@ use crate::dimension::Dimension;
 
 /// Overworld sea level (matching vanilla 1.21.5).
 pub const SEA_LEVEL: i32 = 63;
-/// River bed depth relative to sea level.
-pub const RIVER_BED_DEPTH: i32 = 8;
-/// Beach transition band used by the surface overlay.
-pub const BEACH_BAND: f64 = 0.06;
 
 /// Shared world-generation context for a single world seed.
 /// All perlin fields derive from seed ^ salt so generation is deterministic
 /// and order-independent.
 #[derive(Clone, Debug)]
 pub struct WorldGenContext {
-    pub seed: u32,
     pub climate: climate::ClimateSystem,
     pub density: density::DensityField,
     pub carver: carver::CaveCarver,
@@ -29,7 +24,6 @@ pub struct WorldGenContext {
 impl WorldGenContext {
     pub fn new(seed: u32) -> Self {
         Self {
-            seed,
             climate: climate::ClimateSystem::new(seed),
             density: density::DensityField::new(seed),
             carver: carver::CaveCarver::new(seed),
@@ -47,13 +41,6 @@ impl WorldGenContext {
         self.density.surface_height(&self.climate, wx, wz)
     }
 
-    /// Returns the block type for a world position.
-    pub fn block_at(&self, wx: i32, wy: i32, wz: i32) -> Option<crate::world::BlockType> {
-        let surface_y = self.surface_height_at(wx, wz);
-        let biome = self.biome_at(wx, wz);
-        self.block_at_sampled(wx, wy, wz, surface_y, biome)
-    }
-
     /// Column fill after `surface_height_at` / `biome_at` have already been sampled.
     pub fn block_at_sampled(
         &self,
@@ -65,16 +52,6 @@ impl WorldGenContext {
     ) -> Option<crate::world::BlockType> {
         surface::block_for_column(self, wx, wy, wz, surface_y, biome)
     }
-
-    /// Whether this context is valid for the given dimension.
-    pub fn supports_dimension(&self, dimension: Dimension) -> bool {
-        matches!(dimension, Dimension::Overworld)
-    }
-}
-
-/// Computes a deterministic PRNG seed from a world seed and a salt.
-pub fn salted_seed(world_seed: u32, salt: u32) -> u32 {
-    world_seed ^ salt
 }
 
 /// Deterministic hash for feature placement that does not depend on
@@ -114,27 +91,18 @@ mod tests {
 
     #[test]
     fn chunk_generation_is_byte_identical_across_threads() {
-        use std::sync::Arc;
-        let ctx = Arc::new(WorldGenContext::new(9999));
-        let handle1 = {
-            let ctx = Arc::clone(&ctx);
-            std::thread::spawn(move || {
-                (0..16)
-                    .map(|x| (0..16).map(|z| ctx.block_at(x, 64, z)).collect::<Vec<_>>())
-                    .collect::<Vec<_>>()
-            })
-        };
-        let handle2 = {
-            let ctx = Arc::clone(&ctx);
-            std::thread::spawn(move || {
-                (0..16)
-                    .map(|x| (0..16).map(|z| ctx.block_at(x, 64, z)).collect::<Vec<_>>())
-                    .collect::<Vec<_>>()
-            })
-        };
+        let handle1 = std::thread::spawn(|| {
+            let chunk = crate::dimension::generate_chunk(Dimension::Overworld, 0, 0, 9999);
+            bincode::serialize(&crate::save::ChunkSaveData::from_chunk(&chunk).unwrap()).unwrap()
+        });
+        let handle2 = std::thread::spawn(|| {
+            let chunk = crate::dimension::generate_chunk(Dimension::Overworld, 0, 0, 9999);
+            bincode::serialize(&crate::save::ChunkSaveData::from_chunk(&chunk).unwrap()).unwrap()
+        });
 
-        let res1 = handle1.join().unwrap();
-        let res2 = handle2.join().unwrap();
-        assert_eq!(res1, res2);
+        let bytes1 = handle1.join().unwrap();
+        let bytes2 = handle2.join().unwrap();
+        assert!(!bytes1.is_empty());
+        assert_eq!(bytes1, bytes2);
     }
 }

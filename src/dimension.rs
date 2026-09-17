@@ -9,7 +9,6 @@ use noise::{NoiseFn, Perlin};
 pub type BlockPos = (i32, i32, i32);
 
 const LAVA_LEVEL: usize = 31;
-const NETHER_COLUMN_HEIGHT: usize = WorldHeight::NETHER.height() as usize;
 
 /// Block-center X/Z and entity Y for the eight main-island healing crystals.
 pub const END_CRYSTAL_TOWERS: [(i32, i32, i32); 8] = [
@@ -938,7 +937,7 @@ mod tests {
             for z in 0..CHUNK_DEPTH {
                 assert_eq!(chunk.get_block_local(x, 0, z), BlockType::Bedrock);
                 assert_eq!(
-                    chunk.get_block_local(x, (NETHER_COLUMN_HEIGHT - 1) as i32, z),
+                    chunk.get_block_local(x, Dimension::Nether.height().max_y_exclusive() - 1, z),
                     BlockType::Bedrock
                 );
             }
