@@ -35,6 +35,9 @@ the desktop crate can re-export them. `loot`, `voxel_shape`, `worldgen`,
 and prototypes (`vehicle`, `rail`, `navigation`, `container_sessions`,
 POI/raid managers, and presentation `FishingManager`) have been deleted; live
 container viewers and fishing hooks live on `ServerWorld` / session overlay.
+Unused villager trade offer generation algorithms and level thresholds have
+been removed; `TradeOffer` (costs and stock state) and `VillagerLevel` remain
+authoritative data contracts.
 `recipes` stays `pub` because desktop
 `State` and `ServerWorld` expose `RecipeManager`.
 Desktop `--microbench` is `src/main.rs`'s `mod microbench` behind feature

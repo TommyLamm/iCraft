@@ -42,7 +42,7 @@
 | 10 | [Embedded 本地視距同步到 runtime](10_embedded_view_distance.md) | P1／契約前置 | 02 | 待執行 |
 | 11 | [刪除桌面本地 worldgen 與載入排程](11_remove_desktop_worldgen.md) | P1／活躍流程 | 05、10 | 待執行 |
 | 12 | [Section mesh invalidation 單一來源](12_section_invalidation.md) | P1／去重與行為修正 | 05、21 | 待執行 |
-| 13 | [刪未接線村民交易生成與升級算法](13_unused_trade_generation.md) | P0／死算法 | 建議01 | 待執行 |
+| 13 | [刪未接線村民交易生成與升級算法](13_unused_trade_generation.md) | P0／死算法 | 建議01 | 已完成 |
 | 14 | [Surface API 簡化與每欄取樣一次](14_surface_api_and_sampling.md) | P1／活躍流程 | 建議03 | 待執行 |
 | 15 | [資源解碼只做一次，移出 shared 的桌面 codec](15_resource_decode_boundary.md) | P1／解碼去重 | 無 | 待執行 |
 | 16 | [音效快取共用 bytes，移除播放時整份複製](16_audio_shared_bytes.md) | P1／資料共用 | 15 | 待執行 |

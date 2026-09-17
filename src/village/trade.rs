@@ -1,5 +1,4 @@
-use crate::inventory::{Item, ItemStack};
-use crate::village::poi::VillagerProfession;
+use crate::inventory::ItemStack;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
@@ -22,26 +21,6 @@ impl VillagerLevel {
             _ => Self::Novice,
         }
     }
-
-    pub fn xp_threshold(self) -> u32 {
-        match self {
-            Self::Novice => 0,
-            Self::Apprentice => 10,
-            Self::Journeyman => 70,
-            Self::Expert => 150,
-            Self::Master => 250,
-        }
-    }
-
-    pub fn next_level(self) -> Option<Self> {
-        match self {
-            Self::Novice => Some(Self::Apprentice),
-            Self::Apprentice => Some(Self::Journeyman),
-            Self::Journeyman => Some(Self::Expert),
-            Self::Expert => Some(Self::Master),
-            Self::Master => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -56,6 +35,7 @@ pub struct TradeOffer {
 }
 
 impl TradeOffer {
+    #[cfg(test)]
     pub fn new(
         buy_a: ItemStack,
         buy_b: Option<ItemStack>,
@@ -88,271 +68,10 @@ impl TradeOffer {
     }
 }
 
-pub fn generate_offers_for_level(
-    profession: VillagerProfession,
-    level: VillagerLevel,
-) -> Vec<TradeOffer> {
-    let mut offers = Vec::new();
-
-    match profession {
-        VillagerProfession::Farmer => match level {
-            VillagerLevel::Novice => {
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::Wheat, 20),
-                    None,
-                    ItemStack::new(Item::Emerald, 1),
-                    16,
-                    2,
-                ));
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::Emerald, 1),
-                    None,
-                    ItemStack::new(Item::Bread, 6),
-                    16,
-                    1,
-                ));
-            }
-            VillagerLevel::Apprentice => {
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::Carrot, 15),
-                    None,
-                    ItemStack::new(Item::Emerald, 1),
-                    16,
-                    5,
-                ));
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::Potato, 15),
-                    None,
-                    ItemStack::new(Item::Emerald, 1),
-                    16,
-                    5,
-                ));
-            }
-            VillagerLevel::Journeyman => {
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::Emerald, 1),
-                    None,
-                    ItemStack::new(Item::Pumpkin, 4),
-                    12,
-                    10,
-                ));
-            }
-            VillagerLevel::Expert => {
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::Emerald, 3),
-                    None,
-                    ItemStack::new(Item::GoldenApple, 1),
-                    12,
-                    15,
-                ));
-            }
-            VillagerLevel::Master => {
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::Emerald, 4),
-                    None,
-                    ItemStack::new(Item::GoldenCarrot, 3),
-                    12,
-                    20,
-                ));
-            }
-        },
-        VillagerProfession::Librarian => match level {
-            VillagerLevel::Novice => {
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::Paper, 24),
-                    None,
-                    ItemStack::new(Item::Emerald, 1),
-                    16,
-                    2,
-                ));
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::Emerald, 5),
-                    Some(ItemStack::new(Item::Book, 1)),
-                    ItemStack::new(Item::Book, 1),
-                    12,
-                    1,
-                ));
-            }
-            VillagerLevel::Apprentice => {
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::Bookshelf, 4),
-                    None,
-                    ItemStack::new(Item::Emerald, 1),
-                    12,
-                    5,
-                ));
-            }
-            VillagerLevel::Journeyman => {
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::Emerald, 1),
-                    None,
-                    ItemStack::new(Item::Glass, 4),
-                    12,
-                    10,
-                ));
-            }
-            VillagerLevel::Expert => {
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::Emerald, 5),
-                    None,
-                    ItemStack::new(Item::Compass, 1),
-                    12,
-                    15,
-                ));
-            }
-            VillagerLevel::Master => {
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::Emerald, 20),
-                    None,
-                    ItemStack::new(Item::Paper, 1),
-                    12,
-                    20,
-                ));
-            }
-        },
-        VillagerProfession::Armorer => match level {
-            VillagerLevel::Novice => {
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::Coal, 15),
-                    None,
-                    ItemStack::new(Item::Emerald, 1),
-                    16,
-                    2,
-                ));
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::Emerald, 5),
-                    None,
-                    ItemStack::new(Item::IronHelmet, 1),
-                    12,
-                    1,
-                ));
-            }
-            VillagerLevel::Apprentice => {
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::IronIngot, 4),
-                    None,
-                    ItemStack::new(Item::Emerald, 1),
-                    12,
-                    5,
-                ));
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::Emerald, 9),
-                    None,
-                    ItemStack::new(Item::IronChestplate, 1),
-                    12,
-                    5,
-                ));
-            }
-            VillagerLevel::Journeyman => {
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::Emerald, 7),
-                    None,
-                    ItemStack::new(Item::IronLeggings, 1),
-                    12,
-                    10,
-                ));
-            }
-            VillagerLevel::Expert => {
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::Diamond, 1),
-                    None,
-                    ItemStack::new(Item::Emerald, 1),
-                    12,
-                    15,
-                ));
-            }
-            VillagerLevel::Master => {
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::Emerald, 8),
-                    Some(ItemStack::new(Item::Diamond, 1)),
-                    ItemStack::new(Item::DiamondChestplate, 1),
-                    12,
-                    20,
-                ));
-            }
-        },
-        VillagerProfession::Cleric => match level {
-            VillagerLevel::Novice => {
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::RottenFlesh, 32),
-                    None,
-                    ItemStack::new(Item::Emerald, 1),
-                    16,
-                    2,
-                ));
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::Emerald, 1),
-                    None,
-                    ItemStack::new(Item::Redstone, 2),
-                    12,
-                    1,
-                ));
-            }
-            VillagerLevel::Apprentice => {
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::GoldIngot, 3),
-                    None,
-                    ItemStack::new(Item::Emerald, 1),
-                    12,
-                    5,
-                ));
-            }
-            VillagerLevel::Journeyman => {
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::Emerald, 4),
-                    None,
-                    ItemStack::new(Item::RedstoneDust, 1),
-                    12,
-                    10,
-                ));
-            }
-            VillagerLevel::Expert => {
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::Emerald, 3),
-                    None,
-                    ItemStack::new(Item::GlassBottle, 1),
-                    12,
-                    15,
-                ));
-            }
-            VillagerLevel::Master => {
-                offers.push(TradeOffer::new(
-                    ItemStack::new(Item::Emerald, 3),
-                    None,
-                    ItemStack::new(Item::NetherWart, 1),
-                    12,
-                    20,
-                ));
-            }
-        },
-        VillagerProfession::Unemployed => {}
-    }
-
-    offers
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_villager_level_thresholds() {
-        assert_eq!(VillagerLevel::Novice.xp_threshold(), 0);
-        assert_eq!(VillagerLevel::Apprentice.xp_threshold(), 10);
-        assert_eq!(VillagerLevel::Master.xp_threshold(), 250);
-        assert_eq!(
-            VillagerLevel::Novice.next_level(),
-            Some(VillagerLevel::Apprentice)
-        );
-    }
-
-    #[test]
-    fn test_offer_generation() {
-        let offers = generate_offers_for_level(VillagerProfession::Farmer, VillagerLevel::Novice);
-        assert!(!offers.is_empty());
-        assert_eq!(offers[0].buy_a.item, Item::Wheat);
-        assert_eq!(offers[0].sell.item, Item::Emerald);
-    }
+    use crate::inventory::Item;
 
     #[test]
     fn test_trade_discount() {
@@ -367,3 +86,4 @@ mod tests {
         assert_eq!(cost, 7);
     }
 }
+
