@@ -281,37 +281,6 @@ pub fn block_debris_uv(block: BlockType, rng: &mut u32) -> [f32; 4] {
     [u0, v0, u1, v1]
 }
 
-/// Spawn `count` debris particles for a freshly-broken block at `pos`. The
-/// particles inherit a small random sub-rect of the block's top-face texture.
-pub fn spawn_block_debris(
-    system: &mut ParticleSystem,
-    pos: Vec3,
-    block: BlockType,
-    count: usize,
-    rng: &mut u32,
-) {
-    for _ in 0..count {
-        let theta = (*rng as f32 / 32768.0) * std::f32::consts::TAU;
-        *rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
-        let phi = (*rng as f32 / 32768.0) * std::f32::consts::FRAC_PI_2;
-        *rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
-        let speed = 2.0 + (*rng as f32 / 32768.0) * 2.5;
-        *rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
-        let vx = theta.cos() * phi.cos() * speed;
-        let vz = theta.sin() * phi.cos() * speed;
-        let vy = 2.0 + phi.sin() * speed;
-        let tex = block_debris_uv(block, rng);
-        system.spawn(
-            pos,
-            Vec3::new(vx, vy, vz),
-            0.08,
-            0.8 + (*rng as f32 / 32768.0) * 0.6,
-            tex,
-            9.81,
-        );
-        *rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
-    }
-}
 
 /// Spawn a few footstep dust particles at the player's feet, using the texture
 /// of the block directly below.

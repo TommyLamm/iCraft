@@ -6211,33 +6211,6 @@ fn add_char_lines_with_source(
     }
 }
 
-#[allow(dead_code)] // Wired when glyph atlas bind group replaces line-list HUD text.
-fn add_char_textured_with_source(
-    font_source: &crate::resources::FontSource,
-    c: char,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    color: [f32; 4],
-    vertices: &mut Vec<TexturedUiVertex>,
-) {
-    let _ = font_source;
-    crate::glyph_atlas::push_glyph_quad(
-        vertices,
-        x,
-        y,
-        x + w,
-        y + h,
-        c,
-        color,
-        |position, tex_coords, color| TexturedUiVertex {
-            position,
-            tex_coords,
-            color,
-        },
-    );
-}
 
 fn add_string_lines_with_source(
     font_source: &crate::resources::FontSource,
@@ -6266,33 +6239,6 @@ fn add_string_lines_with_source(
     }
 }
 
-#[allow(dead_code)] // Wired when glyph atlas bind group replaces line-list HUD text.
-fn add_string_textured_with_source(
-    font_source: &crate::resources::FontSource,
-    s: &str,
-    start_x: f32,
-    y: f32,
-    char_w: f32,
-    char_h: f32,
-    spacing: f32,
-    color: [f32; 4],
-    vertices: &mut Vec<TexturedUiVertex>,
-) {
-    let mut current_x = start_x;
-    for c in s.chars() {
-        add_char_textured_with_source(
-            font_source,
-            c.to_ascii_uppercase(),
-            current_x,
-            y,
-            char_w,
-            char_h,
-            color,
-            vertices,
-        );
-        current_x += char_w + spacing;
-    }
-}
 
 /// Built-in compatibility helper used by unit tests and non-State callers.
 /// State's render paths install their selected `FontSource` through the local

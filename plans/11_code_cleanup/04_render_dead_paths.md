@@ -1,6 +1,6 @@
 # 04 — 字體、手部及小型渲染死路徑
 
-狀態：待執行。基線：`83e751d`，2026-09-17。
+狀態：已完成。基線：`83e751d`，2026-09-17。
 前置：無；16 負責音效 bytes，15 負責資源 codec。
 
 ## 定位與判定
@@ -27,5 +27,31 @@
 
 ## 實作紀錄
 
-尚未執行；完成時記錄實際修改、驗證結果、刪碼量及文件更新。
+- 實作改動：
+  1. **字體死鏈清理**：
+     - 在 `src/state.rs` 刪除無 caller 的 `add_char_textured_with_source` 與 `add_string_textured_with_source`。
+     - 在 `src/menu/mod.rs` 刪除無 caller 的 `draw_text_with_font_textured`。
+     - 在 `src/glyph_atlas.rs` 刪除 `push_glyph_quad`, `uv_for`, `build_rgba`, `CELL_W`, `CELL_H`, `COLS`, `ROWS`, `ATLAS_W`, `ATLAS_H`, `ATLAS_CHARS`, `char_index` 及未使用的 `FontSource` import；保留核心 `glyph` 點陣資料函數並補齊其單元測試。
+     - 完整保留 line-font 與 solid-glyph 有效路徑（`add_char_lines_with_source`, `add_string_lines_with_source`, `draw_text_with_font`, `glyph_override`）。
+  2. **手部渲染清理**：
+     - 將手部幾何測試（`hand_mesh_contains_right_arm_and_held_block`, `hand_mesh_omits_item_when_slot_is_empty`, `hand_mesh_renders_flat_item_as_sprite_quad`, `minecraft_tools_render_as_closed_extruded_models`, `tool_models_have_minecrafts_one_pixel_depth`）改調 `build_first_person_hand_base_mesh`。
+     - 動畫測試 `tools_follow_the_hand_animation` 改用正式 `animation_for_hand_mesh` 與 `matrix()` 驗證必要頂點採樣點變換。
+     - 完整保留 `minecraft_tools_render_as_closed_extruded_models`、`tool_models_have_minecrafts_one_pixel_depth`、`tools_follow_the_hand_animation` 的完整斷言。
+     - 刪除舊 CPU animation 封裝：`apply_hand_animation`, `build_first_person_hand_mesh_into`, `build_first_person_hand_mesh`。
+  3. **粒子清理**：
+     - 刪除 `src/particles.rs` 中無 caller 的 `spawn_block_debris` helper；保留有 caller 的 `block_debris_uv` 與 `spawn_footstep_dust`。
+  4. **貼圖清理**：
+     - 刪除 `src/texture.rs` 中程序化舊繪製 `draw_redstone_torch`。
+     - 更新 `redstone_torch_sprite_has_transparent_background_and_thin_artwork` 測試改直接驗證正式資源 atlas 中的紅石火把 tile（`PACK_TILES` 中 `(col: 6, row: 2)`）。
+  5. **過期 allow(dead_code) 清理**：
+     - 移除 `src/entity.rs` 中 `get_entities_by_type` 上的過期 `#[allow(dead_code)]`（已有 boss 模組正式 caller）。
+     - 保留因 GPU lifetime 持有資源的抑制（如 `TextureAtlas.texture`）。
+- 驗證命令與結果：
+  - `cargo test --bin icraft hand_renderer::`：16 passed; 0 failed
+  - `cargo test --bin icraft menu::`：36 passed; 0 failed
+  - `cargo test --bin icraft texture::`：8 passed; 0 failed
+  - `cargo test --bin icraft glyph_atlas::`：1 passed; 0 failed
+  - `cargo check --all-targets --all-features`：exit 0
+- 淨刪碼統計：7 files changed, 72 insertions(+), 306 deletions(-)，淨刪 234 行。
+
 

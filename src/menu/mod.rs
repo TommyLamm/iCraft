@@ -3326,39 +3326,6 @@ fn draw_text_with_font(
     }
 }
 
-fn draw_text_with_font_textured(
-    vertices: &mut Vec<crate::state::TexturedUiVertex>,
-    text: &str,
-    x: f32,
-    y: f32,
-    pixel: f32,
-    aspect: f32,
-    color: [f32; 4],
-    font: &FontSource,
-) {
-    let _ = font;
-    let pixel_x = pixel * aspect;
-    let char_w = pixel_x * 5.0;
-    let char_h = pixel * 7.0;
-    let mut cursor = x;
-    for ch in text.to_ascii_uppercase().chars() {
-        crate::glyph_atlas::push_glyph_quad(
-            vertices,
-            cursor,
-            y,
-            cursor + char_w * 0.88,
-            y + char_h * 0.88,
-            ch,
-            color,
-            |position, tex_coords, color| crate::state::TexturedUiVertex {
-                position,
-                tex_coords,
-                color,
-            },
-        );
-        cursor += pixel_x * 6.0;
-    }
-}
 
 
 const PANORAMA_SHADER: &str = r#"

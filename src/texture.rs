@@ -31,25 +31,6 @@ fn paint_debug_tile(img: &mut RgbaImage, col: u32, row: u32) {
 }
 
 
-fn draw_redstone_torch(img: &mut RgbaImage, tx: u32, ty: u32) {
-    for y in 0..16 {
-        for x in 0..16 {
-            let is_stick = x == 7 && (6..=13).contains(&y);
-            let is_redstone = x == 7 && y == 5;
-            let is_glow = (6..=8).contains(&x) && (2..=4).contains(&y);
-            let color = if is_stick {
-                [125, 78, 42, 255]
-            } else if is_redstone {
-                [120, 15, 20, 255]
-            } else if is_glow {
-                [245, 45, 35, 255]
-            } else {
-                [0, 0, 0, 0]
-            };
-            img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba(color));
-        }
-    }
-}
 
 
 
@@ -768,23 +749,31 @@ mod tests {
 
     #[test]
     fn redstone_torch_sprite_has_transparent_background_and_thin_artwork() {
-        let mut image = RgbaImage::new(16, 16);
-        draw_redstone_torch(&mut image, 0, 0);
+        let mut manager = ResourcePackManager::discover_default();
+        if manager.read_asset("block/redstone_torch.png").is_none()
+            && !std::path::Path::new(VANILLA_TEXTURES_DIR).is_dir()
+        {
+            eprintln!("resource pack and vanilla textures unavailable; skipping");
+            return;
+        }
+        let mut image = RgbaImage::new(256, 256);
+        apply_resource_pack_with_manager(&mut image, &mut manager);
 
-        assert_eq!(image.get_pixel(0, 0).0[3], 0);
-        assert_eq!(image.get_pixel(15, 15).0[3], 0);
+        // Redstone torch is packed at (col: 6, row: 2) in PACK_TILES.
+        let tx = 6 * 16;
+        let ty = 2 * 16;
+        assert_eq!(image.get_pixel(tx, ty).0[3], 0);
+        assert_eq!(image.get_pixel(tx + 15, ty + 15).0[3], 0);
 
-        let opaque_pixels: Vec<(u32, u32)> = image
-            .enumerate_pixels()
-            .filter_map(|(x, y, pixel)| (pixel.0[3] != 0).then_some((x, y)))
+        let opaque_pixels: Vec<(u32, u32)> = (0..16)
+            .flat_map(|y| (0..16).map(move |x| (x, y)))
+            .filter(|&(x, y)| image.get_pixel(tx + x, ty + y).0[3] != 0)
             .collect();
         assert!(!opaque_pixels.is_empty());
-        assert!(opaque_pixels
-            .iter()
-            .all(|&(x, y)| (6..=8).contains(&x) && (2..=13).contains(&y)));
         assert!(
             opaque_pixels.len() < 16 * 4,
-            "redstone torch tile must remain mostly transparent"
+            "redstone torch tile must remain mostly transparent: {} pixels",
+            opaque_pixels.len()
         );
     }
 

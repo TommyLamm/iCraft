@@ -284,14 +284,7 @@ fn minecraft_tool_transform() -> Mat4 {
         * Mat4::from_scale(Vec3::splat(TOOL_MODEL_SCALE))
 }
 
-/// Applies a per-frame animation transform to a cached base mesh.
-pub fn apply_hand_animation(vertices: &mut [Vertex], animation: HandAnimationUniform) {
-    let matrix = animation.matrix();
-    for vertex in vertices {
-        let p = matrix.transform_point3(Vec3::from_array(vertex.position));
-        vertex.position = p.to_array();
-    }
-}
+
 
 /// Returns an atlas tile for every face of the held item. Block items preserve
 /// their world top/side/bottom mapping instead of repeating the top texture.
@@ -308,43 +301,6 @@ fn held_item_face_tiles(item: Item) -> Option<[(u32, u32); 6]> {
     }
 }
 
-/// Builds the first-person right-hand mesh in view space.
-///
-/// The hand is positioned on the right side of the screen, angled slightly
-/// inward and upward like Minecraft. The view space convention is the same
-/// as the main renderer: +X right, +Y up, +Z forward (left-handed).
-pub fn build_first_person_hand_mesh_into(
-    inventory: &Inventory,
-    walk_swing: f32,
-    attack_swing: f32,
-    vertices: &mut Vec<Vertex>,
-    indices: &mut Vec<u32>,
-) {
-    let key = hand_mesh_key(inventory);
-    build_first_person_hand_base_mesh(key, vertices, indices);
-    apply_hand_animation(
-        vertices,
-        animation_for_hand_mesh(key, walk_swing, attack_swing),
-    );
-}
-
-#[cfg(test)]
-pub fn build_first_person_hand_mesh(
-    inventory: &Inventory,
-    walk_swing: f32,
-    attack_swing: f32,
-) -> (Vec<Vertex>, Vec<u32>) {
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
-    build_first_person_hand_mesh_into(
-        inventory,
-        walk_swing,
-        attack_swing,
-        &mut vertices,
-        &mut indices,
-    );
-    (vertices, indices)
-}
 
 #[derive(Clone, Copy)]
 enum ToolOutlineEdge {
@@ -789,11 +745,18 @@ mod tests {
         }
     }
 
+    fn build_test_hand_base_mesh(inventory: &Inventory) -> (Vec<Vertex>, Vec<u32>) {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        build_first_person_hand_base_mesh(hand_mesh_key(inventory), &mut vertices, &mut indices);
+        (vertices, indices)
+    }
+
     #[test]
     fn hand_mesh_contains_right_arm_and_held_block() {
         let mut inv = Inventory::new();
         inv.hotbar[0] = Some(ItemStack::new(crate::inventory::Item::Stone, 1));
-        let (vertices, indices) = build_first_person_hand_mesh(&inv, 0.0, 0.0);
+        let (vertices, indices) = build_test_hand_base_mesh(&inv);
         assert!(!vertices.is_empty());
         assert!(!indices.is_empty());
         assert!(indices.len() % 3 == 0);
@@ -805,7 +768,7 @@ mod tests {
     #[test]
     fn hand_mesh_omits_item_when_slot_is_empty() {
         let inv = Inventory::new();
-        let (vertices, indices) = build_first_person_hand_mesh(&inv, 0.0, 0.0);
+        let (vertices, indices) = build_test_hand_base_mesh(&inv);
         assert!(!vertices.is_empty());
         assert!(!indices.is_empty());
         assert!(indices.len() % 3 == 0);
@@ -816,11 +779,11 @@ mod tests {
         // The arm alone is a 24-vertex/36-index cuboid; a flat held item adds
         // one double-sided quad (4 vertices/12 indices) instead of a cube.
         let empty = Inventory::new();
-        let (empty_vertices, empty_indices) = build_first_person_hand_mesh(&empty, 0.0, 0.0);
+        let (empty_vertices, empty_indices) = build_test_hand_base_mesh(&empty);
 
         let mut inv = Inventory::new();
         inv.hotbar[0] = Some(ItemStack::new(crate::inventory::Item::Seeds, 1));
-        let (vertices, indices) = build_first_person_hand_mesh(&inv, 0.0, 0.0);
+        let (vertices, indices) = build_test_hand_base_mesh(&inv);
         assert_eq!(vertices.len(), empty_vertices.len() + 4);
         assert_eq!(indices.len(), empty_indices.len() + 12);
         assert!(vertices
@@ -830,14 +793,14 @@ mod tests {
         // A cross-model flower block uses the same flat sprite path.
         let mut flower_inv = Inventory::new();
         flower_inv.hotbar[0] = Some(ItemStack::new(crate::inventory::Item::Dandelion, 1));
-        let (flower_vertices, flower_indices) = build_first_person_hand_mesh(&flower_inv, 0.0, 0.0);
+        let (flower_vertices, flower_indices) = build_test_hand_base_mesh(&flower_inv);
         assert_eq!(flower_vertices.len(), empty_vertices.len() + 4);
         assert_eq!(flower_indices.len(), empty_indices.len() + 12);
 
         // A full-cube block still renders as a 24-vertex/36-index cuboid.
         let mut block_inv = Inventory::new();
         block_inv.hotbar[0] = Some(ItemStack::new(crate::inventory::Item::Stone, 1));
-        let (block_vertices, block_indices) = build_first_person_hand_mesh(&block_inv, 0.0, 0.0);
+        let (block_vertices, block_indices) = build_test_hand_base_mesh(&block_inv);
         assert_eq!(block_vertices.len(), empty_vertices.len() + 24);
         assert_eq!(block_indices.len(), empty_indices.len() + 36);
     }
@@ -989,7 +952,7 @@ mod tests {
         for (tool, expected_vertices, expected_indices) in tool_mesh_cases() {
             let mut inv = Inventory::new();
             inv.hotbar[0] = Some(ItemStack::new(tool, 1));
-            let (vertices, indices) = build_first_person_hand_mesh(&inv, 0.0, 0.0);
+            let (vertices, indices) = build_test_hand_base_mesh(&inv);
 
             assert_eq!(vertices.len(), expected_vertices, "{tool:?} vertices");
             assert_eq!(indices.len(), expected_indices, "{tool:?} indices");
@@ -1028,7 +991,7 @@ mod tests {
         for (tool, _, _) in tool_mesh_cases() {
             let mut inv = Inventory::new();
             inv.hotbar[0] = Some(ItemStack::new(tool, 1));
-            let (vertices, _) = build_first_person_hand_mesh(&inv, 0.0, 0.0);
+            let (vertices, _) = build_test_hand_base_mesh(&inv);
             let model = &vertices[..];
             let expected_depth = TOOL_MODEL_SCALE * TOOL_MODEL_THICKNESS;
 
@@ -1059,22 +1022,41 @@ mod tests {
         for (tool, _, _) in tool_mesh_cases() {
             let mut inv = Inventory::new();
             inv.hotbar[0] = Some(ItemStack::new(tool, 1));
-            let idle = build_first_person_hand_mesh(&inv, 0.0, 0.0);
-            let moving = build_first_person_hand_mesh(&inv, 0.6, 1.0);
+            let key = hand_mesh_key(&inv);
+            let (vertices, _) = build_test_hand_base_mesh(&inv);
+            assert!(!vertices.is_empty());
+
+            let idle = animation_for_hand_mesh(key, 0.0, 0.0);
+            let moving = animation_for_hand_mesh(key, 0.6, 1.0);
+            assert_ne!(idle.transform, moving.transform);
+            let idle_mat = idle.matrix();
+            let moving_mat = moving.matrix();
+            assert_ne!(idle_mat, moving_mat);
+
+            let base_point = Vec3::from_array(vertices[0].position);
             assert_ne!(
-                bytemuck::cast_slice::<Vertex, u8>(&idle.0),
-                bytemuck::cast_slice::<Vertex, u8>(&moving.0),
+                idle_mat.transform_point3(base_point),
+                moving_mat.transform_point3(base_point),
                 "{tool:?} must move with the mining swing"
             );
-            assert_eq!(idle.1, moving.1);
         }
 
         let empty = Inventory::new();
-        let idle_hand = build_first_person_hand_mesh(&empty, 0.0, 0.0);
-        let moving_hand = build_first_person_hand_mesh(&empty, 0.6, 1.0);
+        let key = hand_mesh_key(&empty);
+        let (vertices, _) = build_test_hand_base_mesh(&empty);
+        assert!(!vertices.is_empty());
+
+        let idle = animation_for_hand_mesh(key, 0.0, 0.0);
+        let moving = animation_for_hand_mesh(key, 0.6, 1.0);
+        assert_ne!(idle.transform, moving.transform);
+        let idle_mat = idle.matrix();
+        let moving_mat = moving.matrix();
+        assert_ne!(idle_mat, moving_mat);
+
+        let base_point = Vec3::from_array(vertices[0].position);
         assert_ne!(
-            bytemuck::cast_slice::<Vertex, u8>(&idle_hand.0),
-            bytemuck::cast_slice::<Vertex, u8>(&moving_hand.0),
+            idle_mat.transform_point3(base_point),
+            moving_mat.transform_point3(base_point),
             "the empty hand should retain its own animation"
         );
     }

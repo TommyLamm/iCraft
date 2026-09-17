@@ -1018,8 +1018,6 @@ impl EntityManager {
             .map(|(_, v)| v.len())
             .sum()
     }
-
-    #[allow(dead_code)]
     pub fn get_entities_by_type(&self, entity_type: EntityType) -> impl Iterator<Item = &Entity> {
         self.type_buckets
             .get(&entity_type)
