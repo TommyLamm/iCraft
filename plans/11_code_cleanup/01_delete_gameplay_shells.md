@@ -1,6 +1,6 @@
 # 01 — 刪除完整原型與測試專用玩法殼
 
-狀態：待執行。基線：`83e751d`，2026-09-17。
+狀態：已完成。基線：`83e751d`，2026-09-17。
 前置：無。
 
 ## 定位與判定
@@ -29,5 +29,21 @@ plan33 現有 embedded／listen／dedicated fishing lifecycle 案例繼續通過
 
 ## 實作紀錄
 
-尚未執行；完成時記錄實際修改、驗證結果、刪碼量及文件更新。
+- 改動項目：
+  1. 完整刪除 5 個無 producer 的原型與測試檔：`src/container_sessions.rs`、`src/vehicle.rs`、`src/rail.rs`、`src/navigation.rs`、`src/village/raid.rs`。
+  2. 清理 `src/lib.rs`（移除 `container_sessions`、`navigation`、`vehicle`、`rail` 的 mod 宣告）、`src/main.rs`（移除 `navigation` 的 re-export）、`src/village/mod.rs`（移除 `raid` 模組宣告與 `PoiManager`、`Village`、`PoiType`、`RaidManager`、`RaidStatus`、`MerchantSessionManager` 的 re-export）。
+  3. 清理 `src/fishing.rs`：刪除 test-only 的 `FishingHook`、`FishingResult`、`FishingManager` 及其單元測試與未用 imports，保留正式 wire 階段 `FishingHookStage`、`authoritative_launch_velocity_milli`、`deterministic_fishing_roll` 與常數。
+  4. 清理 `src/village/poi.rs`：刪除第 49 行起的 `PoiType`、`PoiEntry`、`Village`、`PoiManager` 舊系統與專屬測試，保留正式 `VillagerProfession` 列舉及其 wire / display 方法。
+  5. 清理 `src/village/trade.rs`：刪除 `ActiveMerchantSession`、`MerchantSessionManager` 與未用 `HashMap` import，保留 `TradeOffer`、`VillagerLevel` 及相關正式方法（生成算法留待 13 處理）。
+  6. 更新 `ARCHITECTURE.md`：移除為測試保留 presentation shells 的過時描述，更新模組地圖 Gameplay 項目。
+- 實際命令與結果：
+  - `cargo test --lib authority::fishing::tests`: 7 passed; 0 failed
+  - `cargo test --lib trade_conserves_items_and_mount_projects_session_state`: 1 passed; 0 failed
+  - `cargo test --test plan33_tcp_fishing_lifecycle`: 1 passed; 0 failed; 2 ignored (既有 pre-existing network flood flake)
+  - `cargo test --test plan34_container_break_inventory_conservation --test review_hardening_container_click`: 12 passed; 0 failed
+  - `cargo check --all-targets --all-features`: exit code 0
+- 淨刪碼／保留原因：
+  - 淨刪除 1,813 行（12 files changed, 7 insertions(+), 1,820 deletions(-)）。
+  - 保留原因：`VillagerProfession`、`VillagerLevel`、`TradeOffer` 仍為 entity/save/authority 契約；fishing wire stages 與 authority launch/roll 算法仍為 fishing lifecycle 核心；authority container 與 mount 機制已由 `ServerWorld` / session overlay 實現，刪除的原型皆為無任何正式 caller 的死碼。
+
 

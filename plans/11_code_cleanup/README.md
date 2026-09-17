@@ -30,7 +30,7 @@
 
 | # | 獨立計劃 | 類型 | 前置 | 狀態 |
 | --- | --- | --- | --- | --- |
-| 01 | [刪除完整原型與測試專用玩法殼](01_delete_gameplay_shells.md) | P0／死碼 | 無 | 待執行 |
+| 01 | [刪除完整原型與測試專用玩法殼](01_delete_gameplay_shells.md) | P0／死碼 | 無 | 已完成 |
 | 02 | [Session 單一定義與 authority API 清理](02_session_and_authority_api.md) | P0／去重 | 無 | 待執行 |
 | 03 | [worldgen 舊密度／洞穴算法與無用狀態](03_worldgen_dead_density.md) | P0／死碼 | 無 | 待執行 |
 | 04 | [字體、手部及小型渲染死路徑](04_render_dead_paths.md) | P0／死碼 | 無 | 待執行 |

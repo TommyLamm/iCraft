@@ -1,7 +1,5 @@
 use crate::inventory::{Item, ItemStack};
 use crate::village::poi::VillagerProfession;
-#[cfg(test)]
-use std::collections::HashMap;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
@@ -331,52 +329,6 @@ pub fn generate_offers_for_level(
     }
 
     offers
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone)]
-pub struct ActiveMerchantSession {
-    pub player_id: u64,
-    pub villager_id: u64,
-    pub villager_pos: glam::Vec3,
-}
-
-/// Dead outside tests: open_session had no live caller after SimHarness removal.
-#[cfg(test)]
-#[derive(Debug, Clone, Default)]
-pub struct MerchantSessionManager {
-    pub sessions: HashMap<u64, ActiveMerchantSession>,
-}
-
-#[cfg(test)]
-impl MerchantSessionManager {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn open_session(&mut self, player_id: u64, villager_id: u64, villager_pos: glam::Vec3) {
-        self.sessions.insert(
-            player_id,
-            ActiveMerchantSession {
-                player_id,
-                villager_id,
-                villager_pos,
-            },
-        );
-    }
-
-    pub fn close_session(&mut self, player_id: u64) -> Option<ActiveMerchantSession> {
-        self.sessions.remove(&player_id)
-    }
-
-    pub fn get_session(&self, player_id: u64) -> Option<&ActiveMerchantSession> {
-        self.sessions.get(&player_id)
-    }
-
-    pub fn close_sessions_for_villager(&mut self, villager_id: u64) {
-        self.sessions
-            .retain(|_, session| session.villager_id != villager_id);
-    }
 }
 
 #[cfg(test)]

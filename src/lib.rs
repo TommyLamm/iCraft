@@ -32,10 +32,6 @@ pub mod authority;
 pub mod block_entity;
 pub mod brewing;
 pub mod chunk_manager;
-/// Former presentation container session shell. Authority owns viewers in
-/// `ServerWorld`; this module is test-only after Wave 10 Plan 02.
-#[cfg(test)]
-mod container_sessions;
 pub mod dimension;
 pub mod enchantment;
 pub mod entity;
@@ -68,21 +64,15 @@ pub mod commands;
 pub mod culling;
 pub mod interaction;
 pub mod lighting;
-pub mod navigation;
 pub mod perf;
 pub mod physics;
 pub mod resources;
-#[cfg(test)]
-pub mod vehicle;
 pub mod village;
 
 // Shared simulation used by authority / ServerWorld. Not a dedicated-server
 // or integration-test import; desktop files do not `use crate::` these.
 pub(crate) mod fluid;
 pub(crate) mod mob;
-/// Minecart/rail presentation tick was only driven by deleted SimHarness.
-#[cfg(test)]
-pub(crate) mod rail;
 /// Shared FNV-1a / LCG helpers (desktop texture/weather re-export via `main`).
 pub mod rng;
 pub(crate) mod world_tick;

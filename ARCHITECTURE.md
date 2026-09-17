@@ -31,11 +31,11 @@ second `ClimateSystem` authority.
 `lib.rs` has two `pub` layers: the server/tests contract (authority, world,
 network, save, `presentation_inventory_policy`, …) and extra `pub` modules so
 the desktop crate can re-export them. `loot`, `voxel_shape`, `worldgen`,
-`fluid`, `mob`, and `world_tick` are `pub(crate)`. `rail` and presentation
-shells (`vehicle`, `container_sessions`, POI/raid managers, map manager,
-presentation `FishingManager`) are `cfg(test)` only — desktop `State` no
-longer owns them; live container viewers and fishing hooks live on
-`ServerWorld` / session overlay. `recipes` stays `pub` because desktop
+`fluid`, `mob`, and `world_tick` are `pub(crate)`. Dead presentation shells
+and prototypes (`vehicle`, `rail`, `navigation`, `container_sessions`,
+POI/raid managers, and presentation `FishingManager`) have been deleted; live
+container viewers and fishing hooks live on `ServerWorld` / session overlay.
+`recipes` stays `pub` because desktop
 `State` and `ServerWorld` expose `RecipeManager`.
 Desktop `--microbench` is `src/main.rs`'s `mod microbench` behind feature
 `microbench` (`cargo run --features microbench -- --microbench`); it is not
@@ -536,7 +536,7 @@ from `saves/`).
 | Authority | `src/authority/` (`tick.rs`, `portals.rs`, `dispatch/` (`block_action`, `container`, `workstation`, `combat`, `command`), `combat.rs`, `contract.rs`, `fishing.rs`, `interest.rs`, `mining.rs`, `transactions.rs`, `tests.rs`) |
 | Runtime | `src/server_runtime.rs` plus `events.rs`, `properties.rs`, `session_state.rs`, `ingress.rs`, `projection.rs`, `session_sync.rs`, `tests.rs`; `src/server_world/` (`columns`, `containers`, `mutation`, `tick`, `entities`, `tests`); `src/bin/icraft-server.rs` |
 | World | `src/world/` (`block/` types·state·table, `section.rs`, `chunk.rs`, `mesh/` halo·faces·greedy·section), `src/chunk_manager/` (`WorldColumns` / `PresentationChunks`), `src/dimension.rs`, `src/worldgen/`, `src/structure/` |
-| Gameplay | `src/player.rs`, `src/physics.rs`, `src/inventory/`, `src/block_entity.rs`, `src/redstone/` (`system`, `power`, `piston`), `src/fluid.rs`, `src/world_tick.rs`, `src/entity.rs`, `src/mob.rs`, `src/passive_mob.rs`, `src/boss/` (`dragon`, `wither`, `nether`), `src/village/` (`VillagerProfession` / `TradeOffer`; POI/raid/merchant-session managers are `cfg(test)` only), `src/fishing.rs` (wire stages + authority helpers; presentation `FishingManager` is `cfg(test)` only) |
+| Gameplay | `src/player.rs`, `src/physics.rs`, `src/inventory/`, `src/block_entity.rs`, `src/redstone/` (`system`, `power`, `piston`), `src/fluid.rs`, `src/world_tick.rs`, `src/entity.rs`, `src/mob.rs`, `src/passive_mob.rs`, `src/boss/` (`dragon`, `wither`, `nether`), `src/village/` (`VillagerProfession` / `TradeOffer`), `src/fishing.rs` (wire stages + authority helpers) |
 | Render | `src/chunk_schedule.rs`, `src/chunk_render.rs` (CPU mesh data; wgpu vertex layout lives next to desktop pipelines), `src/culling/` (`los` + `connectivity` in lib), `src/block_model.rs` (`emit_box` shared terrain box emitter; model paths derived from `BlockType` snake_case), desktop `src/mob_renderer.rs` + `src/mob_parts.rs` (table-driven `MobPart` + animator; dragon/wither/item specials), `src/hand_renderer.rs` (shares `UNIT_CUBOID_CORNERS`), `src/texture.rs` (`PACK_TILES` atlas definition with paint-on-miss), `src/shader.wgsl` |
 | Network | `src/network/` (`protocol/` decode·wire_types·gameplay·packet, `transport.rs`, `server.rs` + `server_tests.rs`, `client.rs` + `client_tests.rs`, `ingress.rs`, `egress.rs`; `loopback_test.rs` is `cfg(test)` only) |
 | Save / assets | `src/save/` (`format.rs` includes `AdvancementProgressData`, `region.rs`, `player.rs`, `index.rs`), `src/resources.rs` |
