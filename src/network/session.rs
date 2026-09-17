@@ -63,9 +63,9 @@ impl NetworkMetrics {
         });
     }
 
-    pub(crate) fn record_inbound(&self, packet: &Packet) {
+    pub(crate) fn record_inbound(&self, bytes: u64) {
         Self::add(&self.inner.inbound_packets, 1);
-        Self::add(&self.inner.inbound_bytes, packet_bytes(packet));
+        Self::add(&self.inner.inbound_bytes, bytes);
     }
 
     /// Reserve the outbound frame counters before a socket write begins. A
@@ -80,10 +80,6 @@ impl NetworkMetrics {
             bytes,
             committed: false,
         }
-    }
-
-    pub(crate) fn reserve_outbound(&self, packet: &Packet) -> OutboundMetricReservation {
-        self.reserve_outbound_bytes(packet_bytes(packet))
     }
 
     pub(crate) fn enqueue(&self) {
@@ -250,14 +246,6 @@ pub(crate) enum QueuedPacket {
 /// TCP frame byte count from an already-encoded payload length.
 pub(crate) fn frame_byte_len(payload_len: usize) -> u64 {
     (payload_len as u64).saturating_add(4)
-}
-
-pub(crate) fn packet_bytes(packet: &Packet) -> u64 {
-    // `ConnectionWriter` emits a four-byte big-endian frame length before the
-    // bincode payload. Count the bytes that actually cross TCP, not just the
-    // serialized message body. Prefer `EncodedPacket::frame_bytes` on the
-    // outbound hot path so metering reuses the same encode.
-    frame_byte_len(packet.encode().len())
 }
 
 pub(crate) fn queue_stats() -> Arc<crate::perf::SharedQueueStats> {
@@ -847,23 +835,92 @@ mod tests {
             .await
             .unwrap();
         let received = server_conn.recv().await.unwrap();
-        server_metrics.record_inbound(&received);
+        server_metrics.record_inbound(received.frame_bytes);
 
         let client_snap = client_metrics.snapshot();
         let server_snap = server_metrics.snapshot();
+        let expected_bytes = EncodedPacket::new(packet).unwrap().frame_bytes();
         assert_eq!(client_snap.outbound_packets, 1);
-        assert_eq!(client_snap.outbound_bytes, packet_bytes(&packet));
+        assert_eq!(client_snap.outbound_bytes, expected_bytes);
         assert_eq!(server_snap.inbound_packets, 1);
-        assert_eq!(server_snap.inbound_bytes, packet_bytes(&packet));
+        assert_eq!(server_snap.inbound_bytes, expected_bytes);
+    }
+
+    #[tokio::test]
+    async fn inbound_frame_metrics_include_trailing_bytes_and_avoid_duplicate_counting() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client_task = tokio::spawn(async move {
+            tokio::net::TcpStream::connect(addr).await.unwrap()
+        });
+        let (server_stream, _) = listener.accept().await.unwrap();
+        let mut server_conn = Connection::new(server_stream);
+        let mut client_stream = client_task.await.unwrap();
+
+        let metrics = NetworkMetrics::default();
+
+        // 1. Send frame with valid packet + trailing bytes
+        let packet = Packet::Keepalive;
+        let mut body = packet.encode();
+        let trailing = [0xAA, 0xBB, 0xCC, 0xDD];
+        body.extend_from_slice(&trailing);
+        let frame_len = body.len() as u32;
+        let expected_frame_bytes = 4 + frame_len as u64;
+
+        use tokio::io::AsyncWriteExt;
+        client_stream.write_all(&frame_len.to_be_bytes()).await.unwrap();
+        client_stream.write_all(&body).await.unwrap();
+        client_stream.flush().await.unwrap();
+
+        let received = server_conn.recv().await.unwrap();
+        assert_eq!(received.packet, packet);
+        assert_eq!(received.frame_bytes, expected_frame_bytes);
+        assert!(received.frame_bytes > 4 + packet.encode().len() as u64);
+
+        metrics.record_inbound(received.frame_bytes);
+        let snap1 = metrics.snapshot();
+        assert_eq!(snap1.inbound_packets, 1);
+        assert_eq!(snap1.inbound_bytes, expected_frame_bytes);
+
+        // 2. Cancellation: write partial frame (only 2 bytes of header), then cancel recv
+        client_stream.write_all(&[0x00, 0x00]).await.unwrap();
+        client_stream.flush().await.unwrap();
+        let cancel_result = tokio::time::timeout(Duration::from_millis(50), server_conn.recv()).await;
+        assert!(cancel_result.is_err(), "recv should time out / cancel");
+        // No inbound metrics should have been recorded for cancelled attempt
+        let snap_cancel = metrics.snapshot();
+        assert_eq!(snap_cancel.inbound_packets, 1);
+        assert_eq!(snap_cancel.inbound_bytes, expected_frame_bytes);
+
+        // Resume writing the rest of the header (2 bytes) + body for a second packet
+        let p2 = Packet::Keepalive;
+        let p2_body = p2.encode();
+        let p2_len = p2_body.len() as u32;
+        let p2_len_bytes = p2_len.to_be_bytes();
+        assert_eq!(p2_len_bytes[0], 0);
+        assert_eq!(p2_len_bytes[1], 0);
+        client_stream.write_all(&p2_len_bytes[2..4]).await.unwrap();
+        client_stream.write_all(&p2_body).await.unwrap();
+        client_stream.flush().await.unwrap();
+
+        let r2 = server_conn.recv().await.unwrap();
+        assert_eq!(r2.packet, p2);
+        let p2_frame_bytes = 4 + p2_body.len() as u64;
+        assert_eq!(r2.frame_bytes, p2_frame_bytes);
+        metrics.record_inbound(r2.frame_bytes);
+
+        let snap2 = metrics.snapshot();
+        assert_eq!(snap2.inbound_packets, 2);
+        assert_eq!(snap2.inbound_bytes, expected_frame_bytes + p2_frame_bytes);
     }
 
     #[tokio::test]
     async fn outbound_metrics_publish_before_write_and_rollback_on_failure() {
         let metrics = NetworkMetrics::default();
         let packet = Packet::Keepalive;
-        let expected_bytes = packet_bytes(&packet);
+        let expected_bytes = EncodedPacket::new(packet).unwrap().frame_bytes();
 
-        let reservation = metrics.reserve_outbound(&packet);
+        let reservation = metrics.reserve_outbound_bytes(expected_bytes);
         let snap_during = metrics.snapshot();
         assert_eq!(snap_during.outbound_packets, 1);
         assert_eq!(snap_during.outbound_bytes, expected_bytes);
@@ -872,7 +929,7 @@ mod tests {
         assert_eq!(snap_after_drop.outbound_packets, 0);
         assert_eq!(snap_after_drop.outbound_bytes, 0);
 
-        let reservation = metrics.reserve_outbound(&packet);
+        let reservation = metrics.reserve_outbound_bytes(expected_bytes);
         reservation.commit();
         let snap_after_commit = metrics.snapshot();
         assert_eq!(snap_after_commit.outbound_packets, 1);
@@ -1151,6 +1208,9 @@ mod tests {
         let first = EncodedPacket::new(packet).unwrap();
         let second = first.clone();
         assert!(std::sync::Arc::ptr_eq(first.payload(), second.payload()));
-        assert_eq!(first.frame_bytes(), packet_bytes(first.packet()));
+        assert_eq!(
+            first.frame_bytes(),
+            frame_byte_len(first.packet().encode().len())
+        );
     }
 }

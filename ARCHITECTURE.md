@@ -437,7 +437,9 @@ Protocol v21: bincode over TCP, 4-byte big-endian length, 2 MiB cap.
 `Packet::encode_payload` / `encode_frame` build the wire body. Outbound
 queues hold `EncodedPacket` (`Arc<[u8]>` payload plus the logical `Packet`):
 metering, mailbox replace, and `ConnectionWriter::send_payload` share one
-encode. Broadcast fanout clones the `Arc` so N connections do not
+encode. Inbound frames meter actual wire bytes (4-byte length header plus body)
+directly from transport on successful receive without re-serializing decoded
+`Packet`s. Broadcast fanout clones the `Arc` so N connections do not
 re-serialize. Authenticated sessions speak a single `PROTOCOL_VERSION`
 (handshake rejects others), so shared payload Arcs are never mixed across
 protocol versions. Older versions fail handshake. Malformed pre-auth frames

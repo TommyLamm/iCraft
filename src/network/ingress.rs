@@ -187,66 +187,68 @@ pub(crate) async fn run_client<S: HostEventSender>(
     pre_auth: Option<PreAuthSlot>,
 ) {
     let handshake_result = time::timeout(config.handshake_timeout, connection.recv()).await;
-    if let Ok(Ok(packet)) = &handshake_result {
-        metrics.record_inbound(packet);
+    if let Ok(Ok(received)) = &handshake_result {
+        metrics.record_inbound(received.frame_bytes);
     }
     let handshake = match handshake_result {
-        Ok(Ok(Packet::Handshake {
-            protocol_version,
-            username,
-        })) => {
-            eprintln!("[NetworkServer] Received Handshake: username='{username}', protocol_version={protocol_version}");
-            if protocol_version != PROTOCOL_VERSION {
-                eprintln!("[NetworkServer] Handshake rejected: version mismatch (expected {PROTOCOL_VERSION}, got {protocol_version})");
+        Ok(Ok(received)) => match received.packet {
+            Packet::Handshake {
+                protocol_version,
+                username,
+            } => {
+                eprintln!("[NetworkServer] Received Handshake: username='{username}', protocol_version={protocol_version}");
+                if protocol_version != PROTOCOL_VERSION {
+                    eprintln!("[NetworkServer] Handshake rejected: version mismatch (expected {PROTOCOL_VERSION}, got {protocol_version})");
+                    let _ = send_connection_packet(
+                        &mut connection,
+                        Packet::Disconnect {
+                            reason: format!(
+                                "protocol version mismatch: server {PROTOCOL_VERSION}, client {protocol_version}"
+                            ),
+                        },
+                        &metrics,
+                    )
+                    .await;
+                    return;
+                }
+                username
+            }
+            Packet::ServerListPingRequest { protocol_version } => {
+                let online_players = sessions.lock().await.len().min(u16::MAX as usize) as u16;
+                let _ = send_connection_packet(
+                    &mut connection,
+                    Packet::ServerListPingResponse {
+                        protocol_version: PROTOCOL_VERSION,
+                        version: env!("CARGO_PKG_VERSION").to_string(),
+                        motd: config.motd.clone(),
+                        online_players,
+                        max_players: config.max_players.min(u16::MAX as usize) as u16,
+                    },
+                    &metrics,
+                )
+                .await;
+                if protocol_version != PROTOCOL_VERSION {
+                    eprintln!(
+                        "[NetworkServer] server-list ping version mismatch: client {protocol_version}, server {PROTOCOL_VERSION}"
+                    );
+                }
+                return;
+            }
+            packet => {
+                eprintln!(
+                    "[NetworkServer] Handshake rejected: expected Packet::Handshake, got {packet:?}"
+                );
                 let _ = send_connection_packet(
                     &mut connection,
                     Packet::Disconnect {
-                        reason: format!(
-                            "protocol version mismatch: server {PROTOCOL_VERSION}, client {protocol_version}"
-                        ) },
+                        reason: "expected handshake".into(),
+                    },
                     &metrics,
                 )
                 .await;
                 return;
             }
-            username
-        }
-        Ok(Ok(Packet::ServerListPingRequest { protocol_version })) => {
-            let online_players = sessions.lock().await.len().min(u16::MAX as usize) as u16;
-            let _ = send_connection_packet(
-                &mut connection,
-                Packet::ServerListPingResponse {
-                    protocol_version: PROTOCOL_VERSION,
-                    version: env!("CARGO_PKG_VERSION").to_string(),
-                    motd: config.motd.clone(),
-                    online_players,
-                    max_players: config.max_players.min(u16::MAX as usize) as u16,
-                },
-                &metrics,
-            )
-            .await;
-            if protocol_version != PROTOCOL_VERSION {
-                eprintln!(
-                    "[NetworkServer] server-list ping version mismatch: client {protocol_version}, server {PROTOCOL_VERSION}"
-                );
-            }
-            return;
-        }
-        Ok(Ok(packet)) => {
-            eprintln!(
-                "[NetworkServer] Handshake rejected: expected Packet::Handshake, got {packet:?}"
-            );
-            let _ = send_connection_packet(
-                &mut connection,
-                Packet::Disconnect {
-                    reason: "expected handshake".into(),
-                },
-                &metrics,
-            )
-            .await;
-            return;
-        }
-        Ok(Err(err)) => {
+        },    Ok(Err(err)) => {
             eprintln!("[NetworkServer] Handshake receive error: {err}");
             return;
         }
@@ -521,9 +523,9 @@ pub(crate) async fn run_client<S: HostEventSender>(
         tokio::select! {
             incoming = time::timeout(CLIENT_TIMEOUT, reader.recv()) => {
                 let incoming = incoming.map(|result| {
-                    result.map(|packet| {
-                        metrics.record_inbound(&packet);
-                        packet
+                    result.map(|received| {
+                        metrics.record_inbound(received.frame_bytes);
+                        received.packet
                     })
                 });
                 match incoming {

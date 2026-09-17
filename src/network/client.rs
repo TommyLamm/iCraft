@@ -567,35 +567,37 @@ async fn run_client(
     }
 
     let player_id = match time::timeout(Duration::from_secs(5), connection.recv()).await {
-        Ok(Ok(Packet::LoginSuccess {
-            protocol_version,
-            player_id,
-            seed,
-            gamemode,
-        })) if protocol_version == PROTOCOL_VERSION => {
-            eprintln!("[NetworkClient] Login success! Assigned Player ID: {player_id}, Seed: {seed}, Gamemode: {gamemode}");
-            let _ = client_to_game.send(ClientToGame::StatusUpdate {
-                message: "LOGIN SUCCESS. LOADING WORLD...".into(),
-            });
-            let _ = client_to_game.send(ClientToGame::packet(Packet::LoginSuccess {
-                protocol_version: PROTOCOL_VERSION,
+        Ok(Ok(received)) => match received.packet {
+            Packet::LoginSuccess {
+                protocol_version,
                 player_id,
                 seed,
                 gamemode,
-            }));
-            player_id
-        }
-        Ok(Ok(Packet::Disconnect { reason, .. })) => {
-            eprintln!("[NetworkClient] Server disconnected during login: {reason}");
-            let _ = client_to_game.send(ClientToGame::disconnect(reason));
-            return;
-        }
-        Ok(Ok(packet)) => {
-            let reason = format!("unexpected handshake response: {packet:?}");
-            eprintln!("[NetworkClient] {reason}");
-            let _ = client_to_game.send(ClientToGame::disconnect(reason));
-            return;
-        }
+            } if protocol_version == PROTOCOL_VERSION => {
+                eprintln!("[NetworkClient] Login success! Assigned Player ID: {player_id}, Seed: {seed}, Gamemode: {gamemode}");
+                let _ = client_to_game.send(ClientToGame::StatusUpdate {
+                    message: "LOGIN SUCCESS. LOADING WORLD...".into(),
+                });
+                let _ = client_to_game.send(ClientToGame::packet(Packet::LoginSuccess {
+                    protocol_version,
+                    player_id,
+                    seed,
+                    gamemode,
+                }));
+                player_id
+            }
+            Packet::Disconnect { reason, .. } => {
+                eprintln!("[NetworkClient] Server disconnected during login: {reason}");
+                let _ = client_to_game.send(ClientToGame::disconnect(reason));
+                return;
+            }
+            packet => {
+                let reason = format!("unexpected handshake response: {packet:?}");
+                eprintln!("[NetworkClient] {reason}");
+                let _ = client_to_game.send(ClientToGame::disconnect(reason));
+                return;
+            }
+        },
         Ok(Err(error)) => {
             let reason = error.to_string();
             eprintln!("[NetworkClient] Connection recv error: {reason}");
@@ -623,6 +625,7 @@ async fn run_client(
     loop {
         tokio::select! {
             incoming = reader.recv() => {
+                let incoming = incoming.map(|received| received.packet);
                 match incoming {
                     Ok(packet @ Packet::PlayerJoin { .. })
                     | Ok(packet @ Packet::PlayerLeave { .. })

@@ -575,7 +575,7 @@ mod tests {
                 let mut connection =
                     Connection::new(tokio::net::TcpStream::from_std(stream).unwrap());
                 assert!(matches!(
-                    connection.recv().await.unwrap(),
+                    connection.recv().await.unwrap().packet,
                     Packet::ServerListPingRequest { .. }
                 ));
                 connection

@@ -8,6 +8,46 @@ use super::protocol::{Packet, MAX_PACKET_SIZE};
 
 const LEN_HEADER: usize = 4;
 
+/// Result of a successful frame receive: the decoded logical packet and
+/// the exact wire byte count (4-byte length prefix + body).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReceivedPacket {
+    pub packet: Packet,
+    pub frame_bytes: u64,
+}
+
+impl ReceivedPacket {
+    pub const fn new(packet: Packet, frame_bytes: u64) -> Self {
+        Self { packet, frame_bytes }
+    }
+
+    pub fn packet(&self) -> &Packet {
+        &self.packet
+    }
+
+    pub fn into_packet(self) -> Packet {
+        self.packet
+    }
+
+    pub fn frame_bytes(&self) -> u64 {
+        self.frame_bytes
+    }
+}
+
+impl std::ops::Deref for ReceivedPacket {
+    type Target = Packet;
+
+    fn deref(&self) -> &Self::Target {
+        &self.packet
+    }
+}
+
+impl From<ReceivedPacket> for Packet {
+    fn from(received: ReceivedPacket) -> Self {
+        received.packet
+    }
+}
+
 pub struct Connection {
     reader: ConnectionReader,
     writer: ConnectionWriter,
@@ -39,7 +79,7 @@ impl Connection {
         }
     }
 
-    pub async fn recv(&mut self) -> io::Result<Packet> {
+    pub async fn recv(&mut self) -> io::Result<ReceivedPacket> {
         self.reader.recv().await
     }
 
@@ -71,7 +111,7 @@ impl ConnectionReader {
         Ok(())
     }
 
-    pub(super) async fn recv(&mut self) -> io::Result<Packet> {
+    pub(super) async fn recv(&mut self) -> io::Result<ReceivedPacket> {
         if self.frame_len.is_none() {
             self.read_exact_into(LEN_HEADER).await?;
             let len = u32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]);
@@ -90,7 +130,9 @@ impl ConnectionReader {
 
         let body: Vec<u8> = self.buf.drain(0..need).collect();
         self.frame_len = None;
-        Packet::decode(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        let packet = Packet::decode(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let frame_bytes = (LEN_HEADER + need) as u64;
+        Ok(ReceivedPacket { packet, frame_bytes })
     }
 }
 
@@ -146,7 +188,8 @@ mod tests {
         client.send(&packet).await.unwrap();
 
         let received = server_task.await.unwrap();
-        assert_eq!(received, packet);
+        assert_eq!(received.packet, packet);
+        assert_eq!(received.frame_bytes, 4 + packet.encode().len() as u64);
     }
 
     #[tokio::test]
@@ -157,8 +200,8 @@ mod tests {
         let server_task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut conn = Connection::new(stream);
-            let first = conn.recv().await.unwrap();
-            let second = conn.recv().await.unwrap();
+            let first = conn.recv().await.unwrap().packet;
+            let second = conn.recv().await.unwrap().packet;
             let echo = Packet::ChatMessage {
                 sender: "server".into(),
                 message: "pong".into(),
@@ -186,7 +229,7 @@ mod tests {
         };
         client.send(&pos).await.unwrap();
         client.send(&act).await.unwrap();
-        let echoed = client.recv().await.unwrap();
+        let echoed = client.recv().await.unwrap().packet;
 
         let (first, second, echo) = server_task.await.unwrap();
         assert_eq!(first, pos);
@@ -232,7 +275,8 @@ mod tests {
         server_stream.flush().await.unwrap();
 
         let received = reader.recv().await.unwrap();
-        assert_eq!(received, packet);
+        assert_eq!(received.packet, packet);
+        assert_eq!(received.frame_bytes, 4 + payload.len() as u64);
     }
 
     #[tokio::test]
@@ -261,8 +305,10 @@ mod tests {
         let r1 = server.recv().await.unwrap();
         let r2 = server.recv().await.unwrap();
 
-        assert_eq!(r1, p1);
-        assert_eq!(r2, p2);
+        assert_eq!(r1.packet, p1);
+        assert_eq!(r2.packet, p2);
+        assert_eq!(r1.frame_bytes, 4 + p1.encode().len() as u64);
+        assert_eq!(r2.frame_bytes, 4 + p2.encode().len() as u64);
     }
 
     #[tokio::test]

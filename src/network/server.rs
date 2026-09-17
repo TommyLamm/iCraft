@@ -32,7 +32,7 @@ pub(crate) use super::ingress::{
 use super::protocol::Packet;
 use super::protocol::PlayerId;
 pub(crate) use super::session::{
-    packet_bytes, queue_now_ms, queue_stats, reliable_send,
+    queue_now_ms, queue_stats, reliable_send,
     reliable_send_and_wait, send_connection_packet, send_writer_packet,
     CatchupMailbox, ClientSession, EncodedPacket, GameplaySessionState, PoseMailbox, PreAuthSlot,
     QueuedPacket, RequestRateLimiter, Sessions, StateMailbox, StateMailboxKey, TrackedPacket,

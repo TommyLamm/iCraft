@@ -106,6 +106,7 @@ impl LoopbackTestServer {
             .await
             .unwrap()
             .unwrap()
+            .packet
         {
             Packet::LoginSuccess {
                 protocol_version,

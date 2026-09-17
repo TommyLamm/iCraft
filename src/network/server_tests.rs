@@ -18,7 +18,7 @@ async fn recv_matching(
 ) -> Packet {
     time::timeout(Duration::from_secs(2), async {
         loop {
-            let packet = connection.recv().await.unwrap();
+            let packet = connection.recv().await.unwrap().packet;
             if predicate(&packet) {
                 return packet;
             }
@@ -64,7 +64,7 @@ async fn connect_and_login() {
         .await
         .unwrap();
 
-    let packet = connection.recv().await.unwrap();
+    let packet = connection.recv().await.unwrap().packet;
     match packet {
         Packet::LoginSuccess {
             protocol_version,
@@ -391,7 +391,7 @@ async fn concurrent_logins_reserve_max_player_slot_atomically() {
     first_sent.unwrap();
     second_sent.unwrap();
     let (first_reply, second_reply) = tokio::join!(first.recv(), second.recv());
-    let replies = [first_reply.unwrap(), second_reply.unwrap()];
+    let replies = [first_reply.unwrap().packet, second_reply.unwrap().packet];
     assert_eq!(
         replies
             .iter()
@@ -435,7 +435,7 @@ async fn concurrent_case_insensitive_duplicate_login_is_atomic() {
     first_sent.unwrap();
     second_sent.unwrap();
     let (first_reply, second_reply) = tokio::join!(first.recv(), second.recv());
-    let replies = [first_reply.unwrap(), second_reply.unwrap()];
+    let replies = [first_reply.unwrap().packet, second_reply.unwrap().packet];
     assert_eq!(
         replies
             .iter()
@@ -489,7 +489,8 @@ async fn server_list_ping_reports_version_and_capacity_without_login() {
     let response = time::timeout(Duration::from_secs(2), client.recv())
         .await
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .packet;
     assert!(matches!(
         response,
         Packet::ServerListPingResponse {
@@ -544,7 +545,8 @@ async fn rejects_old_protocol_during_handshake() {
     let packet = time::timeout(Duration::from_secs(2), connection.recv())
         .await
         .expect("server did not reject outdated protocol")
-        .expect("server closed without a disconnect packet");
+        .expect("server closed without a disconnect packet")
+        .packet;
     assert!(matches!(
         packet,
         Packet::Disconnect { reason }
@@ -905,7 +907,7 @@ async fn evicted_client_task_exits_and_cannot_forward_gameplay() {
         })
         .await
         .unwrap();
-    let id = match client.recv().await.unwrap() {
+    let id = match client.recv().await.unwrap().packet {
         Packet::LoginSuccess { player_id, .. } => player_id,
         packet => panic!("expected login success, got {packet:?}"),
     };
@@ -971,7 +973,7 @@ async fn newcomer_receives_roster_larger_than_queue_capacity() {
     let received_ids = time::timeout(Duration::from_secs(5), async {
         let mut received_ids = HashSet::with_capacity(player_count);
         while received_ids.len() < player_count {
-            if let Packet::PlayerJoin { id, .. } = newcomer.recv().await.unwrap() {
+            if let Packet::PlayerJoin { id, .. } = newcomer.recv().await.unwrap().packet {
                 received_ids.insert(id);
             }
         }
@@ -1021,7 +1023,7 @@ async fn weather_snapshot_can_target_only_the_joining_client() {
 
     let existing_received_snapshot = time::timeout(Duration::from_millis(150), async {
         loop {
-            if matches!(existing.recv().await.unwrap(), Packet::TimeSync { .. }) {
+            if matches!(existing.recv().await.unwrap().packet, Packet::TimeSync { .. }) {
                 break;
             }
         }
@@ -1066,7 +1068,7 @@ async fn weather_snapshot_and_lightning_broadcast_in_reliable_order() {
     let weather_packets = time::timeout(Duration::from_secs(2), async {
         let mut packets = Vec::new();
         while packets.len() < 2 {
-            let packet = client.recv().await.unwrap();
+            let packet = client.recv().await.unwrap().packet;
             if matches!(
                 packet,
                 Packet::TimeSync { .. } | Packet::LightningStrike { .. }
@@ -1120,7 +1122,7 @@ async fn client_cannot_inject_authoritative_lightning() {
     let forged_strike_relayed = time::timeout(Duration::from_millis(150), async {
         loop {
             if matches!(
-                observer.recv().await.unwrap(),
+                observer.recv().await.unwrap().packet,
                 Packet::LightningStrike { .. }
             ) {
                 break;
@@ -1376,7 +1378,8 @@ async fn handshake_once(server: &LoopbackTestServer, username: &str) -> (Connect
     let packet = time::timeout(Duration::from_secs(2), connection.recv())
         .await
         .expect("server did not answer handshake")
-        .expect("server closed without a handshake reply");
+        .expect("server closed without a handshake reply")
+        .packet;
     (connection, packet)
 }
 
@@ -1604,6 +1607,7 @@ async fn host_queue_full_backpressures_pose_without_kicking_peer() {
             .await
             .unwrap()
             .unwrap()
+            .packet
         {
             Packet::LoginSuccess { player_id, .. } => player_id,
             packet => panic!("expected login success, got {packet:?}"),
@@ -1748,7 +1752,9 @@ async fn broadcast_container_slot_is_reliable_or_evicts_slow_viewer() {
             }
         }
         match time::timeout(Duration::from_millis(50), slow.recv()).await {
-            Ok(Ok(Packet::ContainerSlotUpdate { revision: 11, .. })) => {
+            Ok(Ok(received))
+                if matches!(received.packet, Packet::ContainerSlotUpdate { revision: 11, .. }) =>
+            {
                 slow_got_slot = true;
             }
             Ok(Ok(_)) => {}
@@ -1788,5 +1794,40 @@ async fn pre_auth_connections_are_capped_at_twice_max_players() {
     drop(_hold_b);
     let (_joined, packet) = handshake_once(&server, "late").await;
     assert!(matches!(packet, Packet::LoginSuccess { .. }));
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn server_ingress_records_actual_frame_bytes_with_trailing_data() {
+    let server = LoopbackTestServer::start(0xCAFE_BABE, 1);
+    let mut stream = server.connect_stream().await;
+
+    // Send handshake packet with 8 trailing bytes
+    let handshake = Packet::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        username: "trailing_user".into(),
+    };
+    let mut body = handshake.encode();
+    body.extend_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
+    let frame_len = body.len() as u32;
+    let expected_handshake_bytes = 4 + frame_len as u64;
+
+    use tokio::io::AsyncWriteExt;
+    stream.write_all(&frame_len.to_be_bytes()).await.unwrap();
+    stream.write_all(&body).await.unwrap();
+    stream.flush().await.unwrap();
+
+    let mut conn = Connection::new(stream);
+    let reply = time::timeout(Duration::from_secs(2), conn.recv())
+        .await
+        .expect("server reply timeout")
+        .expect("server reply error");
+    assert!(matches!(reply.packet, Packet::LoginSuccess { .. }));
+
+    // Verify inbound metrics recorded the exact wire bytes including trailing bytes
+    let snap = server.metrics.snapshot();
+    assert_eq!(snap.inbound_packets, 1);
+    assert_eq!(snap.inbound_bytes, expected_handshake_bytes);
+
     server.stop().await;
 }
