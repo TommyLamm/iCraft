@@ -21,7 +21,7 @@ pub(crate) use super::channels::{
     HANDSHAKE_TIMEOUT, MAX_CATCHUP_QUEUE_DEPTH,
 };
 pub(crate) use super::egress::{
-    broadcast_reliably, broadcast_state, broadcast_to, evict_slow_clients, handle_host_command,
+    broadcast_reliably, broadcast_state, evict_slow_clients, handle_host_command,
     normalize_host_response, send_to,
 };
 pub(crate) use super::ingress::{
@@ -32,10 +32,10 @@ pub(crate) use super::ingress::{
 use super::protocol::Packet;
 use super::protocol::PlayerId;
 pub(crate) use super::session::{
-    best_effort_send, packet_bytes, queue_now_ms, queue_stats, reliable_send,
-    reliable_send_and_wait, send_connection_packet, send_with_outbound_metrics, send_writer_packet,
-    CatchupMailbox, ClientSession, GameplaySessionState, PoseMailbox, PreAuthSlot, QueuedPacket,
-    RequestRateLimiter, Sessions, StateMailbox, StateMailboxKey, TrackedPacket,
+    packet_bytes, queue_now_ms, queue_stats, reliable_send,
+    reliable_send_and_wait, send_connection_packet, send_writer_packet,
+    CatchupMailbox, ClientSession, EncodedPacket, GameplaySessionState, PoseMailbox, PreAuthSlot,
+    QueuedPacket, RequestRateLimiter, Sessions, StateMailbox, StateMailboxKey, TrackedPacket,
     CLIENT_QUEUE_CAPACITY, CLIENT_TIMEOUT, KEEPALIVE_INTERVAL, MAX_CHAT_CHARS,
     PRE_AUTH_CONNECTION_MULTIPLIER, RELIABLE_ENQUEUE_TIMEOUT,
 };

@@ -486,15 +486,6 @@ async fn send_or_die(
     Ok(())
 }
 
-fn authoritative_weather_event(packet: &Packet) -> Option<ClientToGame> {
-    match packet {
-        Packet::TimeSync { .. } | Packet::LightningStrike { .. } => {
-            Some(ClientToGame::packet(packet.clone()))
-        }
-        _ => None,
-    }
-}
-
 impl NetworkClient {
     pub fn spawn(
         server_addr: String,

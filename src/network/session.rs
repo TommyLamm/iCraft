@@ -16,14 +16,9 @@ use super::transport::Connection;
 pub(crate) const CLIENT_QUEUE_CAPACITY: usize = 64;
 pub(crate) const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) const CLIENT_TIMEOUT: Duration = Duration::from_secs(15);
-/// Handshake is shorter than the post-auth idle timeout so unauthenticated
-/// sockets cannot occupy a pre-auth slot for a full 15s.
-pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const RELIABLE_ENQUEUE_TIMEOUT: Duration = Duration::from_millis(250);
 /// Matches the host display cap (`message.chars().take(256)`).
 pub(crate) const MAX_CHAT_CHARS: usize = 256;
-pub(crate) const DEFAULT_POSE_RATE_PER_SECOND: u32 = 20;
-pub(crate) const DEFAULT_CHAT_RATE_PER_SECOND: u32 = 8;
 pub(crate) const PRE_AUTH_CONNECTION_MULTIPLIER: usize = 2;
 
 #[derive(Clone, Default)]
@@ -166,19 +161,14 @@ impl Drop for OutboundMetricReservation {
 pub(crate) struct EncodedPacket {
     packet: Packet,
     payload: Arc<[u8]>,
-    protocol_version: u32,
 }
 
 impl EncodedPacket {
     pub(crate) fn new(packet: Packet) -> Result<Self, &'static str> {
-        // Live sessions speak one protocol after handshake; the connection
-        // holds the negotiated version, so payloads no longer embed it.
-        let protocol_version = crate::network::protocol::PROTOCOL_VERSION;
         let payload = packet.encode_payload()?;
         Ok(Self {
             packet,
             payload: Arc::<[u8]>::from(payload),
-            protocol_version,
         })
     }
 
@@ -190,17 +180,9 @@ impl EncodedPacket {
         &self.payload
     }
 
-    pub(crate) fn protocol_version(&self) -> u32 {
-        self.protocol_version
-    }
-
     /// TCP frame size: 4-byte BE length prefix + payload.
     pub(crate) fn frame_bytes(&self) -> u64 {
         frame_byte_len(self.payload.len())
-    }
-
-    pub(crate) fn into_packet(self) -> Packet {
-        self.packet
     }
 }
 
@@ -230,12 +212,6 @@ impl TrackedPacket {
         }
     }
 
-    pub(crate) fn try_from_packet(packet: Packet, metrics: &NetworkMetrics) -> Option<Self> {
-        EncodedPacket::new(packet)
-            .ok()
-            .map(|encoded| Self::new(encoded, metrics))
-    }
-
     pub(crate) fn packet(&self) -> &Packet {
         self.encoded
             .as_ref()
@@ -254,10 +230,6 @@ impl TrackedPacket {
         self.encoded
             .take()
             .expect("queued packet is consumed exactly once")
-    }
-
-    pub(crate) fn into_packet(self) -> Packet {
-        self.into_encoded().into_packet()
     }
 }
 
@@ -370,36 +342,6 @@ pub(crate) async fn reliable_send_and_wait(
     )
 }
 
-pub(crate) fn best_effort_send(
-    tx: &mpsc::Sender<QueuedPacket>,
-    packet: Packet,
-    metrics: &NetworkMetrics,
-) {
-    let Ok(encoded) = EncodedPacket::new(packet) else {
-        return;
-    };
-    best_effort_send_encoded(tx, encoded, metrics);
-}
-
-pub(crate) fn best_effort_send_encoded(
-    tx: &mpsc::Sender<QueuedPacket>,
-    encoded: EncodedPacket,
-    metrics: &NetworkMetrics,
-) {
-    let bytes = encoded.frame_bytes();
-    match tx.try_reserve() {
-        Ok(permit) => {
-            queue_stats().enqueue(bytes, queue_now_ms());
-            permit.send(QueuedPacket::Outbound(TrackedPacket::new(encoded, metrics)));
-        }
-        Err(mpsc::error::TrySendError::Full(_)) => {
-            queue_stats().drop_item();
-            metrics.record_queue_full();
-        }
-        Err(mpsc::error::TrySendError::Closed(_)) => queue_stats().drop_item(),
-    }
-}
-
 pub(crate) async fn send_connection_packet(
     connection: &mut Connection,
     packet: Packet,
@@ -444,18 +386,6 @@ pub(crate) async fn send_encoded_packet(
         writer.send_payload(encoded.payload())
     })
     .await
-}
-
-pub(crate) async fn send_with_outbound_metrics<F, Fut>(
-    packet: &Packet,
-    metrics: &NetworkMetrics,
-    send: F,
-) -> std::io::Result<()>
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = std::io::Result<()>>,
-{
-    send_with_outbound_byte_metrics(packet_bytes(packet), metrics, send).await
 }
 
 pub(crate) async fn send_with_outbound_byte_metrics<F, Fut>(
@@ -759,7 +689,7 @@ impl CatchupMailbox {
         packet.map(TrackedPacket::into_encoded)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) async fn len(&self) -> usize {
         self.pending.lock().await.len()
     }
@@ -896,7 +826,7 @@ pub(crate) type Sessions = Arc<Mutex<HashMap<PlayerId, ClientSession>>>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network::protocol::{EntityStateWire, PROTOCOL_VERSION};
+    use crate::network::protocol::EntityStateWire;
 
     #[tokio::test]
     async fn transport_metrics_count_exact_successful_tcp_frames() {
@@ -1221,7 +1151,6 @@ mod tests {
         let first = EncodedPacket::new(packet).unwrap();
         let second = first.clone();
         assert!(std::sync::Arc::ptr_eq(first.payload(), second.payload()));
-        assert_eq!(first.protocol_version(), PROTOCOL_VERSION);
         assert_eq!(first.frame_bytes(), packet_bytes(first.packet()));
     }
 }

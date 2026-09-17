@@ -606,37 +606,6 @@ fn tcp_cross_channel_revision_gate_and_reliable_control_are_fifo() {
 }
 
 #[test]
-fn authoritative_weather_packets_map_to_pure_client_events() {
-    let sync = Packet::TimeSync {
-        ticks: 12_345,
-        weather: 1,
-        weather_remaining_ticks: 6_789.5,
-    };
-    assert!(matches!(
-        authoritative_weather_event(&sync),
-        Some(ClientToGame::Packet(Packet::TimeSync {
-            ticks: 12_345,
-            weather: 1,
-            weather_remaining_ticks: 6_789.5,
-            ..
-        }))
-    ));
-
-    let strike = LightningStrike {
-        x: 3,
-        y: 72,
-        z: -9,
-        visual_seed: 123,
-    };
-    assert!(matches!(
-        authoritative_weather_event(&Packet::LightningStrike {
-            strike,
-        }),
-        Some(ClientToGame::Packet(Packet::LightningStrike { strike: received, .. })) if received == strike
-    ));
-}
-
-#[test]
 fn sends_and_receives_chat() {
     let _guard = network_test_guard();
     let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();

@@ -35,7 +35,7 @@
 | 03 | [worldgen 舊密度／洞穴算法與無用狀態](03_worldgen_dead_density.md) | P0／死碼 | 無 | 已完成 |
 | 04 | [字體、手部及小型渲染死路徑](04_render_dead_paths.md) | P0／死碼 | 無 | 已完成 |
 | 05 | [桌面無 producer 狀態與 menu 殘留](05_desktop_state_and_menu.md) | P0／死狀態 | 無 | 已完成 |
-| 06 | [network 死封套與傳送支線](06_network_dead_envelopes.md) | P0／死碼 | 建議02 | 待執行 |
+| 06 | [network 死封套與傳送支線](06_network_dead_envelopes.md) | P0／死碼 | 建議02 | 已完成 |
 | 07 | [Save worker 無 producer 封套與多餘 job id](07_save_worker_envelopes.md) | P0／死封套 | 02 | 待執行 |
 | 08 | [Runtime worldgen 固定 token 與空 metrics](08_worldgen_fixed_tokens.md) | P0／固定狀態 | 無 | 待執行 |
 | 09 | [收包按實際 frame bytes 計量](09_inbound_frame_metrics.md) | P1／活躍流程 | 建議06 | 待執行 |

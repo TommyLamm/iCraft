@@ -1,6 +1,6 @@
 # 06 — network 死封套與傳送支線
 
-狀態：待執行。基線：`83e751d`，2026-09-17。
+狀態：已完成。基線：`83e751d`，2026-09-17。
 前置：02 建議先完成。
 
 ## 定位與判定
@@ -27,5 +27,34 @@ encoded_packet_fanout_shares_one_payload_arc、queue_metrics_track_backlog_repla
 
 ## 實作紀錄
 
-尚未執行；完成時記錄實際修改、驗證結果、刪碼量及文件更新。
+- 修改內容：
+  1. `src/network/session.rs`：
+     - 刪除 `EncodedPacket` 的 `protocol_version` 欄位與 `protocol_version(&self)` getter、`into_packet(self)`。
+     - 刪除 `TrackedPacket` 的 `try_from_packet` 與 `into_packet` 測試專用轉換 API。
+     - 刪除無根傳送函式 `best_effort_send`、`best_effort_send_encoded`、`send_with_outbound_metrics`。
+     - 將 `CatchupMailbox::len` 的 `#[allow(dead_code)]` 改為 `#[cfg(test)]`。
+     - 清理重複與未使用常數 `HANDSHAKE_TIMEOUT`、`DEFAULT_POSE_RATE_PER_SECOND`、`DEFAULT_CHAT_RATE_PER_SECOND`（正式定義保留在 `channels.rs`）。
+     - 清理測試模組中未使用的 `PROTOCOL_VERSION` import，並移除 `encoded_packet_fanout_shares_one_payload_arc` 中對已刪除 `protocol_version()` 的 assertion。
+  2. `src/network/server.rs`：
+     - 從 re-exports 中移除 `broadcast_to`、`best_effort_send`、`send_with_outbound_metrics`，補入 `EncodedPacket` 供內部測試使用。
+  3. `src/network/egress.rs`：
+     - 刪除無根入口 `broadcast_to`。
+     - 清理未使用的 `PROTOCOL_VERSION` 與 `best_effort_send_encoded` imports。
+  4. `src/network/client.rs`：
+     - 刪除無 caller 的舊 helper `authoritative_weather_event`。
+  5. `src/network/client_tests.rs`：
+     - 刪除針對已刪 helper 的單元測試 `authoritative_weather_packets_map_to_pure_client_events`（真實天氣封包分發在 `connects_and_receives_world_init` 等整合測試中已覆蓋）。
+  6. `src/network/server_tests.rs`：
+     - 調整 `reliable_join_and_leave_wait_for_bounded_queue_capacity` 與 `full_reliable_queue_evicts_slow_client_without_ghost_session`，改用 `EncodedPacket::new` + `TrackedPacket::new` 建構，透過 `packet.packet().clone()` 觀察佇列封包。
+- 保留原因：
+  - `QueuedPacket::Outbound` 在 `ingress.rs:48`（forward_to_outbound）具有正式 producer，且在 `ingress.rs:346` 有 consumer，維持正常轉發流程未刪除。
+  - 握手與連線協議正規版本檢查維持在 `protocol.rs`、`client.rs`、`ingress.rs` 正式路徑。
+  - `packet_bytes` 用於 outbound/inbound metrics 保留。
+- 實際驗證命令與結果：
+  - `cargo check --all-targets --all-features`：exit 0，無 network 相關警告。
+  - `cargo test --lib network::`：93 passed, 0 failed（關注之 4 個核心測試全數通過）。
+  - `cargo test --test review_hardening_adversarial_frames --test review_hardening_session_lifecycle`：5 passed, 0 failed。
+- 淨刪碼量：
+  - 6 個檔案變更，17 行新增，145 行刪除，淨刪除 128 行。
+
 

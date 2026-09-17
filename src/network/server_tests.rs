@@ -711,11 +711,10 @@ async fn reliable_join_and_leave_wait_for_bounded_queue_capacity() {
     let metrics = NetworkMetrics::default();
     observer_out_tx
         .try_send(QueuedPacket::Outbound(
-            TrackedPacket::try_from_packet(
-                Packet::Keepalive,
+            TrackedPacket::new(
+                EncodedPacket::new(Packet::Keepalive).expect("keepalive encodes"),
                 &metrics,
-            )
-            .expect("keepalive encodes"),
+            ),
         ))
         .unwrap();
     sessions.lock().await.insert(
@@ -764,11 +763,11 @@ async fn reliable_join_and_leave_wait_for_bounded_queue_capacity() {
     let observer = tokio::spawn(async move {
         let unwrap_packet = |queued| match queued {
             QueuedPacket::Reliable(packet) | QueuedPacket::Outbound(packet) => {
-                packet.into_packet()
+                packet.packet().clone()
             }
             QueuedPacket::ReliableWithAck(packet, completion) => {
                 let _ = completion.send(true);
-                packet.into_packet()
+                packet.packet().clone()
             }
         };
         let queued = unwrap_packet(observer_out_rx.recv().await.unwrap());
@@ -814,11 +813,10 @@ async fn full_reliable_queue_evicts_slow_client_without_ghost_session() {
     let metrics = NetworkMetrics::default();
     out_tx
         .try_send(QueuedPacket::Outbound(
-            TrackedPacket::try_from_packet(
-                Packet::Keepalive,
+            TrackedPacket::new(
+                EncodedPacket::new(Packet::Keepalive).expect("keepalive encodes"),
                 &metrics,
-            )
-            .expect("keepalive encodes"),
+            ),
         ))
         .unwrap();
     let (cancel_tx, mut cancel_rx) = watch::channel(false);

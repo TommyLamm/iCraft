@@ -4,9 +4,9 @@ use std::sync::Arc;
 use super::channels::{
     HostEventSender, HostToServer, ProjectionDest, ProjectionEvent, ServerToHost,
 };
-use super::protocol::{Packet, PlayerId, PROTOCOL_VERSION};
+use super::protocol::{Packet, PlayerId};
 use super::session::{
-    best_effort_send_encoded, reliable_send, reliable_send_encoded, NetworkMetrics, Sessions,
+    reliable_send, reliable_send_encoded, NetworkMetrics, Sessions,
 };
 
 pub(crate) async fn normalize_host_response(
@@ -289,20 +289,5 @@ pub(crate) async fn broadcast_state(sessions: &Sessions, packet: Packet) {
         .collect();
     for mailbox in mailboxes {
         mailbox.replace_encoded(encoded.clone()).await;
-    }
-}
-
-pub(crate) async fn broadcast_to(sessions: &Sessions, packet: Packet) {
-    let Ok(encoded) = super::session::EncodedPacket::new(packet) else {
-        return;
-    };
-    let senders: Vec<_> = sessions
-        .lock()
-        .await
-        .values()
-        .map(|session| (session.out_tx.clone(), session.metrics.clone()))
-        .collect();
-    for (tx, metrics) in senders {
-        best_effort_send_encoded(&tx, encoded.clone(), &metrics);
     }
 }
