@@ -1,6 +1,6 @@
 # 15 — 資源解碼只做一次，移出 shared 的桌面 codec
 
-狀態：待執行。基線：`83e751d`，2026-09-17。
+狀態：已完成。基線：`83e751d`，2026-09-17。
 前置：無；完成後再做 16、17。
 
 ## 定位與證據
@@ -35,5 +35,37 @@
 
 ## 實作紀錄
 
-尚未執行；完成時填寫改動、實際命令／結果、淨刪碼和文件更新。
+- 改動細節：
+  - `src/resources.rs`：
+    - 徹底移除 `image` 與 `rodio` 依賴，解除 shared 對桌面 codec 的直接綁定。
+    - 引入單一消費端解碼 API `pub fn resolve_decoded<T, F>(&mut self, relative: &str, kind: &str, mut decode: F) -> Option<T>`：由最高優先序已啟用 pack 逆序遍歷至 `BUILTIN_PACK_ID`，逐一使用 caller 提供的 decode closure 解碼，解碼成功即立即返回；失敗記錄去重診斷並繼續 fallback，完全消除中間 `Vec<Arc<[u8]>>` 候選集合分配。
+    - 刪除所有舊 bool 驗證與 test-only 轉接層：`resolve_texture`、`resolve_sound`、`resolve_model`、`resolve_font`、`resolve_validated_asset`、`font_bytes_are_decodable`、`sound_bytes_are_decodable`。
+    - `resolve_font_source` 將 magic 檢驗與 bitmap 解析整合為 `parse_bitmap_font`，保留缺省 quiet fallback 與格式異常診斷去重。
+    - 既有測試 `typed_consumers_skip_invalid_override_and_deduplicate_diagnostics` 遷移至 `resolve_decoded`、`ModelRegistry::from_resource_packs` 與 `resolve_font_source` 正式入口。
+    - 新增回歸測試 `counted_decoder_only_decodes_successful_candidate_once`，驗證 corrupt override -> valid fallback 流程下有效候選僅被解碼一次。
+  - `src/texture.rs`：
+    - 抽取 `apply_resource_pack_tiles_with_decode`，呼叫 `resolve_decoded` 直接獲取已解碼之 `image::DynamicImage`，移除 `image::load_from_memory` 二次解碼。
+    - 在單次 atlas 建構過程中維護 `decoded_cache: HashMap<&'static str, Option<image::DynamicImage>>`，相同來源路徑的 tile 僅解碼一次，建構完畢隨函式退出即釋放。
+    - 更新 `compose_player_head_tiles_with_manager` 與 `compose_enderman_eyes_with_manager` 改走 `resolve_decoded`。
+    - 新增回歸測試 `repeated_atlas_sources_are_decoded_only_once_during_atlas_build`，驗證多次參照相同路徑的 tile 僅觸發單次解碼。
+  - `src/audio.rs`：
+    - 將音效 bytes 驗證邏輯收斂至 `src/audio.rs` 的 `sound_bytes_are_decodable`，透過 `resolve_decoded(&logical_path, "sound", |bytes| sound_bytes_are_decodable(bytes).then(|| bytes.to_vec()))` 保留 invalid override -> fallback 行為。
+  - 文件更新：
+    - `ARCHITECTURE.md`：記錄資產解碼邊界（`resolve_decoded`）、shared 不依賴桌面 codec、以及 atlas 建構期紋理快取架構。
+    - `plans/11_code_cleanup/README.md`：更新工作包 15 狀態為「已完成」。
+- 驗證命令與結果：
+  - `cargo check --all-targets`（通過，0 errors）
+  - `cargo test --lib resources`（通過，17 passed, 0 failed）
+  - `cargo test --bin icraft texture`（通過，11 passed, 0 failed）
+  - `cargo test --bin icraft audio`（通過，7 passed, 0 failed）
+  - 專項測試全數通過：
+    - `resources::tests::typed_consumers_skip_invalid_override_and_deduplicate_diagnostics`
+    - `bitmap_font_source_is_parsed_and_invalid_payload_falls_back_once`
+    - `texture::tests::resource_pack_atlas_applies_real_textures`
+    - `paint_on_miss_atlas_build_is_pack_first`
+    - `block_model::tests::selected_model_descriptor_reaches_mesh_consumer`
+    - `counted_decoder_only_decodes_successful_candidate_once`
+    - `repeated_atlas_sources_are_decoded_only_once_during_atlas_build`
+- 淨碼統計：
+  - 修改 3 處核心檔案，淨更動 +209 / -124（淨增加為 2 項新增單元測試與計數驗證，徹底移除 bool 重複解碼與純轉接 wrapper）。
 

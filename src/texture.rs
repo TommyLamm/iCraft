@@ -1,5 +1,6 @@
 use crate::resources::ResourcePackManager;
 use image::{Rgba, RgbaImage};
+use std::collections::HashMap;
 use wgpu::{Device, Queue, Sampler, Texture, TextureView};
 
 pub struct TextureAtlas {
@@ -474,17 +475,26 @@ fn paste_pack_tile(img: &mut RgbaImage, tile: &PackTile, src: &image::DynamicIma
     }
 }
 
-fn apply_resource_pack_with_manager(img: &mut RgbaImage, manager: &mut ResourcePackManager) {
+fn apply_resource_pack_tiles_with_decode<F>(
+    img: &mut RgbaImage,
+    manager: &mut ResourcePackManager,
+    tiles: &[PackTile],
+    mut decoder: F,
+) -> (usize, usize)
+where
+    F: FnMut(&[u8]) -> Option<image::DynamicImage>,
+{
     let mut pack_hits = 0usize;
     let mut misses = 0usize;
-    for tile in PACK_TILES {
-        let loaded = manager
-            .resolve_texture(tile.path)
-            .and_then(|bytes| image::load_from_memory(&bytes).ok());
-        match loaded {
+    let mut decoded_cache: HashMap<&'static str, Option<image::DynamicImage>> = HashMap::new();
+    for tile in tiles {
+        let loaded = decoded_cache.entry(tile.path).or_insert_with(|| {
+            manager.resolve_decoded(tile.path, "texture", &mut decoder)
+        });
+        match loaded.as_ref() {
             Some(src) => {
                 pack_hits += 1;
-                paste_pack_tile(img, tile, &src);
+                paste_pack_tile(img, tile, src);
             }
             None => {
                 misses += 1;
@@ -497,6 +507,16 @@ fn apply_resource_pack_with_manager(img: &mut RgbaImage, manager: &mut ResourceP
             }
         }
     }
+    (pack_hits, misses)
+}
+
+fn apply_resource_pack_with_manager(img: &mut RgbaImage, manager: &mut ResourcePackManager) {
+    let (pack_hits, misses) = apply_resource_pack_tiles_with_decode(
+        img,
+        manager,
+        PACK_TILES,
+        |bytes| image::load_from_memory(bytes).ok(),
+    );
     eprintln!(
         "[texture] resource-pack atlas: {} resolved, {} paint-on-miss fallback",
         pack_hits, misses
@@ -511,10 +531,9 @@ fn apply_resource_pack_with_manager(img: &mut RgbaImage, manager: &mut ResourceP
 /// preventing the F5 avatar from inheriting a hostile-mob head.
 fn compose_player_head_tiles_with_manager(img: &mut RgbaImage, manager: &mut ResourcePackManager) {
     const SKIN_PATH: &str = "entity/player/wide/steve.png";
-    let Some(bytes) = manager.resolve_texture(SKIN_PATH) else {
-        return;
-    };
-    let Ok(source) = image::load_from_memory(&bytes) else {
+    let Some(source) = manager.resolve_decoded(SKIN_PATH, "texture", |bytes| {
+        image::load_from_memory(bytes).ok()
+    }) else {
         return;
     };
 
@@ -528,10 +547,11 @@ fn compose_player_head_tiles_with_manager(img: &mut RgbaImage, manager: &mut Res
 }
 
 fn compose_enderman_eyes_with_manager(img: &mut RgbaImage, manager: &mut ResourcePackManager) {
-    let Some(bytes) = manager.resolve_texture("entity/enderman/enderman_eyes.png") else {
-        return;
-    };
-    let Ok(source) = image::load_from_memory(&bytes) else {
+    let Some(source) = manager.resolve_decoded(
+        "entity/enderman/enderman_eyes.png",
+        "texture",
+        |bytes| image::load_from_memory(bytes).ok(),
+    ) else {
         return;
     };
     let crop = image::imageops::crop_imm(&source, 8, 8, 8, 8).to_image();
@@ -930,5 +950,53 @@ mod tests {
         );
         assert!(elapsed.as_secs() < 5, "atlas apply unexpectedly slow: {elapsed:?}");
         assert_eq!(img.get_pixel(3 * 16 + 8, 0).0[3], 255);
+    }
+
+    #[test]
+    fn repeated_atlas_sources_are_decoded_only_once_during_atlas_build() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp = std::env::temp_dir().join(format!("icraft_atlas_cache_test_{stamp}"));
+        let builtin = temp.join("builtin");
+        let user = temp.join("resourcepacks");
+        std::fs::create_dir_all(builtin.join("textures")).unwrap();
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::write(
+            builtin.join("pack.json"),
+            br#"{"id":"icraft.builtin","name":"Builtin","version":"1","format":1,"description":""}"#,
+        )
+        .unwrap();
+        std::fs::write(builtin.join("textures/shared.png"), b"png_data").unwrap();
+
+        let mut manager = ResourcePackManager::discover(&builtin, &user);
+        let mut img = RgbaImage::new(256, 256);
+
+        let tiles = [
+            pack_tile(0, 0, "textures/shared.png"),
+            pack_tile(1, 0, "textures/shared.png"),
+            pack_tile(2, 0, "textures/shared.png"),
+        ];
+
+        let mut decode_calls = 0usize;
+        let (hits, misses) = apply_resource_pack_tiles_with_decode(
+            &mut img,
+            &mut manager,
+            &tiles,
+            |_bytes| {
+                decode_calls += 1;
+                Some(image::DynamicImage::ImageRgba8(RgbaImage::new(16, 16)))
+            },
+        );
+
+        assert_eq!(hits, 3);
+        assert_eq!(misses, 0);
+        assert_eq!(
+            decode_calls, 1,
+            "identical source path must be decoded only once across tiles in a single build"
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
     }
 }

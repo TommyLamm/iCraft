@@ -151,7 +151,10 @@ fn create_wav_bytes(samples: &[f32], sample_rate: u32) -> Vec<u8> {
 }
 
 fn sound_bytes_are_decodable(bytes: &[u8]) -> bool {
-    crate::resources::sound_bytes_are_decodable(bytes)
+    if bytes.is_empty() {
+        return false;
+    }
+    rodio::Decoder::new(Cursor::new(bytes.to_vec())).is_ok()
 }
 
 fn load_or_synthesize_sound(file_path: &Path, sound_id: SoundId) -> (Vec<u8>, bool) {
@@ -493,8 +496,9 @@ impl AudioManager {
             let filename = id.filename();
             let logical_path = format!("sounds/{filename}");
             let loaded_bytes = manager
-                .resolve_sound(&logical_path)
-                .map(|bytes| bytes.as_ref().to_vec())
+                .resolve_decoded(&logical_path, "sound", |bytes| {
+                    sound_bytes_are_decodable(bytes).then(|| bytes.to_vec())
+                })
                 .unwrap_or_else(|| create_wav_bytes(&synth_sound(id), 22050));
 
             sound_cache.insert(id, loaded_bytes);

@@ -571,6 +571,16 @@ sends uncompressed terrain streams to TCP/join clients instead of the disk
 Desktop world paths go through `validated_world_path` (no symlink escape
 from `saves/`).
 
+Asset resolution in `ResourcePackManager` decouples discovery and override
+traversal from decoding: consumers call `resolve_decoded<T>`, passing a typed
+decoder closure. Candidate assets are checked in priority order down to the
+built-in pack; the first successfully decoded value is returned without
+allocating intermediate candidate vectors or performing boolean pre-validation.
+Shared `resources.rs` contains no desktop `image` or `rodio` dependencies; codecs
+remain strictly in consumer domains (`src/texture.rs`, `src/audio.rs`). Atlas
+generation caches decoded images by path across tiles sharing source textures,
+dropping the cache once atlas assembly completes.
+
 ## Code map
 
 | Area | Files |

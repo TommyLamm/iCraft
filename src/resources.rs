@@ -362,32 +362,6 @@ impl ResourcePackManager {
         value
     }
 
-    /// Resolve and validate a texture through the pack manager.  Invalid
-    /// overrides are skipped so a valid built-in texture still wins over a
-    /// corrupt selected-pack entry.
-    pub fn resolve_texture(&mut self, relative: &str) -> Option<Arc<[u8]>> {
-        self.resolve_validated_asset(relative, "texture", |bytes| {
-            image::load_from_memory(bytes).is_ok()
-        })
-    }
-
-    /// Resolve a JSON item/block model descriptor.  The small client model
-    /// format intentionally accepts any JSON object; malformed JSON and
-    /// scalar/array descriptors fall back to the built-in/procedural model.
-    pub fn resolve_model(&mut self, relative: &str) -> Option<Arc<[u8]>> {
-        self.resolve_validated_asset(relative, "model", |bytes| {
-            serde_json::from_slice::<serde_json::Value>(bytes)
-                .map(|value| value.is_object())
-                .unwrap_or(false)
-        })
-    }
-
-    /// Resolve a TrueType/OpenType/WebFont payload.  Font parsing is kept
-    /// dependency-free and bounded by checking the format's mandatory magic.
-    pub fn resolve_font(&mut self, relative: &str) -> Option<Arc<[u8]>> {
-        self.resolve_validated_asset(relative, "font", font_bytes_are_decodable)
-    }
-
     /// Resolve the parsed UI font registry.  A missing `relative` path is
     /// intentionally quiet so normal installs without a custom font do not
     /// emit a diagnostic; once a pack supplies the path, malformed or
@@ -396,26 +370,10 @@ impl ResourcePackManager {
         if self.read_asset(relative).is_none() {
             return FontSource::BuiltIn;
         }
-        let Some(bytes) = self.resolve_font(relative) else {
-            return FontSource::BuiltIn;
-        };
-        match parse_bitmap_font(&bytes) {
+        match self.resolve_decoded(relative, "font", parse_bitmap_font) {
             Some(glyphs) => FontSource::Bitmap(glyphs),
-            None => {
-                self.record_asset_diagnostic(
-                    relative,
-                    "font",
-                    "font payload is not a supported bitmap descriptor; using built-in font",
-                );
-                FontSource::BuiltIn
-            }
+            None => FontSource::BuiltIn,
         }
-    }
-
-    /// Resolve a sound through the same manager entry point used by the audio
-    /// consumer.  Rodio performs the actual bounded decoder validation.
-    pub fn resolve_sound(&mut self, relative: &str) -> Option<Arc<[u8]>> {
-        self.resolve_validated_asset(relative, "sound", sound_bytes_are_decodable)
     }
 
     pub fn read_asset(&self, relative: &str) -> Option<Arc<[u8]>> {
@@ -524,14 +482,19 @@ impl ResourcePackManager {
         }
     }
 
-    fn resolve_validated_asset<F>(
+    /// Resolve and decode an asset from the highest-priority enabled pack down
+    /// to the built-in pack.  The caller-supplied `decode` closure parses the
+    /// raw bytes directly into the target typed representation.  Invalid
+    /// candidates are diagnosed and skipped so a valid fallback candidate
+    /// (such as built-in assets) still succeeds.
+    pub fn resolve_decoded<T, F>(
         &mut self,
         relative: &str,
         kind: &str,
-        validator: F,
-    ) -> Option<Arc<[u8]>>
+        mut decode: F,
+    ) -> Option<T>
     where
-        F: Fn(&[u8]) -> bool,
+        F: FnMut(&[u8]) -> Option<T>,
     {
         let normalized = match normalize_logical_path(relative) {
             Ok(path) => path,
@@ -540,33 +503,46 @@ impl ResourcePackManager {
                 return None;
             }
         };
-        let mut candidates = Vec::new();
-        for id in self.enabled_order.iter().rev() {
-            if let Some(pack) = self.packs.iter().find(|pack| pack.manifest.id == *id) {
-                if let Some(bytes) = lookup_asset(pack, &normalized) {
-                    candidates.push(Arc::clone(bytes));
+
+        for i in (0..self.enabled_order.len()).rev() {
+            let id = self.enabled_order[i].clone();
+            let candidate = self
+                .packs
+                .iter()
+                .find(|pack| pack.manifest.id == id)
+                .and_then(|pack| lookup_asset(pack, &normalized).cloned());
+            if let Some(bytes) = candidate {
+                match decode(&bytes) {
+                    Some(value) => return Some(value),
+                    None => {
+                        self.record_asset_diagnostic(
+                            &normalized,
+                            kind,
+                            &format!("invalid {kind} asset; using built-in/procedural fallback"),
+                        );
+                    }
                 }
             }
         }
-        if let Some(pack) = self
+
+        let builtin = self
             .packs
             .iter()
             .find(|pack| pack.manifest.id == BUILTIN_PACK_ID)
-        {
-            if let Some(bytes) = lookup_asset(pack, &normalized) {
-                candidates.push(Arc::clone(bytes));
+            .and_then(|pack| lookup_asset(pack, &normalized).cloned());
+        if let Some(bytes) = builtin {
+            match decode(&bytes) {
+                Some(value) => return Some(value),
+                None => {
+                    self.record_asset_diagnostic(
+                        &normalized,
+                        kind,
+                        &format!("invalid {kind} asset; using built-in/procedural fallback"),
+                    );
+                }
             }
         }
-        for bytes in candidates {
-            if validator(&bytes) {
-                return Some(bytes);
-            }
-            self.record_asset_diagnostic(
-                &normalized,
-                kind,
-                &format!("invalid {kind} asset; using built-in/procedural fallback"),
-            );
-        }
+
         self.record_asset_diagnostic(
             &normalized,
             kind,
@@ -921,19 +897,6 @@ fn normalize_locale_code(raw: &str) -> Option<String> {
     Some(code)
 }
 
-fn font_bytes_are_decodable(bytes: &[u8]) -> bool {
-    bytes.starts_with(b"OTTO")
-        || bytes.starts_with(b"true")
-        || bytes.starts_with(b"typ1")
-        || bytes.starts_with(b"ttcf")
-        || bytes.starts_with(b"wOFF")
-        || bytes.starts_with(b"wOF2")
-        || bytes.starts_with(&[0, 1, 0, 0])
-        || serde_json::from_slice::<serde_json::Value>(bytes)
-            .map(|value| value.is_object())
-            .unwrap_or(false)
-}
-
 fn parse_bitmap_font(bytes: &[u8]) -> Option<HashMap<char, [u8; 7]>> {
     let value = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
     let glyphs = value.get("glyphs")?.as_object()?;
@@ -962,13 +925,6 @@ fn parse_bitmap_font(bytes: &[u8]) -> Option<HashMap<char, [u8; 7]>> {
         parsed.insert(character.to_ascii_uppercase(), glyph);
     }
     Some(parsed)
-}
-
-pub fn sound_bytes_are_decodable(bytes: &[u8]) -> bool {
-    if bytes.is_empty() {
-        return false;
-    }
-    rodio::Decoder::new(Cursor::new(bytes.to_vec())).is_ok()
 }
 
 fn insert_asset_aliases(assets: &mut HashMap<String, Arc<[u8]>>, relative: &str, bytes: Arc<[u8]>) {
@@ -1258,7 +1214,11 @@ mod tests {
         fs::write(root.join("sounds/click.wav"), sound).unwrap();
         fs::write(root.join("lang/en_us.json"), br#"{"hello":"Hello"}"#).unwrap();
         fs::write(root.join("models/block.json"), br#"{"parent":"builtin"}"#).unwrap();
-        fs::write(root.join("font/main.ttf"), b"OTTOfont").unwrap();
+        fs::write(
+            root.join("font/ui.json"),
+            br#"{"glyphs":{"A":[31,17,17,31,17,17,17]}}"#,
+        )
+        .unwrap();
 
         let user = root.join("resourcepacks");
         let override_pack = user.join("override");
@@ -1271,40 +1231,93 @@ mod tests {
         fs::write(override_pack.join("textures/stone.png"), b"not png").unwrap();
         fs::write(override_pack.join("sounds/click.wav"), b"not sound").unwrap();
         fs::write(override_pack.join("lang/en_us.json"), [0xff, 0xfe]).unwrap();
-        fs::write(override_pack.join("models/block.json"), b"[]").unwrap();
-        fs::write(override_pack.join("font/main.ttf"), b"not font").unwrap();
+        fs::write(override_pack.join("models/block.json"), b"not json").unwrap();
+        fs::write(override_pack.join("font/ui.json"), b"not font").unwrap();
 
         let mut manager = ResourcePackManager::discover(&root, &user);
         manager.apply_enabled_order(["test.override"]).unwrap();
-        assert_eq!(
-            manager.resolve_texture("textures/stone.png").as_deref(),
-            Some(texture.as_slice())
-        );
-        assert_eq!(
-            manager.resolve_sound("sounds/click.wav").as_deref(),
-            Some(sound.as_slice())
-        );
+        let resolved_texture = manager.resolve_decoded("textures/stone.png", "texture", |bytes| {
+            (bytes == texture).then(|| bytes.to_vec())
+        });
+        assert_eq!(resolved_texture.as_deref(), Some(texture.as_slice()));
+        let resolved_sound = manager.resolve_decoded("sounds/click.wav", "sound", |bytes| {
+            (bytes == sound).then(|| bytes.to_vec())
+        });
+        assert_eq!(resolved_sound.as_deref(), Some(sound.as_slice()));
         let locale_layers = manager.resolve_locale_layers("en_us");
         assert_eq!(
             locale_layers.first().map(AsRef::as_ref),
             Some(br#"{"hello":"Hello"}"#.as_slice())
         );
-        assert_eq!(
-            manager.resolve_model("models/block.json").as_deref(),
-            Some(br#"{"parent":"builtin"}"#.as_slice())
+        let registry = crate::block_model::ModelRegistry::from_resource_packs(
+            &mut manager,
+            ["models/block.json"],
         );
         assert_eq!(
-            manager.resolve_font("font/main.ttf").as_deref(),
-            Some(b"OTTOfont".as_slice())
+            registry.descriptor("models/block.json"),
+            Some(&crate::block_model::ModelDescriptor::default())
+        );
+        let font_source = manager.resolve_font_source("font/ui.json");
+        assert_eq!(
+            font_source.glyph_override('A'),
+            Some([31, 17, 17, 31, 17, 17, 17])
         );
         let diagnostics = manager.diagnostics().len();
         assert!(diagnostics >= 5);
-        manager.resolve_texture("textures/stone.png");
-        manager.resolve_sound("sounds/click.wav");
+        let _ = manager.resolve_decoded("textures/stone.png", "texture", |bytes| {
+            (bytes == texture).then(|| bytes.to_vec())
+        });
+        let _ = manager.resolve_decoded("sounds/click.wav", "sound", |bytes| {
+            (bytes == sound).then(|| bytes.to_vec())
+        });
         let _ = manager.resolve_locale_layers("en_us");
-        manager.resolve_model("models/block.json");
-        manager.resolve_font("font/main.ttf");
+        let _ = crate::block_model::ModelRegistry::from_resource_packs(
+            &mut manager,
+            ["models/block.json"],
+        );
+        let _ = manager.resolve_font_source("font/ui.json");
         assert_eq!(manager.diagnostics().len(), diagnostics);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn counted_decoder_only_decodes_successful_candidate_once() {
+        let root = temp_dir("counted_decoder");
+        write_pack(&root, BUILTIN_PACK_ID, &[]);
+        let user = root.join("resourcepacks");
+        let override_pack = user.join("override");
+        write_pack(&override_pack, "test.override", &[]);
+        fs::create_dir_all(override_pack.join("textures")).unwrap();
+        fs::create_dir_all(root.join("textures")).unwrap();
+        fs::write(override_pack.join("textures/stone.png"), b"corrupt_override").unwrap();
+        fs::write(root.join("textures/stone.png"), b"valid_fallback").unwrap();
+
+        let mut manager = ResourcePackManager::discover(&root, &user);
+        manager.apply_enabled_order(["test.override"]).unwrap();
+
+        let mut decode_calls = 0usize;
+        let mut corrupt_attempts = 0usize;
+        let mut valid_attempts = 0usize;
+
+        let result = manager.resolve_decoded("textures/stone.png", "texture", |bytes| {
+            decode_calls += 1;
+            if bytes == b"corrupt_override" {
+                corrupt_attempts += 1;
+                None
+            } else if bytes == b"valid_fallback" {
+                valid_attempts += 1;
+                Some("parsed_texture")
+            } else {
+                None
+            }
+        });
+
+        assert_eq!(result, Some("parsed_texture"));
+        assert_eq!(decode_calls, 2);
+        assert_eq!(corrupt_attempts, 1);
+        assert_eq!(valid_attempts, 1, "successful candidate must be decoded exactly once");
+        assert_eq!(manager.diagnostics().len(), 1);
+
         let _ = fs::remove_dir_all(root);
     }
 
