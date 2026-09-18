@@ -28,12 +28,7 @@ glam = "0.25"
 noise = "0.8"
 image = { version = "0.24", optional = true }
 pollster = { version = "0.3", optional = true }
-# Pinned so `image` / `rayon` keep the versions this workspace validated.
-indexmap = "=2.2.6"
-exr = "=1.71.0"
-half = "=2.2.1"
-rayon = "=1.10.0"
-rayon-core = "=1.12.1"
+rayon = "1.10"
 bytemuck = { version = "1.16", features = ["derive"] }
 rodio = { version = "0.19", optional = true }
 serde = { version = "1.0", features = ["derive"] }

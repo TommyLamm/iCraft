@@ -47,7 +47,7 @@
 | 15 | [資源解碼只做一次，移出 shared 的桌面 codec](15_resource_decode_boundary.md) | P1／解碼去重 | 無 | 已完成 |
 | 16 | [音效快取共用 bytes，移除播放時整份複製](16_audio_shared_bytes.md) | P1／資料共用 | 15 | 已完成 |
 | 17 | [desktop feature 與 dedicated 建置邊界](17_desktop_cargo_feature.md) | P1／建置邊界 | 15 | 已完成 |
-| 18 | [清理只作版本限制的直接依賴](18_dependency_pins.md) | P2／依賴精簡 | 建議17 | 待執行 |
+| 18 | [清理只作版本限制的直接依賴](18_dependency_pins.md) | P2／依賴精簡 | 建議17 | 已完成 |
 | 19 | [Chunk 派生索引單次重建與 membership 去重](19_chunk_derived_indexes.md) | P1／算法去重 | 建議03 | 已完成 |
 | 20 | [Worldgen demand／generating／completed 排程收斂](20_worldgen_job_lifecycle.md) | P1／排程收斂 | 08；建議02 | 已完成 |
 | 21 | [整欄投影共用 commit 邊界](21_column_projection_commit.md) | P1／提交去重 | 11 | 已完成 |
