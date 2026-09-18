@@ -40,18 +40,6 @@ impl WorldGenContext {
     pub fn surface_height_at(&self, wx: i32, wz: i32) -> i32 {
         self.density.surface_height(&self.climate, wx, wz)
     }
-
-    /// Column fill after `surface_height_at` / `biome_at` have already been sampled.
-    pub fn block_at_sampled(
-        &self,
-        wx: i32,
-        wy: i32,
-        wz: i32,
-        surface_y: i32,
-        biome: crate::world::Biome,
-    ) -> Option<crate::world::BlockType> {
-        surface::block_for_column(self, wx, wy, wz, surface_y, biome)
-    }
 }
 
 /// Deterministic hash for feature placement that does not depend on

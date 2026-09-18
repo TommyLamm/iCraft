@@ -1,28 +1,31 @@
 use crate::world::{Biome, BlockType};
-use crate::worldgen::{WorldGenContext, SEA_LEVEL};
+use crate::worldgen::SEA_LEVEL;
 
 /// Surface composition data for a biome.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BiomeSurfaceData {
     pub top: BlockType,
     pub filler: BlockType,
     pub underwater: BlockType,
     pub underwater_filler: BlockType,
     pub is_snowy: bool,
-    pub is_dry: bool,
 }
 
 impl BiomeSurfaceData {
     pub fn for_biome(biome: Biome) -> Self {
         use BlockType::*;
         match biome {
-            Biome::Plains | Biome::Forest | Biome::BirchForest | Biome::Meadow => Self {
+            Biome::Plains
+            | Biome::Forest
+            | Biome::BirchForest
+            | Biome::Meadow
+            | Biome::Savanna
+            | Biome::Jungle => Self {
                 top: Grass,
                 filler: Dirt,
                 underwater: Sand,
                 underwater_filler: Dirt,
                 is_snowy: false,
-                is_dry: false,
             },
             Biome::Taiga => Self {
                 top: Grass,
@@ -30,7 +33,6 @@ impl BiomeSurfaceData {
                 underwater: Gravel,
                 underwater_filler: Dirt,
                 is_snowy: false,
-                is_dry: false,
             },
             Biome::SnowyPlains => Self {
                 top: Grass,
@@ -38,23 +40,13 @@ impl BiomeSurfaceData {
                 underwater: Gravel,
                 underwater_filler: Dirt,
                 is_snowy: true,
-                is_dry: false,
             },
-            Biome::Desert => Self {
+            Biome::Desert | Biome::Badlands => Self {
                 top: Sand,
                 filler: Sandstone,
                 underwater: Sand,
                 underwater_filler: Sandstone,
                 is_snowy: false,
-                is_dry: true,
-            },
-            Biome::Savanna => Self {
-                top: Grass,
-                filler: Dirt,
-                underwater: Sand,
-                underwater_filler: Dirt,
-                is_snowy: false,
-                is_dry: true,
             },
             Biome::Swamp => Self {
                 top: Grass,
@@ -62,23 +54,6 @@ impl BiomeSurfaceData {
                 underwater: Clay,
                 underwater_filler: Dirt,
                 is_snowy: false,
-                is_dry: false,
-            },
-            Biome::Jungle => Self {
-                top: Grass,
-                filler: Dirt,
-                underwater: Sand,
-                underwater_filler: Dirt,
-                is_snowy: false,
-                is_dry: false,
-            },
-            Biome::Badlands => Self {
-                top: Sand,
-                filler: Sandstone,
-                underwater: Sand,
-                underwater_filler: Sandstone,
-                is_snowy: false,
-                is_dry: true,
             },
             Biome::WindsweptHills => Self {
                 top: Stone,
@@ -86,7 +61,6 @@ impl BiomeSurfaceData {
                 underwater: Gravel,
                 underwater_filler: Stone,
                 is_snowy: true,
-                is_dry: false,
             },
             Biome::River => Self {
                 top: Sand,
@@ -94,7 +68,6 @@ impl BiomeSurfaceData {
                 underwater: Gravel,
                 underwater_filler: Dirt,
                 is_snowy: false,
-                is_dry: false,
             },
             Biome::Beach => Self {
                 top: Sand,
@@ -102,7 +75,6 @@ impl BiomeSurfaceData {
                 underwater: Sand,
                 underwater_filler: Sand,
                 is_snowy: false,
-                is_dry: false,
             },
             Biome::Ocean | Biome::DeepOcean => Self {
                 top: Sand,
@@ -110,22 +82,18 @@ impl BiomeSurfaceData {
                 underwater: Sand,
                 underwater_filler: Dirt,
                 is_snowy: false,
-                is_dry: false,
             },
         }
     }
 }
 
-/// Computes the block type for a column position.
+/// Computes the block type for a column position given precomputed surface height and biome surface data.
 ///
 /// Returns None for air (or water above the sea floor).
 pub fn block_for_column(
-    _ctx: &WorldGenContext,
-    _wx: i32,
     wy: i32,
-    _wz: i32,
     surface_y: i32,
-    biome: Biome,
+    surface: &BiomeSurfaceData,
 ) -> Option<BlockType> {
     use BlockType::*;
 
@@ -134,8 +102,6 @@ pub fn block_for_column(
     if wy <= min_y {
         return Some(Bedrock);
     }
-
-    let surface = BiomeSurfaceData::for_biome(biome);
 
     if wy == surface_y {
         // Surface / sea-floor block.
@@ -200,25 +166,55 @@ mod tests {
     }
 
     #[test]
+    fn merged_biome_surface_data_matches() {
+        assert_eq!(
+            BiomeSurfaceData::for_biome(Biome::Desert),
+            BiomeSurfaceData::for_biome(Biome::Badlands)
+        );
+        assert_eq!(
+            BiomeSurfaceData::for_biome(Biome::Plains),
+            BiomeSurfaceData::for_biome(Biome::Savanna)
+        );
+        assert_eq!(
+            BiomeSurfaceData::for_biome(Biome::Plains),
+            BiomeSurfaceData::for_biome(Biome::Jungle)
+        );
+    }
+
+    #[test]
     fn overworld_floor_is_bedrock_at_min_y() {
-        let ctx = WorldGenContext::new(12345);
         let min_y = crate::dimension::Dimension::Overworld.height().min_y();
-        let floor = block_for_column(&ctx, 0, min_y, 0, 70, Biome::Plains);
+        let surface = BiomeSurfaceData::for_biome(Biome::Plains);
+        let floor = block_for_column(min_y, 70, &surface);
         assert_eq!(floor, Some(BlockType::Bedrock));
-        let below = block_for_column(&ctx, 0, min_y - 1, 0, 70, Biome::Plains);
+        let below = block_for_column(min_y - 1, 70, &surface);
         assert_eq!(below, Some(BlockType::Bedrock));
-        let above = block_for_column(&ctx, 0, min_y + 1, 0, 70, Biome::Plains);
+        let above = block_for_column(min_y + 1, 70, &surface);
         assert_ne!(above, Some(BlockType::Bedrock));
     }
 
     #[test]
     fn block_for_column_handles_water() {
-        let ctx = WorldGenContext::new(12345);
+        let surface_ocean = BiomeSurfaceData::for_biome(Biome::Ocean);
         // Surface at y=50 (below sea level), water fills above.
-        let water = block_for_column(&ctx, 0, 60, 0, 50, Biome::Ocean);
+        let water = block_for_column(60, 50, &surface_ocean);
         assert_eq!(water, Some(BlockType::Water));
 
-        let air = block_for_column(&ctx, 0, 70, 0, 65, Biome::Plains);
+        let surface_plains = BiomeSurfaceData::for_biome(Biome::Plains);
+        let air = block_for_column(70, 65, &surface_plains);
         assert_eq!(air, None);
+    }
+
+    #[test]
+    fn block_for_column_handles_snow_filler_and_stone() {
+        let surface_snow = BiomeSurfaceData::for_biome(Biome::SnowyPlains);
+        // Snow block on high snowy surface.
+        assert_eq!(block_for_column(90, 90, &surface_snow), Some(BlockType::Snow));
+        // Normal grass on snowy surface at or below y=80.
+        assert_eq!(block_for_column(80, 80, &surface_snow), Some(BlockType::Grass));
+        // Filler within 3 blocks below surface.
+        assert_eq!(block_for_column(78, 80, &surface_snow), Some(BlockType::Dirt));
+        // Stone more than 3 blocks below surface.
+        assert_eq!(block_for_column(70, 80, &surface_snow), Some(BlockType::Stone));
     }
 }

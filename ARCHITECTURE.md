@@ -443,8 +443,8 @@ LODs are filled the first time the camera selects them.
   `(END_CITY_X, END_CITY_BASE_Y, END_CITY_Z)` inside `StructureManager`
   (same Y as `origin_y_for(EndCity)`); there is no parallel
   `dimension::apply_fixed_end_city` path.
-- Column fill samples surface/biome once per (x, z), then `block_at_sampled`
-  per Y. Ambient spawn uses `WorldColumns::highest_solid_y`.
+- Column fill samples surface/biome and `BiomeSurfaceData` once per (x, z),
+  then `block_for_column` per Y. Ambient spawn uses `WorldColumns::highest_solid_y`.
 
 Join `ChunkData` that omits light streams zeros them then
 `Chunk::recompute_direct_column_lighting`. Disk restore of a full

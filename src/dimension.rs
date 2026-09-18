@@ -1254,4 +1254,29 @@ mod tests {
         assert_eq!(column_block_fingerprint(&end), 5387455366647140407);
         assert_eq!(column_block_fingerprint(&flat), 700803242126284744);
     }
+
+    #[test]
+    fn fixed_seed_overworld_coordinates_fingerprints_are_stable() {
+        let options = WorldGenerationOptions {
+            world_type: crate::game_rules::WorldType::Default,
+            generate_structures: false,
+        };
+        let c_pos_pos = generate_chunk_with_options(Dimension::Overworld, 2, 3, 99991, options);
+        let c_neg_pos = generate_chunk_with_options(Dimension::Overworld, -2, 3, 99991, options);
+        let c_pos_neg = generate_chunk_with_options(Dimension::Overworld, 3, -2, 99991, options);
+        let c_neg_neg = generate_chunk_with_options(Dimension::Overworld, -3, -2, 99991, options);
+
+        let fp_pos_pos = column_block_fingerprint(&c_pos_pos);
+        let fp_neg_pos = column_block_fingerprint(&c_neg_pos);
+        let fp_pos_neg = column_block_fingerprint(&c_pos_neg);
+        let fp_neg_neg = column_block_fingerprint(&c_neg_neg);
+
+        assert_eq!(fp_pos_neg, 6656363810664605235);
+        assert_eq!(fp_pos_pos, column_block_fingerprint(&generate_chunk_with_options(Dimension::Overworld, 2, 3, 99991, options)));
+        assert_eq!(fp_neg_pos, column_block_fingerprint(&generate_chunk_with_options(Dimension::Overworld, -2, 3, 99991, options)));
+        assert_eq!(fp_neg_neg, column_block_fingerprint(&generate_chunk_with_options(Dimension::Overworld, -3, -2, 99991, options)));
+        assert_ne!(fp_pos_pos, fp_neg_pos);
+        assert_ne!(fp_neg_pos, fp_neg_neg);
+        assert_ne!(fp_pos_pos, fp_neg_neg);
+    }
 }

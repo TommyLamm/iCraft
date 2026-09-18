@@ -3,6 +3,7 @@ use crate::world::section::{
     section_and_local_y_to_world_y, world_y_to_local_y, world_y_to_section_y, ChunkSection,
     NO_HEIGHT, SECTION_SIZE,
 };
+use crate::worldgen::surface::{self, BiomeSurfaceData};
 use std::mem::{size_of, size_of_val};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,10 +111,10 @@ impl Chunk {
                 let wz = chunk_z * CHUNK_DEPTH as i32 + z as i32;
                 let surface_y = ctx.surface_height_at(wx, wz);
                 let biome = ctx.biome_at(wx, wz);
+                let surface = BiomeSurfaceData::for_biome(biome);
 
                 for wy in min_y..height.max_y_exclusive() {
-                    let block = ctx
-                        .block_at_sampled(wx, wy, wz, surface_y, biome)
+                    let block = surface::block_for_column(wy, surface_y, &surface)
                         .unwrap_or(BlockType::Air);
                     if block != BlockType::Air {
                         chunk.set_block_local(x, wy, z, block);
