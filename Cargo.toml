@@ -5,18 +5,29 @@ edition = "2021"
 default-run = "icraft"
 
 [features]
+default = ["desktop"]
+desktop = ["dep:winit", "dep:wgpu", "dep:rodio", "dep:image", "dep:pollster"]
 # Desktop-only storage/engine microbenchmarks (`src/microbench.rs` via
 # `main.rs`). Opt-in: `cargo run --features microbench -- --microbench`.
 # The old empty `harness` feature (sim_harness / final_acceptance) is gone.
-microbench = []
+microbench = ["desktop"]
+
+[[bin]]
+name = "icraft"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[[bin]]
+name = "icraft-server"
+path = "src/bin/icraft-server.rs"
 
 [dependencies]
-winit = "0.30"
-wgpu = "0.19"
+winit = { version = "0.30", optional = true }
+wgpu = { version = "0.19", optional = true }
 glam = "0.25"
 noise = "0.8"
-image = "0.24"
-pollster = "0.3"
+image = { version = "0.24", optional = true }
+pollster = { version = "0.3", optional = true }
 # Pinned so `image` / `rayon` keep the versions this workspace validated.
 indexmap = "=2.2.6"
 exr = "=1.71.0"
@@ -24,7 +35,7 @@ half = "=2.2.1"
 rayon = "=1.10.0"
 rayon-core = "=1.12.1"
 bytemuck = { version = "1.16", features = ["derive"] }
-rodio = "0.19"
+rodio = { version = "0.19", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 bincode = "1.3"

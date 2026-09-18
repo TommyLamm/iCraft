@@ -710,6 +710,12 @@ fn run_topology(label: &str, listen: bool) {
         wait_for_cached_response(&mut runtime, &mut refs, owner_id, 0x30_004).outcome,
         GameplayOutcome::Accepted { .. }
     ));
+    drive_until(
+        &mut runtime,
+        &mut refs,
+        "session update after craft",
+        |_, clients| clients[0].has_session_update(owner_id),
+    );
     drop(refs);
     assert!(clients[0].has_session_update(owner_id));
 

@@ -15,6 +15,25 @@ cargo run --release
 
 For a faster development build, omit `--release`.
 
+The desktop client is enabled by default via the `desktop` Cargo feature, which
+pulls in `winit`, `wgpu`, `rodio`, `image`, and `pollster`.
+
+### Headless dedicated server
+
+The headless server binary (`icraft-server`) can be built and run without desktop dependencies:
+
+```text
+cargo run --no-default-features --bin icraft-server -- --help
+```
+
+### Microbenchmarks
+
+Desktop storage and engine microbenchmarks run via the opt-in `microbench` feature (which implies `desktop`):
+
+```text
+cargo run --features microbench -- --microbench
+```
+
 ## Assets, resource packs, and languages
 
 The repository ships a small, self-contained `assets/` pack with procedural

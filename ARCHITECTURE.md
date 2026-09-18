@@ -8,8 +8,8 @@ Tokio TCP. Source and tests are the contract; `plans/` is history.
 
 | Target | Entrypoint | Owns |
 | --- | --- | --- |
-| `icraft` | `src/main.rs` | winit/wgpu/rodio loop, menu, input, presentation. `--microbench` is feature-gated (`microbench`). |
-| `icraft-server` | `src/bin/icraft-server.rs` | Headless `ServerRuntime`, TCP, console, autosave/shutdown. |
+| `icraft` | `src/main.rs` | winit/wgpu/rodio loop, menu, input, presentation. Required feature: `desktop` (default). `--microbench` is feature-gated (`microbench`, implies `desktop`). |
+| `icraft-server` | `src/bin/icraft-server.rs` | Headless `ServerRuntime`, TCP, console, autosave/shutdown. Builds under `--no-default-features` without desktop GPU/audio/windowing dependencies. |
 | `icraft` lib | `src/lib.rs` | Shared authority, world, network, persistence. |
 
 Desktop `main.rs` re-exports the library (`pub use icraft::{world, …}`) so
@@ -41,8 +41,13 @@ authoritative data contracts.
 `recipes` stays `pub` because desktop
 `State` and `ServerWorld` expose `RecipeManager`.
 Desktop `--microbench` is `src/main.rs`'s `mod microbench` behind feature
-`microbench` (`cargo run --features microbench -- --microbench`); it is not
-compiled into the library or `icraft-server`. Settings keys
+`microbench` (`cargo run --features microbench -- --microbench`), which activates
+the `desktop` feature; it is not compiled into the library or `icraft-server`.
+The `desktop` feature is enabled by default and encapsulates optional desktop
+dependencies (`winit`, `wgpu`, `rodio`, `image`, `pollster`). The `icraft`
+binary explicitly requires `desktop`; `icraft-server` has no such requirement and
+builds purely in headless mode (`cargo build --no-default-features --bin icraft-server`).
+Settings keys
 `dynamic_resolution` and `render_scale` were removed; leftover lines in old
 `settings.txt` are ignored on load. Leftover renderer-owned world simulation
 (`legacy_sim` / `legacy_interaction` / `legacy_systems`) and feature
