@@ -1,13 +1,11 @@
 use crate::dimension::Dimension;
 use crate::world::{SectionIdentity, SectionKey};
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap};
 
 pub const UNLOAD_HYSTERESIS: i32 = 2;
 pub const MAX_INTEGRATE_TIME_MS: u64 = 3;
 pub const MAX_INTEGRATE_MESHES: usize = 4;
 pub const MAX_INTEGRATE_UPLOAD_BYTES: u64 = 2 * 1024 * 1024; // 2 MiB
-pub const MAX_INTEGRATE_LOADS: usize = 2;
-pub const MAX_INTEGRATE_LOAD_BYTES: u64 = 2 * 1024 * 1024; // 2 MiB
 pub const MAX_DIRTY_MESH_QUEUE: usize = 16_384;
 
 /// Chebyshev `view + UNLOAD_HYSTERESIS` membership used by client unload and
@@ -170,72 +168,34 @@ pub enum DependencyReason {
 
 
 
-fn distance_sq(coord: (i32, i32), player_chunk: (i32, i32)) -> u64 {
-    let dx = i64::from(coord.0) - i64::from(player_chunk.0);
-    let dz = i64::from(coord.1) - i64::from(player_chunk.1);
-    (dx * dx + dz * dz) as u64
-}
 
-/// Precomputes relative chunk coordinates (dx, dz) sorted by squared distance dx^2 + dz^2 ascending.
-pub fn precompute_spiral_offsets(r: i32) -> Vec<(i32, i32)> {
-    let mut offsets = Vec::with_capacity(((2 * r + 1) * (2 * r + 1)) as usize);
-    for dx in -r..=r {
-        for dz in -r..=r {
-            offsets.push((dx, dz));
-        }
-    }
-    offsets.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
-    offsets
-}
 
-/// State tracking incremental streaming schedules and queues.
+/// State tracking player anchor and render distance for unload and section prioritization.
 pub struct ChunkStreamingScheduler {
-    pub spiral_offsets: Vec<(i32, i32)>,
     pub last_player_chunk: Option<(i32, i32)>,
     pub last_render_distance: i32,
     pub last_dimension: Option<Dimension>,
-    pub pending_load_queue: VecDeque<(i32, i32)>,
 }
 
 impl ChunkStreamingScheduler {
     pub fn new() -> Self {
         Self {
-            spiral_offsets: Vec::new(),
             last_player_chunk: None,
             last_render_distance: 0,
             last_dimension: None,
-            pending_load_queue: VecDeque::new(),
         }
     }
-
 
     pub fn clear(&mut self) {
         self.last_player_chunk = None;
         self.last_render_distance = 0;
         self.last_dimension = None;
-        self.pending_load_queue.clear();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_precompute_spiral_offsets_ordering() {
-        let offsets = precompute_spiral_offsets(2);
-        assert_eq!(offsets.len(), 25);
-        assert_eq!(offsets[0], (0, 0));
-        let mut prev_dist = 0;
-        for &(dx, dz) in &offsets {
-            let dist = dx * dx + dz * dz;
-            assert!(
-                dist >= prev_dist,
-                "spiral offsets must be sorted by distance"
-            );
-            prev_dist = dist;
-        }
-    }
 
 
 

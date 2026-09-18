@@ -465,41 +465,6 @@ fn remote_block_change_updates_light_and_boundary_mesh_dependencies() {
 
 #[test]
 fn terrain_worker_tokens_reject_stale_generation_lifetime_and_revision() {
-    use crate::dimension::Dimension;
-
-    assert!(chunk_load_result_is_current(
-        Some(7),
-        7,
-        3,
-        3,
-        Dimension::Overworld,
-        Dimension::Overworld,
-    ));
-    assert!(!chunk_load_result_is_current(
-        Some(8),
-        7,
-        3,
-        3,
-        Dimension::Overworld,
-        Dimension::Overworld,
-    ));
-    assert!(!chunk_load_result_is_current(
-        Some(7),
-        7,
-        2,
-        3,
-        Dimension::Overworld,
-        Dimension::Overworld,
-    ));
-    assert!(!chunk_load_result_is_current(
-        Some(7),
-        7,
-        3,
-        3,
-        Dimension::Nether,
-        Dimension::Overworld,
-    ));
-
     let key = SectionKey::new(1, 2, 3);
     let current = SectionIdentity::new(key, 11, 7);
     assert!(section_mesh_result_is_current(
@@ -529,6 +494,30 @@ fn terrain_worker_tokens_reject_stale_generation_lifetime_and_revision() {
         2,
         3,
         Some(current),
+    ));
+    // Unload/reload changes lifetime: stale mesh result with previous lifetime is rejected
+    let reloaded = SectionIdentity::new(key, 11, 8);
+    assert!(!section_mesh_result_is_current(
+        Some(current),
+        current,
+        3,
+        3,
+        Some(reloaded),
+    ));
+    assert!(!section_mesh_result_is_current(
+        Some(reloaded),
+        current,
+        3,
+        3,
+        Some(reloaded),
+    ));
+    // Current section absent (e.g. chunk unloaded while meshing was in-flight)
+    assert!(!section_mesh_result_is_current(
+        Some(current),
+        current,
+        3,
+        3,
+        None,
     ));
 }
 

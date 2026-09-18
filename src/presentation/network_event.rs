@@ -40,7 +40,6 @@ impl State {
                 ..
             } => {
                 self.local_player_id = Some(player_id);
-                self.world_seed = seed as u32;
                 let game_mode = match gamemode {
                     0 => GameMode::Creative,
                     2 => GameMode::Adventure,
@@ -54,7 +53,7 @@ impl State {
                         Inventory::new()
                     }
                 };
-                self.weather = crate::weather::WeatherPresentation::new(self.world_seed);
+                self.weather = crate::weather::WeatherPresentation::new(seed as u32);
                 self.chunk_manager.chunks.clear();
                 self.teardown_terrain_runtime("network connect/reset");
                 self.pending_block_changes.clear();

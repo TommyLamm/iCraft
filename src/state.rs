@@ -302,7 +302,6 @@ fn apply_synced_block_change(
 }
 
 
-const MAX_CHUNK_LOAD_JOBS: usize = 2;
 const MAX_CHUNK_MESH_JOBS: usize = 4;
 
 #[cfg(test)]
@@ -403,31 +402,9 @@ impl MeshSnapshot {
     }
 }
 
-struct ChunkLoadResult {
-    coord: (i32, i32),
-    dimension: crate::dimension::Dimension,
-    generation: u64,
-    lifetime: u64,
-    chunk: Chunk,
-    restore_failed: bool,
-}
-
 struct SectionMeshResult {
     generation: u64,
     bundle: crate::chunk_render::SectionMeshBundle,
-}
-
-fn chunk_load_result_is_current(
-    expected_lifetime: Option<u64>,
-    result_lifetime: u64,
-    result_generation: u64,
-    current_generation: u64,
-    result_dimension: crate::dimension::Dimension,
-    current_dimension: crate::dimension::Dimension,
-) -> bool {
-    expected_lifetime == Some(result_lifetime)
-        && result_generation == current_generation
-        && result_dimension == current_dimension
 }
 
 fn section_mesh_result_is_current(
@@ -448,11 +425,6 @@ fn section_mesh_result_is_current(
 /// sequence numbers elsewhere in the state machine.
 fn container_revision_is_newer(current: u64, candidate: u64) -> bool {
     candidate != current && candidate.wrapping_sub(current) < (1_u64 << 63)
-}
-
-enum TerrainWorkerResult {
-    Loaded(ChunkLoadResult),
-    SectionMeshed(SectionMeshResult),
 }
 
 #[repr(C)]
@@ -504,7 +476,6 @@ impl State {
     /// Incrementing the generation invalidates every in-flight worker result.
     fn teardown_terrain_runtime(&mut self, reason: &str) {
         self.terrain_generation = self.terrain_generation.wrapping_add(1);
-        self.chunk_load_in_flight.clear();
         self.section_scheduler.clear();
         self.chunk_lifetimes.clear();
         self.chunk_meshes.clear();
@@ -1127,12 +1098,11 @@ pub struct State {
     compaction_pending_region: Option<(i32, i32)>,
     section_storage_compaction_queue: std::collections::VecDeque<SectionKey>,
     section_storage_compaction_queued: std::collections::HashSet<SectionKey>,
-    terrain_worker_tx: std::sync::mpsc::Sender<TerrainWorkerResult>,
-    terrain_worker_rx: std::sync::mpsc::Receiver<TerrainWorkerResult>,
-    pending_worker_results: std::collections::VecDeque<TerrainWorkerResult>,
+    terrain_worker_tx: std::sync::mpsc::Sender<SectionMeshResult>,
+    terrain_worker_rx: std::sync::mpsc::Receiver<SectionMeshResult>,
+    pending_worker_results: std::collections::VecDeque<SectionMeshResult>,
     scheduler: crate::chunk_schedule::ChunkStreamingScheduler,
     section_scheduler: crate::chunk_schedule::SectionMeshScheduler,
-    chunk_load_in_flight: std::collections::HashMap<(i32, i32), u64>,
     chunk_lifetimes: std::collections::HashMap<(i32, i32), u64>,
     next_chunk_lifetime: u64,
     terrain_generation: u64,
@@ -1300,11 +1270,8 @@ pub struct State {
     pub settings: GameSettings,
     /// Presentation-only timer for the End/dragon completion flash.
     pub end_flash_time: f32,
-    pub world_seed: u32,
     /// One authoritative snapshot consumed by simulation and commands.
     pub world_rules: crate::game_rules::WorldRules,
-    pub world_type: crate::game_rules::WorldType,
-    pub generate_structures: bool,
     pub cheats_enabled: bool,
     pub current_dimension: crate::dimension::Dimension,
     portal_contact_time: f32,
@@ -1507,8 +1474,6 @@ impl State {
             world_time,
             world_seed,
             world_rules,
-            world_type,
-            generate_structures,
             cheats_enabled,
             advancement_progress,
         } = crate::presentation::bootstrap::load_launch_world_state(
@@ -2341,7 +2306,6 @@ impl State {
             pending_worker_results: std::collections::VecDeque::new(),
             scheduler: crate::chunk_schedule::ChunkStreamingScheduler::new(),
             section_scheduler: crate::chunk_schedule::SectionMeshScheduler::new(),
-            chunk_load_in_flight: std::collections::HashMap::new(),
             chunk_lifetimes,
             next_chunk_lifetime,
             terrain_generation: 0,
@@ -2486,10 +2450,7 @@ impl State {
             recipe_book_open: false,
             weather,
             world_rules,
-            world_type,
-            generate_structures,
             cheats_enabled,
-            world_seed,
             settings,
             end_flash_time: 0.0,
             current_dimension,
@@ -3130,17 +3091,13 @@ impl State {
         }
     }
 
-    /// Applies the same one-voxel halo dependency used by `MeshSnapshot`.
-    /// Cardinal and diagonal dependents are tagged as derived AO work.
-    fn process_terrain_worker_results(&mut self, player_chunk: (i32, i32)) {
+    /// Consumes and uploads completed terrain section meshes up to the frame budget.
+    fn process_terrain_worker_results(&mut self) {
         let integrate_started = Instant::now();
-        let mut lighting_elapsed = Duration::ZERO;
         let mut gpu_upload_elapsed = Duration::ZERO;
 
         let mut integrated_meshes = 0;
         let mut integrated_bytes = 0u64;
-        let mut integrated_loads = 0;
-        let mut integrated_load_bytes = 0u64;
 
         loop {
             let result = if let Some(res) = self.pending_worker_results.pop_front() {
@@ -3151,226 +3108,78 @@ impl State {
                 break;
             };
 
-            if let TerrainWorkerResult::SectionMeshed(_) = &result {
-                let elapsed = integrate_started.elapsed();
-                if integrated_meshes >= crate::chunk_schedule::MAX_INTEGRATE_MESHES
-                    || integrated_bytes >= crate::chunk_schedule::MAX_INTEGRATE_UPLOAD_BYTES
-                    || elapsed
-                        >= Duration::from_millis(crate::chunk_schedule::MAX_INTEGRATE_TIME_MS)
-                {
-                    self.pending_worker_results.push_front(result);
-                    break;
-                }
+            let elapsed = integrate_started.elapsed();
+            if integrated_meshes >= crate::chunk_schedule::MAX_INTEGRATE_MESHES
+                || integrated_bytes >= crate::chunk_schedule::MAX_INTEGRATE_UPLOAD_BYTES
+                || elapsed >= Duration::from_millis(crate::chunk_schedule::MAX_INTEGRATE_TIME_MS)
+            {
+                self.pending_worker_results.push_front(result);
+                break;
             }
 
-            match result {
-                TerrainWorkerResult::Loaded(result) => {
-                    let expected = self.chunk_load_in_flight.get(&result.coord).copied();
-                    if result.restore_failed {
-                        if expected == Some(result.lifetime) {
-                            self.chunk_load_in_flight.remove(&result.coord);
-                        }
-                        continue;
-                    }
-                    let r = self.chunk_manager.view_distance;
-                    if !chunk_load_result_is_current(
-                        expected,
-                        result.lifetime,
-                        result.generation,
-                        self.terrain_generation,
-                        result.dimension,
-                        self.current_dimension,
-                    ) || (result.coord.0 - player_chunk.0).abs() > r
-                        || (result.coord.1 - player_chunk.1).abs() > r
-                        || self.chunk_manager.chunks.contains_key(&result.coord)
-                    {
-                        if expected == Some(result.lifetime) {
-                            self.chunk_load_in_flight.remove(&result.coord);
-                        }
-                        self.perf_counters.stale_results =
-                            self.perf_counters.stale_results.saturating_add(1);
-                        continue;
-                    }
-                    let elapsed = integrate_started.elapsed();
-                    if integrated_loads >= crate::chunk_schedule::MAX_INTEGRATE_LOADS
-                        || integrated_load_bytes >= crate::chunk_schedule::MAX_INTEGRATE_LOAD_BYTES
-                        || elapsed
-                            >= Duration::from_millis(crate::chunk_schedule::MAX_INTEGRATE_TIME_MS)
-                    {
-                        self.pending_worker_results
-                            .push_front(TerrainWorkerResult::Loaded(result));
-                        break;
-                    }
-                    if expected == Some(result.lifetime) {
-                        self.chunk_load_in_flight.remove(&result.coord);
-                    }
-
-                    let (cx, cz) = result.coord;
-                    let load_bytes = result.chunk.memory_usage() as u64;
-                    self.chunk_manager.chunks.insert(result.coord, result.chunk);
-                    self.chunk_lifetimes.insert(result.coord, result.lifetime);
-                    self.chunk_meshes.insert(result.coord, ChunkMesh::pending());
-                    self.invalidate_chunk_mesh(result.coord, DependencyReason::ChunkLoad);
-                    integrated_loads += 1;
-                    integrated_load_bytes = integrated_load_bytes.saturating_add(load_bytes);
-
-                    if let Some(changes) = self.pending_block_changes.remove(&result.coord) {
-                        self.client_chunk_revisions.insert(
-                            (self.current_dimension, result.coord.0, result.coord.1),
-                            0,
-                        );
-                        let mut changes: Vec<_> = changes.into_iter().collect();
-                        changes.sort_by_key(|(_, (revision, _, _, _))| *revision);
-                        for ((x, y, z), (revision, block, state, raw_fluid)) in changes {
-                            self.apply_remote_block_change(
-                                self.current_dimension as u8,
-                                revision,
-                                x,
-                                y,
-                                z,
-                                block,
-                                state,
-                                raw_fluid,
-                            );
-                        }
-                    }
-
-                    let mut dirty = std::collections::HashSet::new();
-                    let lighting_started = Instant::now();
-                    // Single call seeds the new column plus shared faces of the
-                    // four cardinal neighbors (no per-neighbor volume scan).
-                    if self.chunk_manager.chunks.contains_key(&(cx, cz)) {
-                        crate::lighting::propagate_chunk_lighting(
-                            &mut self.chunk_manager,
-                            cx,
-                            cz,
-                            &mut dirty,
-                        );
-                    }
-                    let elapsed = lighting_started.elapsed();
-                    lighting_elapsed += elapsed;
-                    self.lighting_scopes_frame
-                        .record(crate::perf::LightingSource::Load as usize, elapsed);
-                    for neighbor in surrounding_chunk_coords(cx, cz) {
-                        self.invalidate_chunk_mesh(neighbor, DependencyReason::ChunkLoad);
-                    }
-                    for coord in dirty {
-                        self.invalidate_chunk_mesh(coord, DependencyReason::Light);
-                    }
-                }
-                TerrainWorkerResult::SectionMeshed(result) => {
-                    let identity = result.bundle.identity;
-                    let expected = self.section_scheduler.in_flight.get(&identity.key).copied();
-                    if expected == Some(identity) {
-                        self.section_scheduler.complete(identity);
-                    }
-                    let current_identity = self.current_section_identity(identity.key);
-                    if !section_mesh_result_is_current(
-                        expected,
-                        identity,
-                        result.generation,
-                        self.terrain_generation,
-                        current_identity,
-                    ) {
-                        self.perf_counters.stale_results =
-                            self.perf_counters.stale_results.saturating_add(1);
-                        continue;
-                    }
-                    let coord = (identity.key.cx, identity.key.cz);
-                    let region_coord = crate::chunk_render::chunk_to_region_coord(coord.0, coord.1);
-                    let register_resident_chunk =
-                        self.chunk_meshes.get(&coord).is_some_and(|mesh| {
-                            !chunk_mesh_is_registered_with_region(
-                                mesh,
-                                self.render_regions.get(&region_coord),
-                            )
-                        });
-                    let Some(mesh) = self.chunk_meshes.get_mut(&coord) else {
-                        continue;
-                    };
-                    let Some(section) = mesh.section_mut(identity.key.section_y) else {
-                        continue;
-                    };
-                    let (levels, upload_metrics) = Self::upload_section_mesh_bundle(
-                        self.device.as_ref().unwrap(),
-                        self.queue.as_ref().unwrap(),
-                        &self.region_bind_group_layout,
-                        &mut self.render_regions,
-                        section,
-                        &result.bundle,
-                        self.terrain_generation,
-                        register_resident_chunk,
-                    );
-                    section.levels = Some(levels);
-                    section.connectivity =
-                        crate::culling::SectionConnectivityState::Valid(result.bundle.connectivity);
-                    let upload_elapsed = Duration::from_nanos(upload_metrics.elapsed_ns);
-                    gpu_upload_elapsed += upload_elapsed;
-                    self.gpu_upload_scopes_frame
-                        .record(crate::perf::UploadSource::Terrain as usize, upload_elapsed);
-                    self.perf_counters.upload_bytes_frame = self
-                        .perf_counters
-                        .upload_bytes_frame
-                        .saturating_add(upload_metrics.bytes);
-                    let gpu_bytes = section.gpu_bytes() as u64;
-                    section.meshed_revision = identity.revision;
-                    integrated_meshes += 1;
-                    integrated_bytes += gpu_bytes;
-                }
+            let identity = result.bundle.identity;
+            let expected = self.section_scheduler.in_flight.get(&identity.key).copied();
+            if expected == Some(identity) {
+                self.section_scheduler.complete(identity);
             }
+            let current_identity = self.current_section_identity(identity.key);
+            if !section_mesh_result_is_current(
+                expected,
+                identity,
+                result.generation,
+                self.terrain_generation,
+                current_identity,
+            ) {
+                self.perf_counters.stale_results =
+                    self.perf_counters.stale_results.saturating_add(1);
+                continue;
+            }
+            let coord = (identity.key.cx, identity.key.cz);
+            let region_coord = crate::chunk_render::chunk_to_region_coord(coord.0, coord.1);
+            let register_resident_chunk =
+                self.chunk_meshes.get(&coord).is_some_and(|mesh| {
+                    !chunk_mesh_is_registered_with_region(
+                        mesh,
+                        self.render_regions.get(&region_coord),
+                    )
+                });
+            let Some(mesh) = self.chunk_meshes.get_mut(&coord) else {
+                continue;
+            };
+            let Some(section) = mesh.section_mut(identity.key.section_y) else {
+                continue;
+            };
+            let (levels, upload_metrics) = Self::upload_section_mesh_bundle(
+                self.device.as_ref().unwrap(),
+                self.queue.as_ref().unwrap(),
+                &self.region_bind_group_layout,
+                &mut self.render_regions,
+                section,
+                &result.bundle,
+                self.terrain_generation,
+                register_resident_chunk,
+            );
+            section.levels = Some(levels);
+            section.connectivity =
+                crate::culling::SectionConnectivityState::Valid(result.bundle.connectivity);
+            let upload_elapsed = Duration::from_nanos(upload_metrics.elapsed_ns);
+            gpu_upload_elapsed += upload_elapsed;
+            self.gpu_upload_scopes_frame
+                .record(crate::perf::UploadSource::Terrain as usize, upload_elapsed);
+            self.perf_counters.upload_bytes_frame = self
+                .perf_counters
+                .upload_bytes_frame
+                .saturating_add(upload_metrics.bytes);
+            let gpu_bytes = section.gpu_bytes() as u64;
+            section.meshed_revision = identity.revision;
+            integrated_meshes += 1;
+            integrated_bytes += gpu_bytes;
         }
         self.perf_recorder.record(
             crate::perf::ScopeId::TerrainResultIntegrate,
             integrate_started.elapsed(),
         );
-        self.lighting_time_frame += lighting_elapsed;
         self.gpu_upload_time_frame += gpu_upload_elapsed;
-    }
-
-    fn schedule_chunk_load(&mut self, coord: (i32, i32)) {
-        if self.chunk_load_in_flight.contains_key(&coord)
-            || self.chunk_manager.chunks.contains_key(&coord)
-            || self.chunk_load_in_flight.len() >= MAX_CHUNK_LOAD_JOBS
-        {
-            return;
-        }
-        if crate::presentation_inventory_policy::schedule_presentation_chunk_load(
-            self.presentation_topology().chunk_load_policy(),
-            || (),
-        )
-        .is_none()
-        {
-            // Join client: only enqueue interest and wait for ChunkData.
-            return;
-        }
-        let lifetime = self.next_chunk_lifetime();
-        self.chunk_load_in_flight.insert(coord, lifetime);
-        let sender = self.terrain_worker_tx.clone();
-        let generation = self.terrain_generation;
-        let dimension = self.current_dimension;
-        let world_seed = self.world_seed;
-        let world_type = self.world_type;
-        let generate_structures = self.generate_structures;
-        rayon::spawn(move || {
-            let chunk = crate::dimension::generate_chunk_with_options(
-                dimension,
-                coord.0,
-                coord.1,
-                world_seed,
-                crate::dimension::WorldGenerationOptions {
-                    world_type,
-                    generate_structures,
-                },
-            );
-            let _ = sender.send(TerrainWorkerResult::Loaded(ChunkLoadResult {
-                coord,
-                dimension,
-                generation,
-                lifetime,
-                chunk,
-                restore_failed: false,
-            }));
-        });
     }
 
     fn schedule_section_mesh(&mut self, work: crate::chunk_schedule::DirtySectionWork) -> bool {
@@ -3410,10 +3219,10 @@ impl State {
                 &model_registry,
                 lod_mask,
             );
-            let _ = sender.send(TerrainWorkerResult::SectionMeshed(SectionMeshResult {
+            let _ = sender.send(SectionMeshResult {
                 generation,
                 bundle,
-            }));
+            });
         });
         true
     }
@@ -3453,7 +3262,7 @@ impl State {
         let px = (player_pos.x / 16.0).floor() as i32;
         let pz = (player_pos.z / 16.0).floor() as i32;
         let r = self.chunk_manager.view_distance;
-        self.process_terrain_worker_results((px, pz));
+        self.process_terrain_worker_results();
         self.process_terrain_compaction();
         // Only empty, previously-grown arenas are staged. Processing is
         // bounded to one region per frame and never rebases a live handle.
@@ -3464,11 +3273,6 @@ impl State {
             || self.scheduler.last_dimension != Some(self.current_dimension);
 
         if target_changed {
-            if self.scheduler.last_render_distance != r || self.scheduler.spiral_offsets.is_empty()
-            {
-                self.scheduler.spiral_offsets = crate::chunk_schedule::precompute_spiral_offsets(r);
-            }
-
             let mut to_unload = Vec::new();
             for (cx, cz) in self.chunk_manager.chunks.keys() {
                 if !crate::chunk_schedule::within_unload_hysteresis(cx, cz, px, pz, r) {
@@ -3500,21 +3304,6 @@ impl State {
                     Self::free_chunk_mesh_allocations(&mut self.render_regions, coord, &mesh);
                 }
             }
-            self.chunk_load_in_flight.retain(|&(cx, cz), _| {
-                crate::chunk_schedule::within_unload_hysteresis(cx, cz, px, pz, r)
-            });
-
-            // Rebuild pending_load_queue in spiral order
-            self.scheduler.pending_load_queue.clear();
-            for &(dx, dz) in &self.scheduler.spiral_offsets {
-                let cx = px + dx;
-                let cz = pz + dz;
-                if !self.chunk_manager.chunks.contains_key(&(cx, cz))
-                    && !self.chunk_load_in_flight.contains_key(&(cx, cz))
-                {
-                    self.scheduler.pending_load_queue.push_back((cx, cz));
-                }
-            }
 
             self.scheduler.last_player_chunk = Some((px, pz));
             self.scheduler.last_render_distance = r;
@@ -3522,24 +3311,7 @@ impl State {
             self.section_scheduler.reprioritize((px, pz));
         }
 
-        // 2. Dispatch chunk loads from precomputed spiral load queue
-        let available_load_slots =
-            MAX_CHUNK_LOAD_JOBS.saturating_sub(self.chunk_load_in_flight.len());
-        let mut dispatched_loads = 0;
-        while dispatched_loads < available_load_slots {
-            if let Some(coord) = self.scheduler.pending_load_queue.pop_front() {
-                if !self.chunk_manager.chunks.contains_key(&coord)
-                    && !self.chunk_load_in_flight.contains_key(&coord)
-                {
-                    self.schedule_chunk_load(coord);
-                    dispatched_loads += 1;
-                }
-            } else {
-                break;
-            }
-        }
-
-        // 3. Dispatch dirty meshes prioritized by distance to player
+        // 2. Dispatch dirty meshes prioritized by distance to player
         let available_mesh_slots =
             MAX_CHUNK_MESH_JOBS.saturating_sub(self.section_scheduler.in_flight.len());
         if available_mesh_slots > 0 && self.section_scheduler.len() > 0 {

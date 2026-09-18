@@ -64,16 +64,6 @@ impl PresentationTopology {
         matches!(self, Self::Embedded)
     }
 
-    /// Sole chunk-load gate: Join awaits authoritative columns; Embedded may
-    /// generate locally. Role helpers must go through this method.
-    pub fn chunk_load_policy(self) -> PresentationChunkLoadPolicy {
-        if self.is_join_client() {
-            PresentationChunkLoadPolicy::AwaitAuthoritativePayload
-        } else {
-            PresentationChunkLoadPolicy::GenerateLocally
-        }
-    }
-
     pub fn inventory_decision(
         self,
         target: PresentationInventoryTarget,
@@ -91,7 +81,7 @@ impl PresentationTopology {
                     PresentationInventoryAction::LocalMutate
                 }
             }
-            PresentationInventoryTarget::Workstation | PresentationInventoryTarget::Pickup => {
+            PresentationInventoryTarget::Workstation => {
                 PresentationInventoryAction::Reject
             }
         }
@@ -103,27 +93,6 @@ impl PresentationTopology {
     ) -> bool {
         self.should_sync_inventory()
             && matches!(target, Some(PresentationInventoryTarget::PlayerInventory))
-    }
-}
-
-/// How the presentation root may populate a chunk column.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PresentationChunkLoadPolicy {
-    /// Singleplayer / host: generate locally (save overlay is separate).
-    GenerateLocally,
-    /// Join client: never generate. Wait for revision-gated `ChunkData`.
-    AwaitAuthoritativePayload,
-}
-
-/// Testable load-schedule gate. `generate` is invoked only when the role is
-/// allowed to materialize a local column.
-pub fn schedule_presentation_chunk_load<T>(
-    policy: PresentationChunkLoadPolicy,
-    generate: impl FnOnce() -> T,
-) -> Option<T> {
-    match policy {
-        PresentationChunkLoadPolicy::GenerateLocally => Some(generate()),
-        PresentationChunkLoadPolicy::AwaitAuthoritativePayload => None,
     }
 }
 
@@ -149,9 +118,6 @@ pub enum PresentationInventoryTarget {
     /// Enchanting / anvil / recipe-book furnace fills that spend levels or
     /// write workstation block entities.
     Workstation,
-    /// Walking over a dropped stack or XP orb. Always Reject; pickup is
-    /// authority-only (local collection removed in Plan 03).
-    Pickup,
 }
 
 #[cfg(test)]
@@ -172,7 +138,6 @@ mod tests {
         for target in [
             PresentationInventoryTarget::ContainerSlot,
             PresentationInventoryTarget::Workstation,
-            PresentationInventoryTarget::Pickup,
         ] {
             let action = topology.inventory_decision(target);
             assert_ne!(
@@ -188,14 +153,6 @@ mod tests {
         assert_eq!(
             topology.inventory_decision(PresentationInventoryTarget::Workstation),
             PresentationInventoryAction::Reject
-        );
-        assert_eq!(
-            topology.inventory_decision(PresentationInventoryTarget::Pickup),
-            PresentationInventoryAction::Reject
-        );
-        assert_eq!(
-            topology.chunk_load_policy(),
-            PresentationChunkLoadPolicy::GenerateLocally
         );
     }
 
@@ -235,14 +192,6 @@ mod tests {
         assert_eq!(
             topology.inventory_decision(PresentationInventoryTarget::PlayerInventory),
             PresentationInventoryAction::Reject
-        );
-        assert_eq!(
-            topology.inventory_decision(PresentationInventoryTarget::Pickup),
-            PresentationInventoryAction::Reject
-        );
-        assert_eq!(
-            topology.chunk_load_policy(),
-            PresentationChunkLoadPolicy::AwaitAuthoritativePayload
         );
     }
 

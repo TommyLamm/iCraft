@@ -1,9 +1,7 @@
 use super::*;
 
     use super::*;
-    use crate::presentation_inventory_policy::{
-        schedule_presentation_chunk_load, PresentationChunkLoadPolicy, PresentationTopology,
-    };
+    use crate::presentation_inventory_policy::PresentationTopology;
     use std::collections::HashMap;
 
     #[test]
@@ -472,38 +470,24 @@ use super::*;
     }
 
     #[test]
-    fn join_client_load_policy_never_generates_or_mutates() {
+    fn presentation_topology_role_resolution() {
         let client = join_client_role();
         assert!(client.is_join_client());
-        let join_policy = PresentationTopology::from(&client, false).chunk_load_policy();
         assert_eq!(
-            join_policy,
-            PresentationChunkLoadPolicy::AwaitAuthoritativePayload
-        );
-
-        let mut generated = false;
-        let loaded = schedule_presentation_chunk_load(join_policy, || {
-            generated = true;
-            1
-        });
-        assert!(loaded.is_none());
-        assert!(!generated);
-
-        assert_eq!(
-            PresentationTopology::from(&MultiplayerRole::Singleplayer, true).chunk_load_policy(),
-            PresentationChunkLoadPolicy::GenerateLocally
+            PresentationTopology::from(&client, false),
+            PresentationTopology::JoinClient
         );
         assert_eq!(
-            PresentationTopology::from(&MultiplayerRole::Host { port: 25565 }, true)
-                .chunk_load_policy(),
-            PresentationChunkLoadPolicy::GenerateLocally
+            PresentationTopology::from(&client, true),
+            PresentationTopology::JoinClient
         );
         assert_eq!(
-            schedule_presentation_chunk_load(
-                PresentationTopology::Embedded.chunk_load_policy(),
-                || 7
-            ),
-            Some(7)
+            PresentationTopology::from(&MultiplayerRole::Singleplayer, true),
+            PresentationTopology::Embedded
+        );
+        assert_eq!(
+            PresentationTopology::from(&MultiplayerRole::Host { port: 25565 }, true),
+            PresentationTopology::Embedded
         );
     }
 

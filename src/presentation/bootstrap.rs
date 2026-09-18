@@ -140,8 +140,6 @@ pub(crate) struct LaunchWorldState {
     pub world_time: WorldTime,
     pub world_seed: u32,
     pub world_rules: WorldRules,
-    pub world_type: crate::game_rules::WorldType,
-    pub generate_structures: bool,
     pub cheats_enabled: bool,
     pub advancement_progress: crate::advancements::AdvancementProgressData,
 }
@@ -186,8 +184,6 @@ pub(crate) fn load_launch_world_state(
         hardcore: creation_options.hardcore,
         ..Default::default()
     };
-    let world_type = creation_options.world_type;
-    let generate_structures = creation_options.generate_structures;
     let cheats_enabled = creation_options.cheats_enabled || is_client;
     let advancement_progress = crate::advancements::AdvancementProgressData::default();
 
@@ -202,8 +198,6 @@ pub(crate) fn load_launch_world_state(
         world_time,
         world_seed,
         world_rules,
-        world_type,
-        generate_structures,
         cheats_enabled,
         advancement_progress,
     }

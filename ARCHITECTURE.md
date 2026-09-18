@@ -88,8 +88,9 @@ All server paths -> AuthorityCore -> BTreeMap<Dimension, ServerWorld>
 - Embedded presentation peeks `dimension.dat` so the first projected columns
   are not dropped. Player and terrain arrive from `ServerRuntime`.
   `State::new` does not generate spawn chunks, place a bonus chest, or collect
-  dropped items / XP locally. Pickup is authority-only
-  (`inventory_decision(Pickup)` is always `Reject`). Presentation does not
+  dropped items / XP locally. Item/XP pickup is authority-only
+  (authority handles cooldown, reach, and container transfer; the dead presentation
+  `Pickup` target variant is removed). Presentation does not
   Q-drop ghost entities, scan void/lava/cactus for local damage, tick
   brew/effects/`world_time` on join, or worldgen on dimension switch —
   health/time/effects arrive from session projection; portal/respawn teardown
@@ -104,14 +105,14 @@ All server paths -> AuthorityCore -> BTreeMap<Dimension, ServerWorld>
 (Join wins) plus in-process runtime. Non-join launches are Embedded.
 There is no `LegacyOwner`, no `is_authoritative()`, and no
 `AuthorityTopology`. Listen vs embedded is `TransportMode::{Disabled, Listen}`.
-Chunk load policy is only `PresentationTopology::chunk_load_policy()`
-(Join awaits `ChunkData`; Embedded may generate locally). Presentation never
-mutates authority-owned world/container slots locally; `set_item_at_slot`
-no-ops `ContainerSlot` and all join-client writes. Inventory click writeback
-uses `resolve_inventory_hit` (shared probe) so Embedded player-inventory
-`LocalMutate` and Join `Reject` stay on one hit path. `Pickup` remains an
-inventory target that is always `Reject`; farmland-trample / unsupported-break
-policy variants are gone.
+Presentation never performs worldgen or chunk loading in either topology; chunks
+arrive strictly via `PresentationEvent::ChunkColumn` (embedded) or `Packet::ChunkData`
+(join-client), and the client-side spiral chunk load queue and `PresentationChunkLoadPolicy`
+are gone. Presentation never mutates authority-owned world/container slots locally;
+`set_item_at_slot` no-ops `ContainerSlot` and all join-client writes. Inventory click
+writeback uses `resolve_inventory_hit` (shared probe) so Embedded player-inventory
+`LocalMutate` and Join `Reject` stay on one hit path. The dead `Pickup`,
+farmland-trample, and unsupported-break policy variants are gone.
 
 ## Ownership
 

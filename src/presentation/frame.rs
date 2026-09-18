@@ -129,8 +129,7 @@ impl State {
         self.perf_counters.occluded_chunks = occluded_sections;
         self.perf_counters.terrain_candidates = terrain_candidate_count as u64;
         self.perf_counters.terrain_triangles = self.submitted_terrain_triangles;
-        self.perf_counters.in_flight =
-            (self.chunk_load_in_flight.len() + self.section_scheduler.in_flight.len()) as u64;
+        self.perf_counters.in_flight = self.section_scheduler.in_flight.len() as u64;
         let total_committed: usize = self
             .render_regions
             .values()

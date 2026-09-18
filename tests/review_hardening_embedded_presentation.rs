@@ -15,16 +15,10 @@ fn embedded_gate_sends_container_op_and_rejects_world_mutations() {
         topology.inventory_decision(PresentationInventoryTarget::ContainerSlot),
         PresentationInventoryAction::SendAuthorityOp
     );
-    for target in [
-        PresentationInventoryTarget::Workstation,
-        PresentationInventoryTarget::Pickup,
-    ] {
-        assert_eq!(
-            topology.inventory_decision(target),
-            PresentationInventoryAction::Reject,
-            "{target:?}"
-        );
-    }
+    assert_eq!(
+        topology.inventory_decision(PresentationInventoryTarget::Workstation),
+        PresentationInventoryAction::Reject,
+    );
     assert!(!topology.should_writeback_after_inventory_click(Some(
         PresentationInventoryTarget::ContainerSlot
     )));
@@ -38,7 +32,7 @@ fn join_client_never_calls_inventory_writeback() {
         PresentationInventoryTarget::PlayerInventory
     )));
     assert_eq!(
-        topology.inventory_decision(PresentationInventoryTarget::Pickup),
+        topology.inventory_decision(PresentationInventoryTarget::PlayerInventory),
         PresentationInventoryAction::Reject
     );
 }
