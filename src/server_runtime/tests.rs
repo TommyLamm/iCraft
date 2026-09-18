@@ -1790,3 +1790,208 @@ fn failed_restore_column_rejects_runtime_worldgen_collection() {
     let _ = fs::remove_dir_all(world_dir);
 }
 
+#[test]
+fn embedded_local_view_distance_expansion_projects_outer_columns() {
+    let (mut runtime, _input) = embedded_runtime("view_expansion");
+    runtime
+        .authority
+        .set_worldgen_mode_all(crate::server_world::WorldgenMode::Sync);
+    for _ in 0..5 {
+        let _ = runtime.tick_with_output().unwrap();
+    }
+    let (cx, cz) = {
+        let session = runtime.players.get(&99).expect("local session");
+        let pos = session.last_pose_position;
+        ((pos[0] / 16.0).floor() as i32, (pos[2] / 16.0).floor() as i32)
+    };
+    assert!(!runtime.players.get(&99).unwrap().interest.chunks.contains(&(cx + 4, cz)));
+
+    assert!(runtime.set_local_view_distance(4));
+    assert_eq!(runtime.players.get(&99).unwrap().interest.view_distance, 4);
+    assert!(runtime.players.get(&99).unwrap().interest.chunks.contains(&(cx + 4, cz)));
+
+    let mut saw_outer = false;
+    for _ in 0..10 {
+        let output = runtime.tick_with_output().unwrap();
+        for event in output.presentation_events {
+            if let PresentationEvent::ChunkColumn { to, cx: ecx, cz: ecz, .. } = event {
+                if to == 99 && ecx == cx + 4 && ecz == cz {
+                    saw_outer = true;
+                    break;
+                }
+            }
+        }
+        if saw_outer {
+            break;
+        }
+    }
+    assert!(
+        saw_outer,
+        "expanding view distance from 2 to 4 must project outer column ({}, {})",
+        cx + 4,
+        cz
+    );
+
+    let world_dir = runtime.world_dir.clone();
+    let _ = runtime.shutdown();
+    let _ = fs::remove_dir_all(world_dir);
+}
+
+#[test]
+fn embedded_local_view_distance_shrink_updates_coverage_and_reverse_index() {
+    let (mut runtime, _input) = embedded_runtime("view_shrink");
+    assert!(runtime.set_local_view_distance(4));
+    let (cx, cz) = {
+        let session = runtime.players.get(&99).expect("local session");
+        let pos = session.last_pose_position;
+        ((pos[0] / 16.0).floor() as i32, (pos[2] / 16.0).floor() as i32)
+    };
+    let outer = (cx + 4, cz);
+    assert!(runtime.players.get(&99).unwrap().interest.chunks.contains(&outer));
+    assert!(
+        runtime
+            .chunk_interest_index
+            .get(&(Dimension::Overworld, outer))
+            .is_some_and(|set| set.contains(&99)),
+        "outer chunk must be indexed in reverse index at distance 4"
+    );
+
+    assert!(runtime.set_local_view_distance(2));
+    assert_eq!(runtime.players.get(&99).unwrap().interest.view_distance, 2);
+    assert!(
+        !runtime.players.get(&99).unwrap().interest.chunks.contains(&outer),
+        "coverage must drop outer chunk after shrinking to distance 2"
+    );
+    assert!(
+        runtime
+            .chunk_interest_index
+            .get(&(Dimension::Overworld, outer))
+            .map_or(true, |set| !set.contains(&99)),
+        "reverse index must not retain local session for outer chunk after shrink"
+    );
+
+    let world_dir = runtime.world_dir.clone();
+    let _ = runtime.shutdown();
+    let _ = fs::remove_dir_all(world_dir);
+}
+
+#[test]
+fn local_view_distance_same_value_does_not_rebuild() {
+    let (mut runtime, _input) = embedded_runtime("view_same_value");
+    runtime.run_for_ticks(2).unwrap();
+    let rebuilds_before = runtime
+        .players
+        .get(&99)
+        .map(|session| session.interest.chunk_rebuilds())
+        .expect("local session");
+
+    // Setting the same effective view distance (2) should not trigger a rebuild
+    assert!(runtime.set_local_view_distance(2));
+    let rebuilds_after = runtime
+        .players
+        .get(&99)
+        .map(|session| session.interest.chunk_rebuilds())
+        .expect("local session");
+    assert_eq!(
+        rebuilds_after, rebuilds_before,
+        "setting identical view distance must not trigger interest rebuild"
+    );
+
+    // Now change to 4 (triggers rebuild)
+    assert!(runtime.set_local_view_distance(4));
+    let rebuilds_at_4 = runtime
+        .players
+        .get(&99)
+        .map(|session| session.interest.chunk_rebuilds())
+        .expect("local session");
+    assert!(rebuilds_at_4 > rebuilds_before, "changing view distance must rebuild");
+
+    // Setting 4 again must not rebuild
+    assert!(runtime.set_local_view_distance(4));
+    let rebuilds_at_4_again = runtime
+        .players
+        .get(&99)
+        .map(|session| session.interest.chunk_rebuilds())
+        .expect("local session");
+    assert_eq!(
+        rebuilds_at_4_again, rebuilds_at_4,
+        "re-applying the same override must not trigger interest rebuild"
+    );
+
+    let world_dir = runtime.world_dir.clone();
+    let _ = runtime.shutdown();
+    let _ = fs::remove_dir_all(world_dir);
+}
+
+#[test]
+fn local_view_distance_override_preserves_remote_coverage() {
+    let (mut runtime, _input) = embedded_runtime("remote_coverage_isolation");
+    runtime.login_session(2, "remote_player").unwrap();
+    runtime.run_for_ticks(2).unwrap();
+
+    let remote_view = runtime.players.get(&2).unwrap().interest.view_distance;
+    assert_eq!(remote_view, 2);
+    let remote_chunks_before = runtime.players.get(&2).unwrap().interest.chunks.clone();
+    let remote_override = runtime.players.get(&2).unwrap().view_distance_override;
+    assert_eq!(remote_override, None);
+
+    // Local session changes to 4
+    assert!(runtime.set_local_view_distance(4));
+    assert_eq!(runtime.players.get(&99).unwrap().interest.view_distance, 4);
+    assert_eq!(runtime.players.get(&99).unwrap().view_distance_override, Some(4));
+
+    // Remote session must remain on server default (2)
+    let remote_session = runtime.players.get(&2).unwrap();
+    assert_eq!(
+        remote_session.interest.view_distance, 2,
+        "remote session view distance must not be changed by local override"
+    );
+    assert_eq!(
+        remote_session.view_distance_override, None,
+        "remote session must not receive local override"
+    );
+    assert_eq!(
+        remote_session.interest.chunks, remote_chunks_before,
+        "remote session chunk coverage must remain unchanged"
+    );
+    assert_eq!(
+        runtime.properties.view_distance, 2,
+        "global server properties view distance must not be modified"
+    );
+
+    let world_dir = runtime.world_dir.clone();
+    let _ = runtime.shutdown();
+    let _ = fs::remove_dir_all(world_dir);
+}
+
+#[test]
+fn local_view_distance_override_persists_across_dimension_transfer() {
+    let (mut runtime, _input) = embedded_runtime("dimension_transfer_override");
+    assert!(runtime.set_local_view_distance(4));
+    assert_eq!(runtime.players.get(&99).unwrap().view_distance_override, Some(4));
+    assert_eq!(runtime.players.get(&99).unwrap().interest.view_distance, 4);
+
+    let transferred = runtime.transfer_session_dimension(99, Dimension::Nether, [0.0, 70.0, 0.0]);
+    assert!(transferred, "dimension transfer to Nether must succeed");
+
+    let session = runtime.players.get(&99).expect("local session");
+    assert_eq!(session.interest.dimension, Dimension::Nether);
+    assert_eq!(
+        session.view_distance_override,
+        Some(4),
+        "local override must persist across dimension transfer"
+    );
+    assert_eq!(
+        session.interest.view_distance, 4,
+        "effective view distance in new dimension must reflect local override"
+    );
+    assert!(
+        session.interest.chunks.contains(&(4, 0)),
+        "Nether chunk interest must include radius 4 chunks"
+    );
+
+    let world_dir = runtime.world_dir.clone();
+    let _ = runtime.shutdown();
+    let _ = fs::remove_dir_all(world_dir);
+}
+

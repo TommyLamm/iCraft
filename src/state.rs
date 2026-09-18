@@ -3655,6 +3655,9 @@ impl State {
                     self.chunk_manager.view_distance =
                         (self.chunk_manager.view_distance + 1).min(16);
                 }
+                if let Some(bridge) = &mut self.embedded_runtime {
+                    bridge.set_view_distance(self.chunk_manager.view_distance as u32);
+                }
                 self.save_settings();
             }
             // Master Volume Button: X: [-0.3, 0.3], Y: [-0.32, -0.22]

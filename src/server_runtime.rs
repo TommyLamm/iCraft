@@ -304,7 +304,12 @@ impl ServerRuntime {
             .authority
             .set_worldgen_mode_all(crate::server_world::WorldgenMode::Async);
         if let Some(profile) = options.local_session {
-            runtime.handle_join_with_storage(profile.id, profile.username, profile.storage)?;
+            runtime.handle_join_with_storage_and_override(
+                profile.id,
+                profile.username,
+                profile.storage,
+                profile.view_distance_override,
+            )?;
         }
         if let Some(host_rx_network) = host_rx_network {
             let server_to_host =

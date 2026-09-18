@@ -29,14 +29,17 @@ impl EmbeddedRuntimeBridge {
         pvp: bool,
     ) -> Result<Self, crate::server_runtime::ServerConfigError> {
         let session_id = u64::MAX;
+        let view_distance = render_distance.clamp(2, 32) as u8;
         let options = match role {
             MultiplayerRole::Singleplayer => {
                 crate::server_runtime::EmbeddedRuntimeOptions::singleplayer(
-                    crate::server_runtime::LocalSessionProfile::new(session_id, "local"),
+                    crate::server_runtime::LocalSessionProfile::new(session_id, "local")
+                        .with_view_distance(view_distance),
                 )
             }
             MultiplayerRole::Host { .. } => crate::server_runtime::EmbeddedRuntimeOptions::listen(
-                crate::server_runtime::LocalSessionProfile::new(session_id, "host"),
+                crate::server_runtime::LocalSessionProfile::new(session_id, "host")
+                    .with_view_distance(view_distance),
             ),
             MultiplayerRole::Client { .. } => {
                 return Err(crate::server_runtime::ServerConfigError::Invalid {
@@ -50,7 +53,9 @@ impl EmbeddedRuntimeBridge {
         properties.world_dir = world_dir;
         properties.seed = u64::from(seed);
         properties.pvp = pvp;
-        properties.view_distance = render_distance.clamp(2, 32) as u8;
+        // Listen host keeps server default view_distance for remote sessions;
+        // singleplayer / local session uses local view_distance_override.
+        // simulation_distance retains the existing construction policy.
         properties.simulation_distance = render_distance.clamp(2, 32) as u8;
         properties.difficulty = match difficulty {
             Difficulty::Peaceful => "peaceful",
@@ -74,6 +79,11 @@ impl EmbeddedRuntimeBridge {
             revisions: std::collections::HashMap::new(),
             pending_request_dimensions: std::collections::HashMap::new(),
         })
+    }
+
+    pub(super) fn set_view_distance(&mut self, view_distance: u32) -> bool {
+        self.runtime
+            .set_local_view_distance(view_distance.clamp(2, 32) as u8)
     }
 
     pub(super) fn session_id(&self) -> crate::network::protocol::PlayerId {

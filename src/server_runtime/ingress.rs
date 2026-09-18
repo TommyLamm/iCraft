@@ -128,6 +128,16 @@ impl ServerRuntime {
         username: String,
         storage: LocalSessionStorage,
     ) -> io::Result<()> {
+        self.handle_join_with_storage_and_override(id, username, storage, None)
+    }
+
+    pub(super) fn handle_join_with_storage_and_override(
+        &mut self,
+        id: u64,
+        username: String,
+        storage: LocalSessionStorage,
+        view_distance_override: Option<u8>,
+    ) -> io::Result<()> {
         let username = normalize_player_identity(&username)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         if self.authority.sessions().any(|session| {
@@ -178,6 +188,7 @@ impl ServerRuntime {
             self.properties.view_distance,
             self.properties.simulation_distance,
         );
+        session.view_distance_override = view_distance_override.map(|dist| dist.clamp(2, 32));
         session.effects = effects;
         let dimension = session.interest.dimension as u8;
         let mut authority_session = SessionContract::new(

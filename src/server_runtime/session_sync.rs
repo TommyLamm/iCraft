@@ -115,4 +115,38 @@ impl ServerRuntime {
             session.player_dirty = true;
         }
     }
+
+    /// Set a view-distance override on the runtime session overlay and refresh
+    /// interest if the effective distance changed. Remote sessions and default
+    /// settings remain unaffected.
+    pub fn set_session_view_distance(&mut self, id: u64, view_distance: u8) -> bool {
+        let default_view = self.properties.view_distance;
+        let view_distance = view_distance.clamp(2, 32);
+        let Some(session) = self.players.get_mut(&id) else {
+            return false;
+        };
+        let current_view = session.effective_view_distance(default_view);
+        session.view_distance_override = Some(view_distance);
+        if current_view == view_distance {
+            return true;
+        }
+        let dimension = session.interest.dimension;
+        let fallback_position = session.last_pose_position;
+        let position = self
+            .authority
+            .session(id)
+            .map(|authority| authority.position)
+            .unwrap_or(fallback_position);
+        self.update_interest_for(id, dimension, position);
+        true
+    }
+
+    /// Set a view-distance override for the local embedded session.
+    pub fn set_local_view_distance(&mut self, view_distance: u8) -> bool {
+        let Some(local_id) = self.local_session_id else {
+            return false;
+        };
+        self.set_session_view_distance(local_id, view_distance)
+    }
 }
+

@@ -147,14 +147,19 @@ pose clocks, and the save codec cannot enter the deterministic core:
 - `PlayerSessionState` (defined in `src/server_runtime/session_state.rs` and
   re-exported by `ServerRuntime`) is keyed by `PlayerId` and owns
   interest, the save codec (`PlayerData`), Instant pose clocks
-  (`last_pose_position` / teleport allowance), and projection scratch.
+  (`last_pose_position` / teleport allowance), `view_distance_override`, and projection scratch.
   It does not mirror id / username / live pose / dimension / game_mode.
 
-Pose / dimension / game mode / gameplay overlays go only through
+Pose / dimension / game mode / gameplay / view-distance overlays go only through
 `write_pose`, `sync_pose_from_authority`, `sync_dimension`, `sync_game_mode`,
-and `sync_gameplay_projection` in `src/server_runtime/session_sync.rs`.
-`write_pose` updates the contract (and pose clocks / interest); it does not
-dual-write live pose into `PlayerData`. `sync_gameplay_projection` overlays
+`sync_gameplay_projection`, and `set_session_view_distance` / `set_local_view_distance` in
+`src/server_runtime/session_sync.rs`. View-distance override is session-local: embedded
+pause options modify the local overlay via `EmbeddedRuntimeBridge::set_view_distance`
+without mutating global `ServerProperties::view_distance` or simulation distance. Both
+`update_interest` and `update_interest_for_at` share `effective_distances` resolution,
+preserving server defaults for remote sessions and retaining the override across dimension
+transfers and respawns. `write_pose` updates the contract (and pose clocks / interest);
+it does not dual-write live pose into `PlayerData`. `sync_gameplay_projection` overlays
 game_mode, gameplay, and pose onto `PlayerData` for projection/save.
 `teleport_session` grants `teleport_allowance` before `write_pose`.
 

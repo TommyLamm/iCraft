@@ -10,6 +10,9 @@ pub struct PlayerSessionState {
     pub data: PlayerData,
     pub interest: InterestSet,
     pub effects: Vec<PlayerEffectWire>,
+    /// View-distance override for this session (e.g. embedded presentation client).
+    /// When set, this overrides `ServerProperties::view_distance` for this session's interest.
+    pub view_distance_override: Option<u8>,
     pub(super) pending_initial_chunks: VecDeque<(Dimension, i32, i32)>,
     pub(super) last_projected_session_revision: Option<(Dimension, u64)>,
     /// Last pose/health/anim fingerprint sent as `EntityState` to this session.
@@ -45,6 +48,7 @@ impl PlayerSessionState {
             data,
             interest: InterestSet::new(dimension, view_distance, simulation_distance),
             effects: Vec::new(),
+            view_distance_override: None,
             pending_initial_chunks: VecDeque::new(),
             last_projected_session_revision: None,
             last_projected_entity_states: HashMap::new(),
@@ -56,6 +60,11 @@ impl PlayerSessionState {
             teleport_allowance: None,
             player_dirty: true,
         }
+    }
+
+    #[inline]
+    pub fn effective_view_distance(&self, server_default: u8) -> u8 {
+        self.view_distance_override.unwrap_or(server_default)
     }
 
     pub(super) fn queue_initial_chunks(

@@ -17,6 +17,7 @@ pub struct LocalSessionProfile {
     pub id: u64,
     pub username: String,
     pub storage: LocalSessionStorage,
+    pub view_distance_override: Option<u8>,
 }
 
 /// Player persistence policy is explicit because an existing singleplayer
@@ -36,6 +37,7 @@ impl LocalSessionProfile {
             id,
             username: username.into(),
             storage: LocalSessionStorage::WorldPlayer,
+            view_distance_override: None,
         }
     }
 
@@ -44,7 +46,13 @@ impl LocalSessionProfile {
             id,
             username: username.into(),
             storage: LocalSessionStorage::Named,
+            view_distance_override: None,
         }
+    }
+
+    pub fn with_view_distance(mut self, view_distance: u8) -> Self {
+        self.view_distance_override = Some(view_distance.clamp(2, 32));
+        self
     }
 }
 

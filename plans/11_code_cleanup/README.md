@@ -39,7 +39,7 @@
 | 07 | [Save worker 無 producer 封套與多餘 job id](07_save_worker_envelopes.md) | P0／死封套 | 02 | 已完成 |
 | 08 | [Runtime worldgen 固定 token 與空 metrics](08_worldgen_fixed_tokens.md) | P0／固定狀態 | 無 | 已完成 |
 | 09 | [收包按實際 frame bytes 計量](09_inbound_frame_metrics.md) | P1／活躍流程 | 建議06 | 已完成 |
-| 10 | [Embedded 本地視距同步到 runtime](10_embedded_view_distance.md) | P1／契約前置 | 02 | 待執行 |
+| 10 | [Embedded 本地視距同步到 runtime](10_embedded_view_distance.md) | P1／契約前置 | 02 | 已完成 |
 | 11 | [刪除桌面本地 worldgen 與載入排程](11_remove_desktop_worldgen.md) | P1／活躍流程 | 05、10 | 待執行 |
 | 12 | [Section mesh invalidation 單一來源](12_section_invalidation.md) | P1／去重與行為修正 | 05、21 | 待執行 |
 | 13 | [刪未接線村民交易生成與升級算法](13_unused_trade_generation.md) | P0／死算法 | 建議01 | 已完成 |

@@ -920,9 +920,24 @@ impl ServerRuntime {
         }
     }
 
-    pub(super) fn update_interest(&mut self, session: &mut PlayerSessionState) {
-        let view_distance = self.properties.view_distance;
+    #[inline]
+    pub(super) fn effective_distances_for_session(&self, session: &PlayerSessionState) -> (u8, u8) {
+        let view_distance = session.effective_view_distance(self.properties.view_distance);
         let simulation_distance = self.properties.simulation_distance;
+        (view_distance, simulation_distance)
+    }
+
+    #[inline]
+    pub(super) fn effective_distances_for_id(&self, id: u64) -> (u8, u8) {
+        if let Some(session) = self.players.get(&id) {
+            self.effective_distances_for_session(session)
+        } else {
+            (self.properties.view_distance, self.properties.simulation_distance)
+        }
+    }
+
+    pub(super) fn update_interest(&mut self, session: &mut PlayerSessionState) {
+        let (view_distance, simulation_distance) = self.effective_distances_for_session(session);
         let _ = session
             .interest
             .set_distances(view_distance, simulation_distance);
@@ -983,8 +998,7 @@ impl ServerRuntime {
         position: [f32; 3],
         sequence: u64,
     ) {
-        let view_distance = self.properties.view_distance;
-        let simulation_distance = self.properties.simulation_distance;
+        let (view_distance, simulation_distance) = self.effective_distances_for_id(id);
         let spatial_revision = self
             .authority
             .world_ref(dimension)
