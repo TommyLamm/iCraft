@@ -524,7 +524,10 @@ fn terrain_worker_tokens_reject_stale_generation_lifetime_and_revision() {
 #[test]
 fn mesh_invalidation_queues_latest_revision_and_invalidates_connectivity() {
     let coord = (2, -3);
-    let mut meshes = std::collections::HashMap::from([(coord, ChunkMesh::pending())]);
+    let mut meshes = std::collections::HashMap::from([(
+        coord,
+        ChunkMesh::pending_for_dimension(crate::dimension::Dimension::Overworld),
+    )]);
     let key = SectionKey::new(coord.0, 5, coord.1);
     let section = meshes
         .get_mut(&coord)
@@ -567,7 +570,10 @@ fn mutation_scheduler_worker_chain_commits_only_the_latest_visible_revision() {
     let coord = (0, 0);
     let lifetime = 9;
     let generation = 4;
-    let mut meshes = std::collections::HashMap::from([(coord, ChunkMesh::pending())]);
+    let mut meshes = std::collections::HashMap::from([(
+        coord,
+        ChunkMesh::pending_for_dimension(crate::dimension::Dimension::Overworld),
+    )]);
     let key = SectionKey::new(0, 4, 0);
     let mut scheduler = crate::chunk_schedule::SectionMeshScheduler::new();
     let section = meshes.get_mut(&coord).unwrap().section_mut(4).unwrap();
@@ -613,7 +619,10 @@ fn boundary_and_diagonal_ao_dependencies_queue_once() {
     let coords = [(0, 0), (1, 0), (0, 1), (1, 1)];
     let mut meshes = coords
         .into_iter()
-        .map(|coord| (coord, ChunkMesh::pending()))
+        .map(|coord| (
+            coord,
+            ChunkMesh::pending_for_dimension(crate::dimension::Dimension::Overworld),
+        ))
         .collect::<std::collections::HashMap<_, _>>();
     let mut scheduler = crate::chunk_schedule::SectionMeshScheduler::new();
     let mut dependencies = std::collections::HashSet::new();

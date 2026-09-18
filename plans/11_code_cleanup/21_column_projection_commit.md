@@ -1,6 +1,6 @@
 # 21 — 整欄投影共用 commit 邊界
 
-狀態：待執行。基線：`83e751d`，2026-09-17。
+狀態：已完成。基線：`83e751d`，2026-09-17。
 前置：11；12 完整改造在本包後。
 
 ## 定位與判定
@@ -37,5 +37,17 @@
 
 ## 實作紀錄
 
-尚未執行；完成時記錄實際修改、驗證結果、刪碼量及文件更新。
+- 抽取統一 `commit_projected_chunk_column` 邊界於 `src/presentation/authority_projection.rs`，承接 Embedded `Arc<Chunk>` 與 Join 解碼後 candidate `Chunk`。
+- Join `apply_remote_chunk_data`（`src/state.rs`）改為先以 `ChunkSaveData::restore_network_payload` 解碼至候選 `Chunk`，失敗立即 fail-closed 返回，不推進 `client_chunk_revisions` 也不覆寫現有欄位或 lifetime。
+- 刪除丟棄錯誤 Result 的舊 `restore_chunk_payload` wrapper。
+- 刪除硬編碼 Overworld 高度的死方法 `ChunkMesh::pending()`，全面改用維度感知之 `ChunkMesh::pending_for_dimension`（在 `Dimension` 上補足 `to_wire` 輔助函式）。
+- 提交整欄時，主動以 `DependencyReason::Ao` 使所有已載入鄰欄（`surrounding_chunk_coords`）之 mesh section 失效，保證遮面與環境光遮蔽更新，不再依賴「剛好有光值變化」。
+- 修復 `apply_remote_block_change` 與 `apply_remote_block_entity_delta` 在欄位未 resident 時提早推進 `client_chunk_revisions` 導致底欄被判定為過期而丟棄的潛在缺陷；pending block changes 維持暫存並於欄位 commit 後按 revision 升冪順序正確重播。
+- 在 `src/presentation/tests/authority_projection_tests.rs` 中新增 5 項明列驗收測試，涵蓋 Embedded vs Join 等價性、解碼失敗 fail-closed、鄰欄 AO 失效、pending delta 重播與 stale column 拒絕、以及 section identity 代際/生命週期過期拒絕。
+- 更新 `ARCHITECTURE.md` 投影提交邊界、錯誤語意與 AO 失效規範；更新 `plans/11_code_cleanup/README.md` 狀態為已完成。
+- 驗證：
+  - `cargo check --all-targets`（通過，code 0）
+  - `cargo test --bin icraft -- authority_projection_tests`（通過，6 passed, 0 failed）
+  - `cargo test --bin icraft -- remote_sync_tests`（通過，23 passed, 0 failed）
+  - `cargo test --lib -- embedded_chunk_projection_uses_arc_column_not_dense_stream review_hardening_join_projection`（通過，1 passed, 0 failed）
 

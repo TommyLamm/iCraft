@@ -4347,14 +4347,17 @@ impl State {
         {
             return;
         }
-        self.client_chunk_revisions.insert(revision_key, revision);
         if !self.chunk_manager.chunks.contains_key(&(cx, cz)) {
-            self.pending_block_changes
-                .entry((cx, cz))
-                .or_default()
-                .insert((x, y, z), (revision, block_wire, state, raw_fluid));
+            let entry = self.pending_block_changes.entry((cx, cz)).or_default();
+            if let Some((prev_rev, _, _, _)) = entry.get(&(x, y, z)) {
+                if revision < *prev_rev {
+                    return;
+                }
+            }
+            entry.insert((x, y, z), (revision, block_wire, state, raw_fluid));
             return;
         }
+        self.client_chunk_revisions.insert(revision_key, revision);
         let previous_block = self.chunk_manager.get_block(x, y, z);
         let previous_state = self.chunk_manager.get_block_state(x, y, z);
         let previous_raw_fluid = self.chunk_manager.get_fluid_raw(x, y, z);
@@ -4396,6 +4399,9 @@ impl State {
                 .copied()
                 .unwrap_or(0)
         {
+            return;
+        }
+        if !self.chunk_manager.chunks.contains_key(&(cx, cz)) {
             return;
         }
         self.client_chunk_revisions.insert(revision_key, revision);
@@ -4442,94 +4448,19 @@ impl State {
         {
             return;
         }
-        self.client_chunk_revisions.insert(revision_key, revision);
-        let inserted_new = !self.chunk_manager.chunks.contains_key(&(cx, cz));
-        if inserted_new {
-            if self
-                .chunk_manager
-                .insert_authoritative_chunk_payload(
-                    cx,
-                    cz,
-                    &blocks,
-                    &block_states,
-                    &fluid_levels,
-                    &block_entities,
-                )
-                .is_err()
-            {
-                return;
-            }
-            let lifetime = self.next_chunk_lifetime();
-            self.chunk_lifetimes.insert((cx, cz), lifetime);
-            self.chunk_meshes.insert((cx, cz), ChunkMesh::pending());
-        } else if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
-            Self::restore_chunk_payload(
-                chunk,
-                &blocks,
-                &block_states,
-                &fluid_levels,
-                &block_entities,
-            );
-        } else {
+        let mut candidate = crate::world::Chunk::empty_in_dimension(dimension, cx, cz);
+        if crate::save::ChunkSaveData::restore_network_payload(
+            &mut candidate,
+            &blocks,
+            &block_states,
+            &fluid_levels,
+            &block_entities,
+        )
+        .is_err()
+        {
             return;
         }
-        self.invalidate_chunk_mesh(
-            (cx, cz),
-            if inserted_new {
-                DependencyReason::ChunkLoad
-            } else {
-                DependencyReason::Network
-            },
-        );
-        if let Some(changes) = self.pending_block_changes.remove(&(cx, cz)) {
-            let mut changes: Vec<_> = changes.into_iter().collect();
-            changes.sort_by_key(|(_, (change_revision, _, _, _))| *change_revision);
-            for ((x, y, z), (change_revision, block, state, raw_fluid)) in changes {
-                self.apply_remote_block_change(
-                    dimension_wire,
-                    change_revision,
-                    x,
-                    y,
-                    z,
-                    block,
-                    state,
-                    raw_fluid,
-                );
-            }
-        }
-        // Re-seed boundary lighting so neighbors pick up the overwritten
-        // column heights and light values. One call covers the column plus
-        // shared faces of loaded cardinal neighbors.
-        let mut dirty_chunks = std::collections::HashSet::new();
-        if self.chunk_manager.chunks.contains_key(&(cx, cz)) {
-            crate::lighting::propagate_chunk_lighting(
-                &mut self.chunk_manager,
-                cx,
-                cz,
-                &mut dirty_chunks,
-            );
-            self.invalidate_chunk_mesh((cx, cz), DependencyReason::Light);
-        }
-        self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Light);
-    }
-
-    /// Decode a `ChunkSaveData`-style compressed payload into an existing
-    /// chunk. Reused by both the save loader and the network catch-up path so
-    /// the wire format stays identical to the on-disk format.
-    fn restore_chunk_payload(
-        chunk: &mut crate::world::Chunk,
-        blocks: &[u8],
-        block_states: &[u8],
-        fluid_levels: &[u8],
-        block_entities: &[u8],
-    ) {
-        let _ = crate::save::ChunkSaveData::restore_network_payload(
-            chunk,
-            blocks,
-            block_states,
-            fluid_levels,
-            block_entities,
-        );
+        self.commit_projected_chunk_column(dimension, cx, cz, revision, candidate, true);
     }
 
     pub fn respawn(&mut self) {

@@ -108,11 +108,20 @@ There is no `LegacyOwner`, no `is_authoritative()`, and no
 Presentation never performs worldgen or chunk loading in either topology; chunks
 arrive strictly via `PresentationEvent::ChunkColumn` (embedded) or `Packet::ChunkData`
 (join-client), and the client-side spiral chunk load queue and `PresentationChunkLoadPolicy`
-are gone. Presentation never mutates authority-owned world/container slots locally;
-`set_item_at_slot` no-ops `ContainerSlot` and all join-client writes. Inventory click
-writeback uses `resolve_inventory_hit` (shared probe) so Embedded player-inventory
-`LocalMutate` and Join `Reject` stay on one hit path. The dead `Pickup`,
-farmland-trample, and unsupported-break policy variants are gone.
+are gone. Both entrypoints converge on a single decoded-column commit boundary
+(`State::commit_projected_chunk_column`). Decoding is decoupled from commit: Join decodes
+incoming network bytes into a candidate `Chunk` before state mutation; decode errors fail
+closed without advancing `client_chunk_revisions` or modifying existing resident columns/lifetimes.
+The commit boundary enforces monotonic revision gating, assigns chunk lifetimes, initializes
+meshes via `ChunkMesh::pending_for_dimension`, invalidates the center column (`DependencyReason::ChunkLoad`
+on initial insert, `Network` on replacement), invalidates all resident neighbors in `surrounding_chunk_coords`
+with `DependencyReason::Ao` regardless of lighting delta, and replays buffered out-of-order block changes
+in ascending revision order. Embedded columns retain authority lighting directly without recomputation,
+while Join clients conditionally propagate boundary lighting. Presentation never mutates authority-owned
+world/container slots locally; `set_item_at_slot` no-ops `ContainerSlot` and all join-client writes. Inventory
+click writeback uses `resolve_inventory_hit` (shared probe) so Embedded player-inventory `LocalMutate`
+and Join `Reject` stay on one hit path. The dead `Pickup`, farmland-trample, and unsupported-break policy
+variants are gone.
 
 ## Ownership
 

@@ -97,17 +97,49 @@ impl State {
         {
             return;
         }
+        self.commit_projected_chunk_column(dimension, cx, cz, revision, (*chunk).clone(), false);
+    }
+
+    /// Commit an authoritative decoded chunk column into presentation caches.
+    /// Shared by join-client `ChunkData` and embedded `ChunkColumn` projections.
+    pub(crate) fn commit_projected_chunk_column(
+        &mut self,
+        dimension: crate::dimension::Dimension,
+        cx: i32,
+        cz: i32,
+        revision: u64,
+        chunk: crate::world::Chunk,
+        reseed_boundary_lighting: bool,
+    ) -> bool {
+        if dimension != self.current_dimension {
+            return false;
+        }
+        let revision_key = (dimension, cx, cz);
+        if revision
+            < self
+                .client_chunk_revisions
+                .get(&revision_key)
+                .copied()
+                .unwrap_or(0)
+        {
+            return false;
+        }
         self.client_chunk_revisions.insert(revision_key, revision);
         let inserted_new = !self.chunk_manager.chunks.contains_key(&(cx, cz));
-        // Clone out of the Arc so presentation owns a mutable CPU copy while
-        // authority keeps mutating its resident map. One structural clone —
-        // no dense flatten / palette rebuild / column lighting.
-        self.chunk_manager
-            .insert_resident_chunk((cx, cz), (*chunk).clone());
+        self.chunk_manager.insert_resident_chunk((cx, cz), chunk);
         if inserted_new {
             let lifetime = self.next_chunk_lifetime();
             self.chunk_lifetimes.insert((cx, cz), lifetime);
-            self.chunk_meshes.insert((cx, cz), ChunkMesh::pending());
+            self.chunk_meshes
+                .insert((cx, cz), ChunkMesh::pending_for_dimension(dimension));
+        } else {
+            let lifetime = self.next_chunk_lifetime();
+            self.chunk_lifetimes
+                .entry((cx, cz))
+                .or_insert(lifetime);
+            self.chunk_meshes
+                .entry((cx, cz))
+                .or_insert_with(|| ChunkMesh::pending_for_dimension(dimension));
         }
         self.invalidate_chunk_mesh(
             (cx, cz),
@@ -117,9 +149,41 @@ impl State {
                 DependencyReason::Network
             },
         );
-        // Drop any buffered join-style pending changes; the Arc column is the
-        // authority snapshot at `revision`.
-        self.pending_block_changes.remove(&(cx, cz));
+        for neighbor in surrounding_chunk_coords(cx, cz) {
+            if self.chunk_manager.chunks.contains_key(&neighbor) {
+                self.invalidate_chunk_mesh(neighbor, DependencyReason::Ao);
+            }
+        }
+        if let Some(changes) = self.pending_block_changes.remove(&(cx, cz)) {
+            let mut changes: Vec<_> = changes.into_iter().collect();
+            changes.sort_by_key(|(_, (change_revision, _, _, _))| *change_revision);
+            for ((x, y, z), (change_revision, block, state, raw_fluid)) in changes {
+                self.apply_remote_block_change(
+                    dimension.to_wire(),
+                    change_revision,
+                    x,
+                    y,
+                    z,
+                    block,
+                    state,
+                    raw_fluid,
+                );
+            }
+        }
+        if reseed_boundary_lighting {
+            let mut dirty_chunks = std::collections::HashSet::new();
+            if self.chunk_manager.chunks.contains_key(&(cx, cz)) {
+                crate::lighting::propagate_chunk_lighting(
+                    &mut self.chunk_manager,
+                    cx,
+                    cz,
+                    &mut dirty_chunks,
+                );
+                self.invalidate_chunk_mesh((cx, cz), DependencyReason::Light);
+            }
+            self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Light);
+        }
+        true
     }
 
     pub(super) fn session_slot_from_stack(

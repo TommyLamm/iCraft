@@ -118,6 +118,10 @@ impl Dimension {
         }
     }
 
+    pub const fn to_wire(self) -> u8 {
+        self as u8
+    }
+
     pub const fn name(self) -> &'static str {
         match self {
             Self::Overworld => "Overworld",

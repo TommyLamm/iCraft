@@ -508,10 +508,6 @@ pub struct ChunkMesh {
 }
 
 impl ChunkMesh {
-    pub(crate) fn pending() -> Self {
-        Self::pending_for_dimension(crate::dimension::Dimension::Overworld)
-    }
-
     pub(crate) fn pending_for_dimension(dimension: crate::dimension::Dimension) -> Self {
         let height = dimension.height();
         Self::pending_for_height(height.min_section_y(), height.section_count())
