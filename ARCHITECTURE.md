@@ -269,9 +269,15 @@ input
   so a hopper may wait up to 8 extra ticks. Hoppers are discovered from a
   compact per-chunk `hopper_positions` index (same encoding as furnaces /
   torches), so zero-hopper simulation columns do not walk `block_entities`.
-  Furnaces are ticked from a compact
-  per-chunk index with the same encoding as torches. Random ticks sample from a
-  per-chunk ascending `section_y` index (`random_tick_sections`) maintained on
+  Furnaces are ticked from a compact per-chunk index with the same encoding as
+  torches. Derived chunk indexes (`torch_positions`, `redstone_positions`,
+  `furnace_positions`, `hopper_positions`, and ascending `random_tick_sections`)
+  are populated in a single traversal pass (`rebuild_derived_indexes`) on
+  generation/restore while skipping non-air-empty sections. Local mutations
+  (`set_block_local`) update index membership via category transition deltas
+  (add on non-member→member, remove on member→non-member, retain without
+  re-adding on member→member). Random ticks sample from the per-chunk ascending
+  `section_y` index (`random_tick_sections`) maintained on
   load / `set_block_local` / unload; authority walks the simulation-union
   columns and takes at most 128 already-ordered eligible sections without
   rescanning empty sections or sorting each tick. Sleeping redstone skips

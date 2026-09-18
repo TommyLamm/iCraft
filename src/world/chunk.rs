@@ -35,6 +35,22 @@ fn is_hopper_block(block: BlockType) -> bool {
     matches!(block, BlockType::Hopper)
 }
 
+#[inline]
+fn update_index_membership(
+    positions: &mut Vec<u32>,
+    encoded: u32,
+    old_member: bool,
+    new_member: bool,
+) {
+    if old_member && !new_member {
+        if let Some(index) = positions.iter().position(|&p| p == encoded) {
+            positions.swap_remove(index);
+        }
+    } else if new_member && !old_member {
+        positions.push(encoded);
+    }
+}
+
 #[derive(Clone)]
 pub struct Chunk {
     pub chunk_x: i32,
@@ -155,7 +171,8 @@ impl Chunk {
         chunk
     }
 
-    fn encode_torch_position(x: usize, y: i32, z: usize) -> u32 {
+    /// Encodes local `(x, y, z)` coordinates into a compact torch/component index.
+    pub fn encode_torch_position(x: usize, y: i32, z: usize) -> u32 {
         (x as u32) | ((z as u32) << 4) | (((y as u32) & 0xFFFF) << 8)
     }
 
@@ -166,134 +183,6 @@ impl Chunk {
             ((index >> 8) as u16) as i16 as i32,
             ((index >> 4) & 0x0f) as usize,
         )
-    }
-
-    fn build_torch_index_from_sections(
-        min_sec_y: i8,
-        sections: &[Option<ChunkSection>],
-    ) -> Vec<u32> {
-        let mut positions = Vec::new();
-        for (sec_idx, sec_opt) in sections.iter().enumerate() {
-            let Some(sec) = sec_opt else {
-                continue;
-            };
-            if sec.non_air_count() == 0 {
-                continue;
-            }
-            let sec_y = min_sec_y + sec_idx as i8;
-            for ly in 0..SECTION_SIZE {
-                let wy = section_and_local_y_to_world_y(sec_y, ly as u8);
-                for z in 0..CHUNK_DEPTH {
-                    for x in 0..CHUNK_WIDTH {
-                        let idx = (ly << 8) | (z << 4) | x;
-                        if sec.get_block(idx) == BlockType::Torch {
-                            positions.push(Self::encode_torch_position(x, wy, z));
-                        }
-                    }
-                }
-            }
-        }
-        positions
-    }
-
-    fn build_redstone_index_from_sections(
-        min_sec_y: i8,
-        sections: &[Option<ChunkSection>],
-    ) -> Vec<u32> {
-        let mut positions = Vec::new();
-        for (sec_idx, sec_opt) in sections.iter().enumerate() {
-            let Some(sec) = sec_opt else {
-                continue;
-            };
-            if sec.redstone_count == 0 {
-                continue;
-            }
-            let sec_y = min_sec_y + sec_idx as i8;
-            for ly in 0..SECTION_SIZE {
-                let wy = section_and_local_y_to_world_y(sec_y, ly as u8);
-                for z in 0..CHUNK_DEPTH {
-                    for x in 0..CHUNK_WIDTH {
-                        let idx = (ly << 8) | (z << 4) | x;
-                        if crate::redstone::is_component(sec.get_block(idx)) {
-                            positions.push(Self::encode_torch_position(x, wy, z));
-                        }
-                    }
-                }
-            }
-        }
-        positions
-    }
-
-    fn build_furnace_index_from_sections(
-        min_sec_y: i8,
-        sections: &[Option<ChunkSection>],
-    ) -> Vec<u32> {
-        let mut positions = Vec::new();
-        for (sec_idx, sec_opt) in sections.iter().enumerate() {
-            let Some(sec) = sec_opt else {
-                continue;
-            };
-            if sec.non_air_count() == 0 {
-                continue;
-            }
-            let sec_y = min_sec_y + sec_idx as i8;
-            for ly in 0..SECTION_SIZE {
-                let wy = section_and_local_y_to_world_y(sec_y, ly as u8);
-                for z in 0..CHUNK_DEPTH {
-                    for x in 0..CHUNK_WIDTH {
-                        let idx = (ly << 8) | (z << 4) | x;
-                        if is_furnace_block(sec.get_block(idx)) {
-                            positions.push(Self::encode_torch_position(x, wy, z));
-                        }
-                    }
-                }
-            }
-        }
-        positions
-    }
-
-    fn build_hopper_index_from_sections(
-        min_sec_y: i8,
-        sections: &[Option<ChunkSection>],
-    ) -> Vec<u32> {
-        let mut positions = Vec::new();
-        for (sec_idx, sec_opt) in sections.iter().enumerate() {
-            let Some(sec) = sec_opt else {
-                continue;
-            };
-            if sec.non_air_count() == 0 {
-                continue;
-            }
-            let sec_y = min_sec_y + sec_idx as i8;
-            for ly in 0..SECTION_SIZE {
-                let wy = section_and_local_y_to_world_y(sec_y, ly as u8);
-                for z in 0..CHUNK_DEPTH {
-                    for x in 0..CHUNK_WIDTH {
-                        let idx = (ly << 8) | (z << 4) | x;
-                        if is_hopper_block(sec.get_block(idx)) {
-                            positions.push(Self::encode_torch_position(x, wy, z));
-                        }
-                    }
-                }
-            }
-        }
-        positions
-    }
-
-    fn build_random_tick_index_from_sections(
-        min_sec_y: i8,
-        sections: &[Option<ChunkSection>],
-    ) -> Vec<i8> {
-        let mut section_ys = Vec::new();
-        for (sec_idx, sec_opt) in sections.iter().enumerate() {
-            let Some(sec) = sec_opt else {
-                continue;
-            };
-            if sec.random_tick_count() > 0 {
-                section_ys.push(min_sec_y + sec_idx as i8);
-            }
-        }
-        section_ys
     }
 
     /// Returns the indexed local positions of ordinary torches.
@@ -444,34 +333,48 @@ impl Chunk {
             .map(|(&pos, entity)| (pos, entity))
     }
 
-    /// Rebuilds the torch index after bulk block mutations (generation/load).
-    pub fn rebuild_torch_index(&mut self) {
-        self.torch_positions =
-            Self::build_torch_index_from_sections(self.min_section_y, &self.sections);
-    }
+    /// Rebuilds derived block and section indexes after bulk mutations (generation/load).
+    pub fn rebuild_derived_indexes(&mut self) {
+        self.torch_positions.clear();
+        self.redstone_positions.clear();
+        self.furnace_positions.clear();
+        self.hopper_positions.clear();
+        self.random_tick_sections.clear();
 
-    /// Rebuilds the redstone index after bulk block mutations (generation/load).
-    pub fn rebuild_redstone_index(&mut self) {
-        self.redstone_positions =
-            Self::build_redstone_index_from_sections(self.min_section_y, &self.sections);
-    }
-
-    /// Rebuilds the furnace index after bulk block mutations (generation/load).
-    pub fn rebuild_furnace_index(&mut self) {
-        self.furnace_positions =
-            Self::build_furnace_index_from_sections(self.min_section_y, &self.sections);
-    }
-
-    /// Rebuilds the hopper index after bulk block mutations (generation/load).
-    pub fn rebuild_hopper_index(&mut self) {
-        self.hopper_positions =
-            Self::build_hopper_index_from_sections(self.min_section_y, &self.sections);
-    }
-
-    /// Rebuilds the random-tick section index after bulk block mutations.
-    pub fn rebuild_random_tick_index(&mut self) {
-        self.random_tick_sections =
-            Self::build_random_tick_index_from_sections(self.min_section_y, &self.sections);
+        for (sec_idx, sec_opt) in self.sections.iter().enumerate() {
+            let Some(sec) = sec_opt else {
+                continue;
+            };
+            let sec_y = self.min_section_y + sec_idx as i8;
+            if sec.random_tick_count() > 0 {
+                self.random_tick_sections.push(sec_y);
+            }
+            if sec.non_air_count() == 0 {
+                continue;
+            }
+            for ly in 0..SECTION_SIZE {
+                let wy = section_and_local_y_to_world_y(sec_y, ly as u8);
+                for z in 0..CHUNK_DEPTH {
+                    for x in 0..CHUNK_WIDTH {
+                        let idx = (ly << 8) | (z << 4) | x;
+                        let block = sec.get_block(idx);
+                        if block == BlockType::Air {
+                            continue;
+                        }
+                        let encoded = Self::encode_torch_position(x, wy, z);
+                        if block == BlockType::Torch {
+                            self.torch_positions.push(encoded);
+                        } else if crate::redstone::is_component(block) {
+                            self.redstone_positions.push(encoded);
+                        } else if is_furnace_block(block) {
+                            self.furnace_positions.push(encoded);
+                        } else if is_hopper_block(block) {
+                            self.hopper_positions.push(encoded);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Sets a local block and keeps the torch and redstone indices synchronized.
@@ -498,47 +401,30 @@ impl Chunk {
         }
 
         let encoded = Self::encode_torch_position(x, wy, z);
-        if old == BlockType::Torch {
-            if let Some(index) = self.torch_positions.iter().position(|&p| p == encoded) {
-                self.torch_positions.swap_remove(index);
-            }
-        }
-        if block == BlockType::Torch && old != BlockType::Torch {
-            self.torch_positions.push(encoded);
-        }
-
-        let old_is_redstone = crate::redstone::is_component(old);
-        let new_is_redstone = crate::redstone::is_component(block);
-        if old_is_redstone {
-            if let Some(index) = self.redstone_positions.iter().position(|&p| p == encoded) {
-                self.redstone_positions.swap_remove(index);
-            }
-        }
-        if new_is_redstone && !old_is_redstone {
-            self.redstone_positions.push(encoded);
-        }
-
-        let old_is_furnace = is_furnace_block(old);
-        let new_is_furnace = is_furnace_block(block);
-        if old_is_furnace && !new_is_furnace {
-            if let Some(index) = self.furnace_positions.iter().position(|&p| p == encoded) {
-                self.furnace_positions.swap_remove(index);
-            }
-        }
-        if new_is_furnace && !old_is_furnace {
-            self.furnace_positions.push(encoded);
-        }
-
-        let old_is_hopper = is_hopper_block(old);
-        let new_is_hopper = is_hopper_block(block);
-        if old_is_hopper && !new_is_hopper {
-            if let Some(index) = self.hopper_positions.iter().position(|&p| p == encoded) {
-                self.hopper_positions.swap_remove(index);
-            }
-        }
-        if new_is_hopper && !old_is_hopper {
-            self.hopper_positions.push(encoded);
-        }
+        update_index_membership(
+            &mut self.torch_positions,
+            encoded,
+            old == BlockType::Torch,
+            block == BlockType::Torch,
+        );
+        update_index_membership(
+            &mut self.redstone_positions,
+            encoded,
+            crate::redstone::is_component(old),
+            crate::redstone::is_component(block),
+        );
+        update_index_membership(
+            &mut self.furnace_positions,
+            encoded,
+            is_furnace_block(old),
+            is_furnace_block(block),
+        );
+        update_index_membership(
+            &mut self.hopper_positions,
+            encoded,
+            is_hopper_block(old),
+            is_hopper_block(block),
+        );
 
         match self.random_tick_sections.binary_search(&sec_y_val) {
             Ok(index) if random_tick_count == 0 => {
@@ -939,7 +825,7 @@ mod tests {
         assert!(chunk.random_tick_sections().is_empty());
         chunk.set_block_local(0, -10, 0, BlockType::Fire);
         assert_eq!(chunk.random_tick_sections(), &[-1]);
-        chunk.rebuild_random_tick_index();
+        chunk.rebuild_derived_indexes();
         assert_eq!(chunk.random_tick_sections(), &[-1]);
     }
 
@@ -1012,5 +898,224 @@ mod tests {
         // Changing block type auto-removes block entity
         chunk.set_block_local(4, 10, 4, BlockType::Air);
         assert_eq!(chunk.get_block_entity(4, 10, 4), None);
+    }
+
+    #[test]
+    fn redstone_index_tracks_component_mutations_without_loss_or_duplicates() {
+        let mut chunk = Chunk::new(0, 0);
+        assert!(chunk.redstone_positions().is_empty());
+
+        // Place initial redstone component
+        chunk.set_block_local(3, 40, 5, BlockType::RedstoneWire);
+        assert_eq!(chunk.redstone_positions().len(), 1);
+        let encoded = chunk.redstone_positions()[0];
+        assert_eq!(Chunk::decode_torch_position(encoded), (3, 40, 5));
+
+        // Component -> component mutation must NOT lose the index
+        chunk.set_block_local(3, 40, 5, BlockType::Repeater);
+        assert_eq!(chunk.redstone_positions().len(), 1);
+        assert_eq!(chunk.redstone_positions()[0], encoded);
+
+        // Transition to yet another component
+        chunk.set_block_local(3, 40, 5, BlockType::Comparator);
+        assert_eq!(chunk.redstone_positions().len(), 1);
+        assert_eq!(chunk.redstone_positions()[0], encoded);
+
+        // Setting the same component again does not duplicate
+        chunk.set_block_local(3, 40, 5, BlockType::Comparator);
+        assert_eq!(chunk.redstone_positions().len(), 1);
+
+        // Back to RedstoneWire
+        chunk.set_block_local(3, 40, 5, BlockType::RedstoneWire);
+        assert_eq!(chunk.redstone_positions().len(), 1);
+        assert_eq!(chunk.redstone_positions()[0], encoded);
+
+        // Non-redstone block removes it
+        chunk.set_block_local(3, 40, 5, BlockType::Stone);
+        assert!(chunk.redstone_positions().is_empty());
+
+        // Setting non-redstone again does nothing
+        chunk.set_block_local(3, 40, 5, BlockType::Stone);
+        assert!(chunk.redstone_positions().is_empty());
+
+        // Re-adding component adds it back
+        chunk.set_block_local(3, 40, 5, BlockType::Lever);
+        assert_eq!(chunk.redstone_positions().len(), 1);
+        assert_eq!(chunk.redstone_positions()[0], encoded);
+
+        // Multiple other component transitions
+        chunk.set_block_local(3, 40, 5, BlockType::OakDoor);
+        assert_eq!(chunk.redstone_positions().len(), 1);
+        assert_eq!(chunk.redstone_positions()[0], encoded);
+
+        chunk.set_block_local(3, 40, 5, BlockType::TNT);
+        assert_eq!(chunk.redstone_positions().len(), 1);
+        assert_eq!(chunk.redstone_positions()[0], encoded);
+
+        chunk.set_block_local(3, 40, 5, BlockType::Air);
+        assert!(chunk.redstone_positions().is_empty());
+    }
+
+    #[test]
+    fn random_tick_index_handles_negative_sections_and_last_block_removal() {
+        let mut chunk = Chunk {
+            chunk_x: 0,
+            chunk_z: 0,
+            min_section_y: -4,
+            sections: (0..24).map(|_| None).collect(),
+            heightmap: Box::new([[NO_HEIGHT; CHUNK_DEPTH]; CHUNK_WIDTH]),
+            torch_positions: Vec::new(),
+            redstone_positions: Vec::new(),
+            furnace_positions: Vec::new(),
+            hopper_positions: Vec::new(),
+            random_tick_sections: Vec::new(),
+            block_entities: std::collections::HashMap::new(),
+        };
+
+        assert!(chunk.random_tick_sections().is_empty());
+
+        // Place random-tick blocks in negative sections:
+        // world Y -60 -> section Y -4
+        // world Y -30 -> section Y -2
+        // world Y 10  -> section Y 0
+        chunk.set_block_local(1, -60, 1, BlockType::Fire);
+        chunk.set_block_local(2, -30, 2, BlockType::WheatCrop);
+        chunk.set_block_local(3, 10, 3, BlockType::OakLeaves);
+
+        assert_eq!(chunk.random_tick_sections(), &[-4, -2, 0]);
+
+        // Place a second random-tick block in section -2
+        chunk.set_block_local(5, -28, 5, BlockType::Cactus);
+        assert_eq!(chunk.random_tick_sections(), &[-4, -2, 0]);
+
+        // Rebuilding derived indexes yields identical sorted sections
+        chunk.rebuild_derived_indexes();
+        assert_eq!(chunk.random_tick_sections(), &[-4, -2, 0]);
+
+        // Remove the first block in section -2; section remains eligible
+        chunk.set_block_local(2, -30, 2, BlockType::Stone);
+        assert_eq!(chunk.random_tick_sections(), &[-4, -2, 0]);
+
+        // Remove the last random-tick block in section -2; section is demoted
+        chunk.set_block_local(5, -28, 5, BlockType::Air);
+        assert_eq!(chunk.random_tick_sections(), &[-4, 0]);
+
+        // Rebuild confirms consistency
+        chunk.rebuild_derived_indexes();
+        assert_eq!(chunk.random_tick_sections(), &[-4, 0]);
+    }
+
+    #[test]
+    fn bulk_restore_and_rebuild_derived_indexes_match_exhaustive_scan() {
+        let mut chunk = Chunk {
+            chunk_x: 0,
+            chunk_z: 0,
+            min_section_y: -4,
+            sections: (0..24).map(|_| None).collect(),
+            heightmap: Box::new([[NO_HEIGHT; CHUNK_DEPTH]; CHUNK_WIDTH]),
+            torch_positions: Vec::new(),
+            redstone_positions: Vec::new(),
+            furnace_positions: Vec::new(),
+            hopper_positions: Vec::new(),
+            random_tick_sections: Vec::new(),
+            block_entities: std::collections::HashMap::new(),
+        };
+
+        // Populate various blocks across negative, zero, and positive sections
+        chunk.set_block_local(2, -50, 3, BlockType::Torch);
+        chunk.set_block_local(5, -45, 6, BlockType::RedstoneWire);
+        chunk.set_block_local(1, -20, 1, BlockType::Furnace);
+        chunk.set_block_local(4, -10, 4, BlockType::Hopper);
+        chunk.set_block_local(7, -5, 7, BlockType::WheatCrop);
+
+        chunk.set_block_local(0, 5, 0, BlockType::Stone);
+        chunk.set_block_local(3, 12, 3, BlockType::Torch);
+        chunk.set_block_local(8, 20, 8, BlockType::Repeater);
+        chunk.set_block_local(9, 25, 9, BlockType::Furnace);
+        chunk.set_block_local(10, 30, 10, BlockType::Hopper);
+        chunk.set_block_local(11, 35, 11, BlockType::OakLeaves);
+
+        chunk.set_block_local(14, 100, 14, BlockType::Comparator);
+        chunk.set_block_local(15, 200, 15, BlockType::Fire);
+
+        // Repeated mutations at same position to verify no duplicate positions
+        chunk.set_block_local(8, 20, 8, BlockType::Repeater);
+        chunk.set_block_local(8, 20, 8, BlockType::RedstoneTorch);
+        chunk.set_block_local(3, 12, 3, BlockType::Torch);
+
+        // Reference exhaustive scan
+        let mut ref_torch = Vec::new();
+        let mut ref_redstone = Vec::new();
+        let mut ref_furnace = Vec::new();
+        let mut ref_hopper = Vec::new();
+        let mut ref_random_tick = Vec::new();
+
+        for (sec_idx, sec_opt) in chunk.sections.iter().enumerate() {
+            let Some(sec) = sec_opt else { continue; };
+            let sec_y = chunk.min_section_y + sec_idx as i8;
+            if sec.random_tick_count() > 0 {
+                ref_random_tick.push(sec_y);
+            }
+            if sec.non_air_count() == 0 { continue; };
+            for ly in 0..SECTION_SIZE {
+                let wy = section_and_local_y_to_world_y(sec_y, ly as u8);
+                for z in 0..CHUNK_DEPTH {
+                    for x in 0..CHUNK_WIDTH {
+                        let idx = (ly << 8) | (z << 4) | x;
+                        let block = sec.get_block(idx);
+                        let encoded = Chunk::encode_torch_position(x, wy, z);
+                        if block == BlockType::Torch {
+                            ref_torch.push(encoded);
+                        }
+                        if crate::redstone::is_component(block) {
+                            ref_redstone.push(encoded);
+                        }
+                        if is_furnace_block(block) {
+                            ref_furnace.push(encoded);
+                        }
+                        if is_hopper_block(block) {
+                            ref_hopper.push(encoded);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 1. Live chunk matches reference scan
+        assert_eq!(chunk.torch_positions(), &ref_torch[..]);
+        assert_eq!(chunk.redstone_positions(), &ref_redstone[..]);
+        assert_eq!(chunk.furnace_positions(), &ref_furnace[..]);
+        assert_eq!(chunk.hopper_positions(), &ref_hopper[..]);
+        assert_eq!(chunk.random_tick_sections(), &ref_random_tick[..]);
+
+        // 2. Rebuild matches reference scan
+        chunk.rebuild_derived_indexes();
+        assert_eq!(chunk.torch_positions(), &ref_torch[..]);
+        assert_eq!(chunk.redstone_positions(), &ref_redstone[..]);
+        assert_eq!(chunk.furnace_positions(), &ref_furnace[..]);
+        assert_eq!(chunk.hopper_positions(), &ref_hopper[..]);
+        assert_eq!(chunk.random_tick_sections(), &ref_random_tick[..]);
+
+        // 3. Save and restore matches reference scan
+        let save_data = crate::save::format::ChunkSaveData::from_chunk(&chunk).unwrap();
+        let mut restored = Chunk {
+            chunk_x: 0,
+            chunk_z: 0,
+            min_section_y: -4,
+            sections: (0..24).map(|_| None).collect(),
+            heightmap: Box::new([[NO_HEIGHT; CHUNK_DEPTH]; CHUNK_WIDTH]),
+            torch_positions: Vec::new(),
+            redstone_positions: Vec::new(),
+            furnace_positions: Vec::new(),
+            hopper_positions: Vec::new(),
+            random_tick_sections: Vec::new(),
+            block_entities: std::collections::HashMap::new(),
+        };
+        save_data.restore_to_chunk(&mut restored).unwrap();
+        assert_eq!(restored.torch_positions(), &ref_torch[..]);
+        assert_eq!(restored.redstone_positions(), &ref_redstone[..]);
+        assert_eq!(restored.furnace_positions(), &ref_furnace[..]);
+        assert_eq!(restored.hopper_positions(), &ref_hopper[..]);
+        assert_eq!(restored.random_tick_sections(), &ref_random_tick[..]);
     }
 }
