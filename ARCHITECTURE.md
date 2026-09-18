@@ -573,13 +573,18 @@ from `saves/`).
 
 Asset resolution in `ResourcePackManager` decouples discovery and override
 traversal from decoding: consumers call `resolve_decoded<T>`, passing a typed
-decoder closure. Candidate assets are checked in priority order down to the
-built-in pack; the first successfully decoded value is returned without
-allocating intermediate candidate vectors or performing boolean pre-validation.
-Shared `resources.rs` contains no desktop `image` or `rodio` dependencies; codecs
-remain strictly in consumer domains (`src/texture.rs`, `src/audio.rs`). Atlas
-generation caches decoded images by path across tiles sharing source textures,
-dropping the cache once atlas assembly completes.
+decoder closure that receives candidate asset buffers as `&Arc<[u8]>`. Candidate
+assets are checked in priority order down to the built-in pack; the first successfully
+decoded value is returned without allocating intermediate candidate vectors or
+performing boolean pre-validation. Callers can either inspect slice data via deref
+or retain shared buffer ownership by cloning the `Arc` handle. Shared `resources.rs`
+contains no desktop `image` or `rodio` dependencies; codecs remain strictly in consumer
+domains (`src/texture.rs`, `src/audio.rs`). Atlas generation caches decoded images by
+path across tiles sharing source textures, dropping the cache once atlas assembly completes.
+`AudioManager` caches audio bytes as `Arc<[u8]>`, retaining pack-loaded buffers directly
+and converting procedural WAVs once on synthesis completion; each playback constructs
+an independent `Cursor<Arc<[u8]>>` and rodio decoder via `get_source` by copying only
+the Arc handle, avoiding full audio buffer cloning during playback.
 
 ## Code map
 

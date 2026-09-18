@@ -489,7 +489,7 @@ where
     let mut decoded_cache: HashMap<&'static str, Option<image::DynamicImage>> = HashMap::new();
     for tile in tiles {
         let loaded = decoded_cache.entry(tile.path).or_insert_with(|| {
-            manager.resolve_decoded(tile.path, "texture", &mut decoder)
+            manager.resolve_decoded(tile.path, "texture", |bytes| decoder(bytes))
         });
         match loaded.as_ref() {
             Some(src) => {

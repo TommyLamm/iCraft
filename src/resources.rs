@@ -370,7 +370,7 @@ impl ResourcePackManager {
         if self.read_asset(relative).is_none() {
             return FontSource::BuiltIn;
         }
-        match self.resolve_decoded(relative, "font", parse_bitmap_font) {
+        match self.resolve_decoded(relative, "font", |bytes| parse_bitmap_font(bytes)) {
             Some(glyphs) => FontSource::Bitmap(glyphs),
             None => FontSource::BuiltIn,
         }
@@ -494,7 +494,7 @@ impl ResourcePackManager {
         mut decode: F,
     ) -> Option<T>
     where
-        F: FnMut(&[u8]) -> Option<T>,
+        F: FnMut(&Arc<[u8]>) -> Option<T>,
     {
         let normalized = match normalize_logical_path(relative) {
             Ok(path) => path,
@@ -510,9 +510,9 @@ impl ResourcePackManager {
                 .packs
                 .iter()
                 .find(|pack| pack.manifest.id == id)
-                .and_then(|pack| lookup_asset(pack, &normalized).cloned());
+                .and_then(|pack| lookup_asset(pack, &normalized));
             if let Some(bytes) = candidate {
-                match decode(&bytes) {
+                match decode(bytes) {
                     Some(value) => return Some(value),
                     None => {
                         self.record_asset_diagnostic(
@@ -529,9 +529,9 @@ impl ResourcePackManager {
             .packs
             .iter()
             .find(|pack| pack.manifest.id == BUILTIN_PACK_ID)
-            .and_then(|pack| lookup_asset(pack, &normalized).cloned());
+            .and_then(|pack| lookup_asset(pack, &normalized));
         if let Some(bytes) = builtin {
-            match decode(&bytes) {
+            match decode(bytes) {
                 Some(value) => return Some(value),
                 None => {
                     self.record_asset_diagnostic(
@@ -1237,11 +1237,11 @@ mod tests {
         let mut manager = ResourcePackManager::discover(&root, &user);
         manager.apply_enabled_order(["test.override"]).unwrap();
         let resolved_texture = manager.resolve_decoded("textures/stone.png", "texture", |bytes| {
-            (bytes == texture).then(|| bytes.to_vec())
+            (bytes.as_ref() == texture).then(|| bytes.to_vec())
         });
         assert_eq!(resolved_texture.as_deref(), Some(texture.as_slice()));
         let resolved_sound = manager.resolve_decoded("sounds/click.wav", "sound", |bytes| {
-            (bytes == sound).then(|| bytes.to_vec())
+            (bytes.as_ref() == sound).then(|| bytes.to_vec())
         });
         assert_eq!(resolved_sound.as_deref(), Some(sound.as_slice()));
         let locale_layers = manager.resolve_locale_layers("en_us");
@@ -1265,10 +1265,10 @@ mod tests {
         let diagnostics = manager.diagnostics().len();
         assert!(diagnostics >= 5);
         let _ = manager.resolve_decoded("textures/stone.png", "texture", |bytes| {
-            (bytes == texture).then(|| bytes.to_vec())
+            (bytes.as_ref() == texture).then(|| bytes.to_vec())
         });
         let _ = manager.resolve_decoded("sounds/click.wav", "sound", |bytes| {
-            (bytes == sound).then(|| bytes.to_vec())
+            (bytes.as_ref() == sound).then(|| bytes.to_vec())
         });
         let _ = manager.resolve_locale_layers("en_us");
         let _ = crate::block_model::ModelRegistry::from_resource_packs(
@@ -1301,10 +1301,10 @@ mod tests {
 
         let result = manager.resolve_decoded("textures/stone.png", "texture", |bytes| {
             decode_calls += 1;
-            if bytes == b"corrupt_override" {
+            if bytes.as_ref() == b"corrupt_override" {
                 corrupt_attempts += 1;
                 None
-            } else if bytes == b"valid_fallback" {
+            } else if bytes.as_ref() == b"valid_fallback" {
                 valid_attempts += 1;
                 Some("parsed_texture")
             } else {

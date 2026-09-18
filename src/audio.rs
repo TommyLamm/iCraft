@@ -5,7 +5,7 @@ use glam::Vec3;
 use rodio::{OutputStream, OutputStreamHandle, Sink, Source, SpatialSink};
 use std::collections::HashMap;
 use std::io::Cursor;
-use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -89,7 +89,7 @@ pub struct AudioManager {
     stream_handle: Option<OutputStreamHandle>,
     pub volume: f32,
     weather_volume: f32,
-    sound_cache: HashMap<SoundId, Vec<u8>>,
+    sound_cache: HashMap<SoundId, Arc<[u8]>>,
     active_loops: HashMap<u64, ActiveLoop>,
     subtitle_queue: std::cell::RefCell<SubtitleQueue>,
     subtitles_enabled: bool,
@@ -150,22 +150,11 @@ fn create_wav_bytes(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     writer
 }
 
-fn sound_bytes_are_decodable(bytes: &[u8]) -> bool {
+fn sound_bytes_are_decodable(bytes: &Arc<[u8]>) -> bool {
     if bytes.is_empty() {
         return false;
     }
-    rodio::Decoder::new(Cursor::new(bytes.to_vec())).is_ok()
-}
-
-fn load_or_synthesize_sound(file_path: &Path, sound_id: SoundId) -> (Vec<u8>, bool) {
-    if let Ok(bytes) = std::fs::read(file_path) {
-        if sound_bytes_are_decodable(&bytes) {
-            return (bytes, false);
-        }
-    }
-
-    let samples = synth_sound(sound_id);
-    (create_wav_bytes(&samples, 22050), true)
+    rodio::Decoder::new(Cursor::new(Arc::clone(bytes))).is_ok()
 }
 
 fn synth_noise(duration: f32, sample_rate: u32, mut seed: u32) -> Vec<f32> {
@@ -497,9 +486,11 @@ impl AudioManager {
             let logical_path = format!("sounds/{filename}");
             let loaded_bytes = manager
                 .resolve_decoded(&logical_path, "sound", |bytes| {
-                    sound_bytes_are_decodable(bytes).then(|| bytes.to_vec())
+                    sound_bytes_are_decodable(bytes).then(|| Arc::clone(bytes))
                 })
-                .unwrap_or_else(|| create_wav_bytes(&synth_sound(id), 22050));
+                .unwrap_or_else(|| {
+                    Arc::from(create_wav_bytes(&synth_sound(id), 22050).into_boxed_slice())
+                });
 
             sound_cache.insert(id, loaded_bytes);
         }
@@ -562,8 +553,8 @@ impl AudioManager {
         }
     }
 
-    fn get_source(&self, sound_id: SoundId) -> Option<rodio::Decoder<Cursor<Vec<u8>>>> {
-        let bytes = self.sound_cache.get(&sound_id)?.clone();
+    fn get_source(&self, sound_id: SoundId) -> Option<rodio::Decoder<Cursor<Arc<[u8]>>>> {
+        let bytes = Arc::clone(self.sound_cache.get(&sound_id)?);
         rodio::Decoder::new(Cursor::new(bytes)).ok()
     }
 
@@ -663,26 +654,31 @@ mod tests {
 
     static NEXT_TEMP_PATH: AtomicU64 = AtomicU64::new(0);
 
-    fn temp_sound_path(filename: &str) -> (PathBuf, PathBuf) {
+    fn temp_pack_dir(label: &str) -> (PathBuf, PathBuf) {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after the Unix epoch")
             .as_nanos();
         let sequence = NEXT_TEMP_PATH.fetch_add(1, Ordering::Relaxed);
-        let directory = std::env::temp_dir().join(format!(
-            "icraft_audio_test_{}_{}_{}",
+        let root = std::env::temp_dir().join(format!(
+            "icraft_audio_test_{label}_{}_{}_{}",
             std::process::id(),
             nonce,
             sequence
         ));
-        std::fs::create_dir(&directory).expect("temporary audio directory should be created");
-        let path = directory.join(filename);
-        (directory, path)
-    }
-
-    fn remove_temp_sound(directory: &Path, path: &Path) {
-        std::fs::remove_file(path).expect("temporary sound should be removed");
-        std::fs::remove_dir(directory).expect("temporary audio directory should be removed");
+        let user_root = root.join("resourcepacks");
+        std::fs::create_dir_all(&user_root).expect("temporary audio pack dir should be created");
+        let manifest = serde_json::json!({
+            "id": "icraft.builtin",
+            "name": "Built-in",
+            "version": "1.0.0",
+            "format": 1,
+            "description": "test",
+            "dependencies": [],
+        });
+        std::fs::write(root.join("pack.json"), manifest.to_string())
+            .expect("manifest should be written");
+        (root, user_root)
     }
 
     #[test]
@@ -695,30 +691,126 @@ mod tests {
 
     #[test]
     fn invalid_wav_uses_decodable_procedural_fallback() {
-        let (directory, path) = temp_sound_path("rain.wav");
-        let invalid_bytes: &[u8] = b"this is not a wave file";
-        std::fs::write(&path, invalid_bytes).expect("invalid fixture should be written");
+        let (root, user_root) = temp_pack_dir("invalid_wav");
+        let sounds_dir = root.join("sounds");
+        std::fs::create_dir_all(&sounds_dir).expect("sounds directory should be created");
+        let invalid_bytes = b"this is not a wave file";
+        std::fs::write(sounds_dir.join("rain.wav"), invalid_bytes)
+            .expect("invalid fixture should be written");
 
-        let (loaded_bytes, synthesized) = load_or_synthesize_sound(&path, SoundId::Rain);
+        let mut manager = ResourcePackManager::discover(&root, &user_root);
+        let audio = AudioManager::new_with_resource_packs(&mut manager);
 
-        assert!(synthesized);
-        assert_ne!(loaded_bytes, invalid_bytes);
-        assert!(sound_bytes_are_decodable(&loaded_bytes));
-        remove_temp_sound(&directory, &path);
+        let cached_rain = audio
+            .sound_cache
+            .get(&SoundId::Rain)
+            .expect("rain sound should be cached");
+        assert_ne!(cached_rain.as_ref(), invalid_bytes);
+        assert!(sound_bytes_are_decodable(cached_rain));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn valid_wav_is_loaded_without_replacing_its_bytes() {
-        let (directory, path) = temp_sound_path("click.wav");
+        let (root, user_root) = temp_pack_dir("valid_wav");
+        let sounds_dir = root.join("sounds");
+        std::fs::create_dir_all(&sounds_dir).expect("sounds directory should be created");
         let valid_bytes = create_wav_bytes(&[0.0, 0.25, -0.25, 0.0], 22050);
-        assert!(sound_bytes_are_decodable(&valid_bytes));
-        std::fs::write(&path, &valid_bytes).expect("valid fixture should be written");
+        let valid_arc: Arc<[u8]> = Arc::from(valid_bytes.clone().into_boxed_slice());
+        assert!(sound_bytes_are_decodable(&valid_arc));
+        std::fs::write(sounds_dir.join("click.wav"), &valid_bytes)
+            .expect("valid fixture should be written");
 
-        let (loaded_bytes, synthesized) = load_or_synthesize_sound(&path, SoundId::UiClick);
+        let mut manager = ResourcePackManager::discover(&root, &user_root);
+        let audio = AudioManager::new_with_resource_packs(&mut manager);
 
-        assert!(!synthesized);
-        assert_eq!(loaded_bytes, valid_bytes);
-        remove_temp_sound(&directory, &path);
+        let cached_click = audio
+            .sound_cache
+            .get(&SoundId::UiClick)
+            .expect("click sound should be cached");
+        assert_eq!(cached_click.as_ref(), valid_bytes.as_slice());
+
+        // Verify that the cached Arc shares the exact same allocation as the pack manager's loaded asset
+        let pack_asset = manager
+            .read_asset("sounds/click.wav")
+            .expect("pack asset should be readable");
+        assert_eq!(Arc::as_ptr(cached_click), Arc::as_ptr(&pack_asset));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn decoders_from_same_cache_entry_sample_independently_and_share_arc_buffer() {
+        let valid_bytes = create_wav_bytes(&[0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8], 22050);
+        let valid_arc: Arc<[u8]> = Arc::from(valid_bytes.into_boxed_slice());
+
+        let mut sound_cache = HashMap::new();
+        sound_cache.insert(SoundId::UiClick, Arc::clone(&valid_arc));
+
+        let manager = AudioManager {
+            _stream: None,
+            stream_handle: None,
+            volume: 1.0,
+            weather_volume: 1.0,
+            sound_cache,
+            active_loops: HashMap::new(),
+            subtitle_queue: std::cell::RefCell::new(SubtitleQueue::default()),
+            subtitles_enabled: false,
+        };
+
+        // Verify underlying Cursor<Arc<[u8]>> seek and read are completely independent
+        // while sharing the exact same Arc buffer pointer.
+        let cached = manager.sound_cache.get(&SoundId::UiClick).unwrap();
+        let mut cursor1 = Cursor::new(Arc::clone(cached));
+        let mut cursor2 = Cursor::new(Arc::clone(cached));
+        assert_eq!(Arc::as_ptr(cached), Arc::as_ptr(cursor1.get_ref()));
+        assert_eq!(Arc::as_ptr(cached), Arc::as_ptr(cursor2.get_ref()));
+
+        use std::io::{Read, Seek, SeekFrom};
+        cursor1.seek(SeekFrom::Start(12)).unwrap();
+        assert_eq!(cursor1.position(), 12);
+        assert_eq!(cursor2.position(), 0);
+
+        let mut buf1 = [0u8; 4];
+        let mut buf2 = [0u8; 4];
+        cursor1.read_exact(&mut buf1).unwrap();
+        cursor2.read_exact(&mut buf2).unwrap();
+        assert_ne!(buf1, buf2);
+        assert_eq!(cursor1.position(), 16);
+        assert_eq!(cursor2.position(), 4);
+
+        // Verify decoders created via get_source advance their playback cursors independently
+        let initial_strong = Arc::strong_count(cached);
+        let mut decoder1 = manager
+            .get_source(SoundId::UiClick)
+            .expect("decoder 1 should be constructed");
+        assert_eq!(Arc::strong_count(cached), initial_strong + 1);
+        let mut decoder2 = manager
+            .get_source(SoundId::UiClick)
+            .expect("decoder 2 should be constructed");
+        assert_eq!(Arc::strong_count(cached), initial_strong + 2);
+
+        // Read 3 samples from decoder1
+        let d1_first_three: Vec<i16> = decoder1.by_ref().take(3).collect();
+        assert_eq!(d1_first_three.len(), 3);
+
+        // decoder2 starts at sample 0, unaffected by decoder1 advancing
+        let d2_first_three: Vec<i16> = decoder2.by_ref().take(3).collect();
+        assert_eq!(d1_first_three, d2_first_three);
+
+        // Advance decoder1 further
+        let d1_next_two: Vec<i16> = decoder1.by_ref().take(2).collect();
+        assert_eq!(d1_next_two.len(), 2);
+        assert_ne!(d1_first_three[..2], d1_next_two[..]);
+
+        // decoder2 produces its next two samples matching decoder1's next two samples
+        let d2_next_two: Vec<i16> = decoder2.by_ref().take(2).collect();
+        assert_eq!(d1_next_two, d2_next_two);
+
+        drop(decoder1);
+        assert_eq!(Arc::strong_count(cached), initial_strong + 1);
+        drop(decoder2);
+        assert_eq!(Arc::strong_count(cached), initial_strong);
     }
 
     #[test]
