@@ -1,6 +1,6 @@
 # 20 — Worldgen demand／generating／completed 排程收斂
 
-狀態：待執行。基線：`83e751d`，2026-09-17。
+狀態：已完成。基線：`83e751d`，2026-09-17。
 前置：08；建議 02 已完成。
 
 ## 定位與推論
@@ -29,5 +29,23 @@ worker 同時上限 32（worldgen_worker.rs:10）；authority 每 tick 最多套
 
 ## 實作紀錄
 
-尚未執行；完成時記錄實際修改、驗證結果、刪碼量及文件更新。
+已完成：
+1. `src/server_world/columns.rs` & `src/server_world/mod.rs`:
+   - 定義 `WorldgenApplyOutcome { Applied, Discarded }`。
+   - `apply_generated_chunk` 嚴格核對並移除 pending demand，若無 demand、已駐留或屬 failed restore 則安全返回 `Discarded`，不再強行 materialize 無需求欄位。
+   - 提供 `is_chunk_demand_pending`、`withdraw_chunk_demand`、`prune_unkept_demands`。
+2. `src/server_runtime/worldgen_worker.rs`:
+   - 新增 `is_in_flight` 與 `in_flight_count` 查詢介面。
+3. `src/authority/mod.rs`:
+   - 重構 `apply_pending_worldgen`: 刪除 `order: Vec<usize>`、`slots: Vec<Option<...>>` 及二次掃描，直接以 `pending.sort_by_key` 進行穩定排序並原地消費，維持 apply budget (16)、session 距離優先級、同鍵 FIFO 穩定性與 missing world 延遲語意。
+   - 新增 `is_worldgen_pending` 與 `pending_worldgen_count`。
+4. `src/server_runtime.rs` & `src/server_runtime/ingress.rs`:
+   - `schedule_pending_worldgen` 排除 `self.authority.is_worldgen_pending`，徹底解決超過 16 筆的 completed backlog 跨 tick 重複生成問題。
+   - `evict_uninteresting_chunks` 與 `handle_leave` 在玩家離開或視野移出時立即呼叫 `prune_unkept_demands` 清理無需求 demand。
+5. 文件更新：
+   - `ARCHITECTURE.md`: 補充世界生成完整生命週期、backlog 防重排程與需求撤回丟棄機制。
+6. 測試覆蓋：
+   - 新增 7 個確定性測試（`authority::tests` 2 個，`server_runtime::tests` 5 個），涵蓋超過 16 筆結果跨 tick 不重複排程、同步 materialize 優先不被覆蓋、需求撤回不重新生成且晚到結果丟棄、跨維度同座標隔離、apply 預算與穩定排序、拒絕分支釋放容量。
+   - 既有回歸測試全部通過：`review_hardening_chunk_residency` (4 passed)、`review_hardening_chunk_restore` (5 passed)、`dimension_interest_and_session_transfer_are_isolated` (1 passed)、`cargo test --lib authority` (76 passed)、`cargo test --lib server_runtime` (46 passed)、`cargo test --lib server_world` (31 passed)。
+
 

@@ -1995,3 +1995,284 @@ fn local_view_distance_override_persists_across_dimension_transfer() {
     let _ = fs::remove_dir_all(world_dir);
 }
 
+#[test]
+fn worldgen_completed_backlog_exceeding_apply_limit_not_rescheduled() {
+    let mut props = ServerProperties::default();
+    props.world_dir = temp_dir("backlog_not_rescheduled");
+    let (mut runtime, _input) = ServerRuntime::new_embedded(
+        props,
+        EmbeddedRuntimeOptions {
+            transport: TransportMode::Disabled,
+            local_session: None,
+        },
+    )
+    .unwrap();
+
+    for i in 1..=20 {
+        runtime.authority.with_world(Dimension::Overworld, |w| {
+            w.ensure_chunk(i, 0);
+        });
+    }
+
+    runtime.schedule_pending_worldgen();
+    assert_eq!(runtime.in_flight_worldgen_count(), 20);
+
+    let mut attempts = 0;
+    while runtime.authority.pending_worldgen_count() < 20 && attempts < 200 {
+        runtime.collect_worldgen_results();
+        if runtime.authority.pending_worldgen_count() == 20 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        attempts += 1;
+    }
+    assert_eq!(runtime.authority.pending_worldgen_count(), 20, "worker should complete and collect all jobs");
+    assert_eq!(runtime.in_flight_worldgen_count(), 0, "in_flight count must be 0 after collection");
+
+    runtime.authority.tick();
+    assert_eq!(runtime.authority.pending_worldgen_count(), 4);
+
+    let resident_count = (1..=20)
+        .filter(|&i| {
+            runtime
+                .authority
+                .world_ref(Dimension::Overworld)
+                .unwrap()
+                .chunk_is_resident(i, 0)
+        })
+        .count();
+    assert_eq!(resident_count, 16);
+
+    runtime.schedule_pending_worldgen();
+    assert_eq!(
+        runtime.in_flight_worldgen_count(),
+        0,
+        "completed backlog chunks must not be rescheduled to worker"
+    );
+    for i in 1..=20 {
+        assert!(
+            !runtime.is_worldgen_in_flight(Dimension::Overworld, i, 0),
+            "no chunk should be in flight in worker"
+        );
+    }
+
+    runtime.authority.tick();
+    assert_eq!(runtime.authority.pending_worldgen_count(), 0);
+
+    let resident_count_tick2 = (1..=20)
+        .filter(|&i| {
+            runtime
+                .authority
+                .world_ref(Dimension::Overworld)
+                .unwrap()
+                .chunk_is_resident(i, 0)
+        })
+        .count();
+    assert_eq!(resident_count_tick2, 20);
+
+    let world_dir = runtime.world_dir.clone();
+    let _ = runtime.shutdown();
+    let _ = fs::remove_dir_all(world_dir);
+}
+
+#[test]
+fn worldgen_sync_materialize_mutation_not_overwritten_by_late_result() {
+    let mut props = ServerProperties::default();
+    props.world_dir = temp_dir("sync_materialize_survives");
+    let (mut runtime, _input) = ServerRuntime::new_embedded(
+        props,
+        EmbeddedRuntimeOptions {
+            transport: TransportMode::Disabled,
+            local_session: None,
+        },
+    )
+    .unwrap();
+
+    runtime.authority.with_world(Dimension::Overworld, |w| {
+        w.ensure_chunk(10, 10);
+    });
+    runtime.schedule_pending_worldgen();
+    assert!(runtime.is_worldgen_in_flight(Dimension::Overworld, 10, 10));
+
+    runtime.authority.with_world(Dimension::Overworld, |w| {
+        w.materialize_chunk(10, 10);
+        w.set_block(160 + 2, 80, 160 + 2, BlockType::Obsidian, 0).unwrap();
+    });
+
+    let mut attempts = 0;
+    while runtime.is_worldgen_in_flight(Dimension::Overworld, 10, 10) && attempts < 200 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        attempts += 1;
+    }
+
+    runtime.collect_worldgen_results();
+    runtime.authority.tick();
+
+    let block = runtime
+        .authority
+        .world_ref(Dimension::Overworld)
+        .unwrap()
+        .get_block(160 + 2, 80, 160 + 2);
+    assert_eq!(block, BlockType::Obsidian);
+
+    let world_dir = runtime.world_dir.clone();
+    let _ = runtime.shutdown();
+    let _ = fs::remove_dir_all(world_dir);
+}
+
+#[test]
+fn worldgen_withdrawn_demand_not_regenerated_and_not_materialized() {
+    let mut props = ServerProperties::default();
+    props.world_dir = temp_dir("withdrawn_demand");
+    let (mut runtime, _input) = ServerRuntime::new_embedded(
+        props,
+        EmbeddedRuntimeOptions {
+            transport: TransportMode::Disabled,
+            local_session: None,
+        },
+    )
+    .unwrap();
+
+    runtime.authority.with_world(Dimension::Overworld, |w| {
+        w.ensure_chunk(11, 11);
+        assert!(w.is_chunk_demand_pending(11, 11));
+        assert!(w.withdraw_chunk_demand(11, 11));
+        assert!(!w.is_chunk_demand_pending(11, 11));
+    });
+
+    runtime.schedule_pending_worldgen();
+    assert!(!runtime.is_worldgen_in_flight(Dimension::Overworld, 11, 11));
+
+    runtime.authority.queue_worldgen_results(vec![
+        crate::authority::PendingWorldgenColumn {
+            dimension: Dimension::Overworld,
+            chunk_x: 11,
+            chunk_z: 11,
+            chunk: Chunk::empty_in_dimension(Dimension::Overworld, 11, 11),
+        },
+    ]);
+    runtime.authority.tick();
+
+    let world = runtime.authority.world_ref(Dimension::Overworld).unwrap();
+    assert!(!world.chunk_is_resident(11, 11), "withdrawn demand must not materialize into resident storage");
+
+    let world_dir = runtime.world_dir.clone();
+    let _ = runtime.shutdown();
+    let _ = fs::remove_dir_all(world_dir);
+}
+
+#[test]
+fn worldgen_cross_dimension_same_coordinates_isolated() {
+    let mut props = ServerProperties::default();
+    props.world_dir = temp_dir("cross_dim_worldgen");
+    let (mut runtime, _input) = ServerRuntime::new_embedded(
+        props,
+        EmbeddedRuntimeOptions {
+            transport: TransportMode::Disabled,
+            local_session: None,
+        },
+    )
+    .unwrap();
+
+    runtime.authority.ensure_dimension(Dimension::Nether);
+    runtime.authority.with_world(Dimension::Overworld, |w| {
+        w.ensure_chunk(12, 12);
+    });
+    runtime.authority.with_world(Dimension::Nether, |w| {
+        w.ensure_chunk(12, 12);
+    });
+
+    runtime.schedule_pending_worldgen();
+    assert!(runtime.is_worldgen_in_flight(Dimension::Overworld, 12, 12));
+    assert!(runtime.is_worldgen_in_flight(Dimension::Nether, 12, 12));
+
+    runtime.authority.queue_worldgen_results(vec![
+        crate::authority::PendingWorldgenColumn {
+            dimension: Dimension::Nether,
+            chunk_x: 12,
+            chunk_z: 12,
+            chunk: Chunk::empty_in_dimension(Dimension::Nether, 12, 12),
+        },
+    ]);
+    runtime.authority.tick();
+
+    assert!(
+        runtime.authority.world_ref(Dimension::Nether).unwrap().chunk_is_resident(12, 12),
+        "Nether (12, 12) should be resident"
+    );
+    assert!(
+        !runtime.authority.world_ref(Dimension::Overworld).unwrap().chunk_is_resident(12, 12),
+        "Overworld (12, 12) must not be affected by Nether application"
+    );
+
+    runtime.authority.queue_worldgen_results(vec![
+        crate::authority::PendingWorldgenColumn {
+            dimension: Dimension::Overworld,
+            chunk_x: 12,
+            chunk_z: 12,
+            chunk: Chunk::empty_in_dimension(Dimension::Overworld, 12, 12),
+        },
+    ]);
+    runtime.authority.tick();
+
+    assert!(
+        runtime.authority.world_ref(Dimension::Overworld).unwrap().chunk_is_resident(12, 12),
+        "Overworld (12, 12) should now be resident"
+    );
+
+    let world_dir = runtime.world_dir.clone();
+    let _ = runtime.shutdown();
+    let _ = fs::remove_dir_all(world_dir);
+}
+
+#[test]
+fn worldgen_rejection_releases_capacity_and_unblocks_future_schedules() {
+    let mut props = ServerProperties::default();
+    props.world_dir = temp_dir("rejection_releases_capacity");
+    let (mut runtime, _input) = ServerRuntime::new_embedded(
+        props,
+        EmbeddedRuntimeOptions {
+            transport: TransportMode::Disabled,
+            local_session: None,
+        },
+    )
+    .unwrap();
+
+    runtime.authority.with_world(Dimension::Overworld, |w| {
+        let mut corrupt_data = crate::save::ChunkSaveData::from_chunk(&Chunk::empty(7, 7)).unwrap();
+        corrupt_data.chunk_x = 7;
+        corrupt_data.chunk_z = 7;
+        corrupt_data.blocks.clear();
+        assert!(w.restore_saved_chunk(&corrupt_data).is_err());
+        assert!(w.failed_restore_chunks().contains(&(7, 7)));
+    });
+
+    runtime.authority.queue_worldgen_results(vec![
+        crate::authority::PendingWorldgenColumn {
+            dimension: Dimension::Overworld,
+            chunk_x: 7,
+            chunk_z: 7,
+            chunk: Chunk::empty_in_dimension(Dimension::Overworld, 7, 7),
+        },
+    ]);
+    assert_eq!(runtime.authority.pending_worldgen_count(), 1);
+    assert!(runtime.is_worldgen_pending_in_backlog(Dimension::Overworld, 7, 7));
+
+    runtime.authority.tick();
+
+    assert_eq!(runtime.authority.pending_worldgen_count(), 0);
+    assert!(!runtime.is_worldgen_pending_in_backlog(Dimension::Overworld, 7, 7));
+    assert!(!runtime.authority.world_ref(Dimension::Overworld).unwrap().chunk_is_resident(7, 7));
+
+    runtime.authority.with_world(Dimension::Overworld, |w| {
+        w.ensure_chunk(8, 8);
+    });
+    runtime.schedule_pending_worldgen();
+    assert!(runtime.is_worldgen_in_flight(Dimension::Overworld, 8, 8));
+
+    let world_dir = runtime.world_dir.clone();
+    let _ = runtime.shutdown();
+    let _ = fs::remove_dir_all(world_dir);
+}
+
+

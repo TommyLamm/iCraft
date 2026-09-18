@@ -176,10 +176,8 @@ impl AuthorityCore {
         if self.pending_worldgen.is_empty() || apply_limit == 0 {
             return;
         }
-        let pending = std::mem::take(&mut self.pending_worldgen);
-        let mut order: Vec<usize> = (0..pending.len()).collect();
-        order.sort_by_key(|&index| {
-            let column = &pending[index];
+        let mut pending = std::mem::take(&mut self.pending_worldgen);
+        pending.sort_by_key(|column| {
             let session_key = self
                 .session_ids_in_dimension(column.dimension)
                 .first()
@@ -202,17 +200,11 @@ impl AuthorityCore {
                 distance,
                 column.chunk_x,
                 column.chunk_z,
-                index,
             )
         });
-        let mut slots: Vec<Option<PendingWorldgenColumn>> =
-            pending.into_iter().map(Some).collect();
         let mut applied = 0usize;
         let mut deferred = Vec::new();
-        for index in order {
-            let Some(column) = slots[index].take() else {
-                continue;
-            };
+        for column in pending {
             if applied >= apply_limit {
                 deferred.push(column);
                 continue;
@@ -224,10 +216,17 @@ impl AuthorityCore {
                 deferred.push(column);
             }
         }
-        for slot in slots.into_iter().flatten() {
-            deferred.push(slot);
-        }
         self.pending_worldgen = deferred;
+    }
+
+    pub fn is_worldgen_pending(&self, dimension: Dimension, chunk_x: i32, chunk_z: i32) -> bool {
+        self.pending_worldgen
+            .iter()
+            .any(|col| col.dimension == dimension && col.chunk_x == chunk_x && col.chunk_z == chunk_z)
+    }
+
+    pub fn pending_worldgen_count(&self) -> usize {
+        self.pending_worldgen.len()
     }
 
     fn new_world(config: AuthorityConfig, dimension: Dimension, mode: WorldgenMode) -> ServerWorld {

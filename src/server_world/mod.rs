@@ -109,6 +109,7 @@ pub struct ContainerClosure {
 }
 
 
+pub use columns::WorldgenApplyOutcome;
 mod columns;
 mod containers;
 mod entities;

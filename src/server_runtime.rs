@@ -789,6 +789,9 @@ impl ServerRuntime {
                 continue;
             };
             for &(cx, cz) in world.pending_chunk_generation() {
+                if self.authority.is_worldgen_pending(dimension, cx, cz) {
+                    continue;
+                }
                 jobs.push(worldgen_worker::WorldgenJob {
                     dimension,
                     chunk_x: cx,
@@ -1031,6 +1034,9 @@ impl ServerRuntime {
         let dimensions: Vec<_> = self.authority.dimensions().collect();
         for dimension in dimensions {
             let (keep, fully_covered) = self.residency_keep_set(dimension);
+            self.authority.with_world(dimension, |world| {
+                world.prune_unkept_demands(&keep);
+            });
             if fully_covered {
                 continue;
             }
@@ -1171,6 +1177,21 @@ impl ServerRuntime {
                 self.save_manager.save_current_dimension(current_dimension)
             }
         }
+    }
+
+    #[cfg(test)]
+    pub fn is_worldgen_in_flight(&self, dimension: Dimension, chunk_x: i32, chunk_z: i32) -> bool {
+        self.worldgen_worker.is_in_flight(dimension, chunk_x, chunk_z)
+    }
+
+    #[cfg(test)]
+    pub fn is_worldgen_pending_in_backlog(&self, dimension: Dimension, chunk_x: i32, chunk_z: i32) -> bool {
+        self.authority.is_worldgen_pending(dimension, chunk_x, chunk_z)
+    }
+
+    #[cfg(test)]
+    pub fn in_flight_worldgen_count(&self) -> usize {
+        self.worldgen_worker.in_flight_count()
     }
 }
 

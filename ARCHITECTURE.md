@@ -351,9 +351,18 @@ which `ServerWorld` applies; durable writes stay on `ServerRuntime`.
   hook (`debug_assert` keeps the old full scan).
 
 Worldgen for interest projection is off the tick thread: `ensure_chunk` in
-`WorldgenMode::Async` only registers demand; Rayon workers generate; results
-are applied by authority tick to resident columns, ignoring late results if the
-column is already resident or failed restore.
+`WorldgenMode::Async` only registers demand; submitted jobs follow a lifecycle
+keyed by `(Dimension, cx, cz)` across Generating -> Completed (in Authority backlog)
+-> Applied / Discarded. `schedule_pending_worldgen` excludes both in-flight worker
+jobs and completed backlog columns in `AuthorityCore::pending_worldgen`, preventing
+completed columns exceeding the per-tick apply budget (16) from being rescheduled
+across ticks. Backlog columns are stably sorted by `(dimension, session_key, distance, cx, cz)`
+and applied up to budget; missing-world columns are retained without blocking.
+Demand withdrawal (session leave / evicted interest) prunes `pending_chunk_generation`;
+when completed results arrive, demand verification and racing synchronous residency
+materialization cleanly discard them (`WorldgenApplyOutcome::Discarded`) without
+materializing unneeded resident columns or overwriting changes, releasing lifecycle
+capacity immediately.
 Gameplay mutations that need a missing column (`set_block`, fluid use, spawn
 Y, spawn bootstrap) still call `materialize_chunk` synchronously.
 

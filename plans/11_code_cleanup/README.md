@@ -49,7 +49,7 @@
 | 17 | [desktop feature 與 dedicated 建置邊界](17_desktop_cargo_feature.md) | P1／建置邊界 | 15 | 待執行 |
 | 18 | [清理只作版本限制的直接依賴](18_dependency_pins.md) | P2／依賴精簡 | 建議17 | 待執行 |
 | 19 | [Chunk 派生索引單次重建與 membership 去重](19_chunk_derived_indexes.md) | P1／算法去重 | 建議03 | 已完成 |
-| 20 | [Worldgen demand／generating／completed 排程收斂](20_worldgen_job_lifecycle.md) | P1／排程收斂 | 08；建議02 | 待執行 |
+| 20 | [Worldgen demand／generating／completed 排程收斂](20_worldgen_job_lifecycle.md) | P1／排程收斂 | 08；建議02 | 已完成 |
 | 21 | [整欄投影共用 commit 邊界](21_column_projection_commit.md) | P1／提交去重 | 11 | 已完成 |
 | 22 | [公開面、測試與文件總驗收](22_final_surface_tests_docs.md) | 收尾 | 全部選定工作包 | 待執行 |
 

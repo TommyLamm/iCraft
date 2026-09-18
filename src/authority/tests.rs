@@ -1647,3 +1647,122 @@ fn trade_conserves_items_and_mount_projects_session_state() {
         .passengers
         .contains(&7));
 }
+
+#[test]
+fn apply_pending_worldgen_respects_budget_and_stable_order() {
+    let mut core = core();
+    core.set_worldgen_mode_all(crate::server_world::WorldgenMode::Async);
+    let ring1 = [
+        (-1, -1), (-1, 0), (-1, 1),
+        (0, -1),           (0, 1),
+        (1, -1),  (1, 0),  (1, 1),
+    ];
+    let ring2 = [
+        (2, -2), (2, -1), (2, 0), (2, 1), (2, 2),
+        (-2, -2), (-2, -1), (-2, 0), (-2, 1), (-2, 2),
+        (0, 2), (1, 2),
+    ];
+
+    let mut columns = Vec::new();
+    // Push ring 2 first to verify that distance sorting promotes ring 1 ahead of ring 2
+    for &(cx, cz) in &ring2 {
+        let chunk = Chunk::empty_in_dimension(Dimension::Overworld, cx, cz);
+        columns.push(PendingWorldgenColumn {
+            dimension: Dimension::Overworld,
+            chunk_x: cx,
+            chunk_z: cz,
+            chunk,
+        });
+    }
+    // Push ring 1
+    for &(cx, cz) in &ring1 {
+        let chunk = Chunk::empty_in_dimension(Dimension::Overworld, cx, cz);
+        columns.push(PendingWorldgenColumn {
+            dimension: Dimension::Overworld,
+            chunk_x: cx,
+            chunk_z: cz,
+            chunk,
+        });
+    }
+    columns.push(PendingWorldgenColumn {
+        dimension: Dimension::End,
+        chunk_x: 0,
+        chunk_z: 0,
+        chunk: Chunk::empty_in_dimension(Dimension::End, 0, 0),
+    });
+
+    {
+        let world = core.world_mut(Dimension::Overworld).unwrap();
+        for col in &columns {
+            if col.dimension == Dimension::Overworld {
+                world.ensure_chunk(col.chunk_x, col.chunk_z);
+            }
+        }
+    }
+
+    core.queue_worldgen_results(columns);
+    assert_eq!(core.pending_worldgen_count(), 21);
+
+    // Tick 1: limit 16
+    core.apply_pending_worldgen(16);
+    assert_eq!(core.pending_worldgen_count(), 5);
+
+    let world = core.world_ref(Dimension::Overworld).unwrap();
+    // All 8 ring 1 chunks (distances 1 and 2) must have been applied first
+    for &(cx, cz) in &ring1 {
+        assert!(world.chunk_is_resident(cx, cz), "ring 1 chunk ({cx}, {cz}) must be applied first");
+    }
+    // The 8 non-corner chunks from ring 2 (distances 4 and 5) must also be applied in tick 1
+    let non_corners = [
+        (2, -1), (2, 0), (2, 1),
+        (-2, -1), (-2, 0), (-2, 1),
+        (0, 2), (1, 2),
+    ];
+    for &(cx, cz) in &non_corners {
+        assert!(world.chunk_is_resident(cx, cz), "non-corner ring 2 chunk ({cx}, {cz}) must be applied in tick 1");
+    }
+
+    // The 4 corners with greatest Euclidean distance (dx^2 + dz^2 = 8) must remain deferred
+    let corners = [(-2, -2), (-2, 2), (2, -2), (2, 2)];
+    for &(cx, cz) in &corners {
+        assert!(!world.chunk_is_resident(cx, cz), "corner ring 2 chunk ({cx}, {cz}) must remain deferred");
+    }
+
+    // Tick 2: limit 16
+    core.apply_pending_worldgen(16);
+    assert_eq!(core.pending_worldgen_count(), 1);
+    let world = core.world_ref(Dimension::Overworld).unwrap();
+    for &(cx, cz) in &corners {
+        assert!(world.chunk_is_resident(cx, cz), "corner ring 2 chunk ({cx}, {cz}) must be applied in tick 2");
+    }
+    assert_eq!(core.pending_worldgen[0].dimension, Dimension::End);
+}
+
+#[test]
+fn apply_pending_worldgen_rejection_releases_capacity() {
+    let mut core = core();
+    {
+        let world = core.world_mut(Dimension::Overworld).unwrap();
+        let mut corrupt_data = crate::save::ChunkSaveData::from_chunk(&Chunk::empty(5, 5)).unwrap();
+        corrupt_data.chunk_x = 5;
+        corrupt_data.chunk_z = 5;
+        corrupt_data.blocks.clear();
+        assert!(world.restore_saved_chunk(&corrupt_data).is_err());
+        assert!(world.failed_restore_chunks().contains(&(5, 5)));
+    }
+
+    core.queue_worldgen_results(vec![PendingWorldgenColumn {
+        dimension: Dimension::Overworld,
+        chunk_x: 5,
+        chunk_z: 5,
+        chunk: Chunk::empty_in_dimension(Dimension::Overworld, 5, 5),
+    }]);
+    assert_eq!(core.pending_worldgen_count(), 1);
+    assert!(core.is_worldgen_pending(Dimension::Overworld, 5, 5));
+
+    core.apply_pending_worldgen(16);
+    assert_eq!(core.pending_worldgen_count(), 0);
+    assert!(!core.is_worldgen_pending(Dimension::Overworld, 5, 5));
+    assert!(!core.world_ref(Dimension::Overworld).unwrap().chunk_is_resident(5, 5));
+}
+

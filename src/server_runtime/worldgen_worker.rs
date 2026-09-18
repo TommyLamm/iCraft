@@ -84,6 +84,14 @@ impl WorldgenWorker {
         }
         out
     }
+
+    pub fn is_in_flight(&self, dimension: Dimension, chunk_x: i32, chunk_z: i32) -> bool {
+        self.in_flight.contains(&(dimension, chunk_x, chunk_z))
+    }
+
+    pub fn in_flight_count(&self) -> usize {
+        self.in_flight.len()
+    }
 }
 
 #[cfg(test)]

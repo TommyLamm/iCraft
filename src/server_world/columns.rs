@@ -1,6 +1,24 @@
 use super::*;
 use super::entities::block_revision_fingerprint;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorldgenApplyOutcome {
+    Applied,
+    Discarded,
+}
+
+impl WorldgenApplyOutcome {
+    #[inline]
+    pub fn is_applied(&self) -> bool {
+        matches!(self, Self::Applied)
+    }
+
+    #[inline]
+    pub fn is_discarded(&self) -> bool {
+        matches!(self, Self::Discarded)
+    }
+}
+
 impl ServerWorld {
     pub fn new_with_difficulty(
         seed: u32,
@@ -58,6 +76,18 @@ impl ServerWorld {
         &self.pending_chunk_generation
     }
 
+    pub fn is_chunk_demand_pending(&self, chunk_x: i32, chunk_z: i32) -> bool {
+        self.pending_chunk_generation.contains(&(chunk_x, chunk_z))
+    }
+
+    pub fn withdraw_chunk_demand(&mut self, chunk_x: i32, chunk_z: i32) -> bool {
+        self.pending_chunk_generation.remove(&(chunk_x, chunk_z))
+    }
+
+    pub fn prune_unkept_demands(&mut self, keep: &BTreeSet<(i32, i32)>) {
+        self.pending_chunk_generation.retain(|key| keep.contains(key));
+    }
+
     pub fn entities_dirty_for_save(&self) -> bool {
         self.entities.checksum_epoch() != self.entities_persisted_epoch
     }
@@ -66,15 +96,22 @@ impl ServerWorld {
         self.entities_persisted_epoch = self.entities.checksum_epoch();
     }
 
-    /// Insert a worker-generated column when still demanded and not
-    /// fail-closed. Stale results for already-resident columns are ignored.
-    pub fn apply_generated_chunk(&mut self, chunk_x: i32, chunk_z: i32, chunk: crate::world::Chunk) {
+    /// Apply a worker-generated column if still demanded, not already resident,
+    /// and not failed restore. Synchronous materialization and player modifications
+    /// take priority over late worker results.
+    pub fn apply_generated_chunk(
+        &mut self,
+        chunk_x: i32,
+        chunk_z: i32,
+        chunk: crate::world::Chunk,
+    ) -> WorldgenApplyOutcome {
         let key = (chunk_x, chunk_z);
-        self.pending_chunk_generation.remove(&key);
-        if self.chunks.chunks.contains_key(&key) || self.failed_restore_chunks.contains(&key) {
-            return;
+        let demanded = self.pending_chunk_generation.remove(&key);
+        if !demanded || self.chunks.chunks.contains_key(&key) || self.failed_restore_chunks.contains(&key) {
+            return WorldgenApplyOutcome::Discarded;
         }
         self.chunks.insert_resident_chunk(key, chunk);
+        WorldgenApplyOutcome::Applied
     }
 
     /// Whether a future/other authoritative spawn source may create a

@@ -349,6 +349,10 @@ impl ServerRuntime {
             .unwrap_or_else(|| format!("player-{id}"));
         if let Some(session) = self.players.remove(&id) {
             let dimension = session.interest.dimension;
+            let (keep, _) = self.residency_keep_set(dimension);
+            self.authority.with_world(dimension, |world| {
+                world.prune_unkept_demands(&keep);
+            });
             self.interest_index_clear_session(
                 id,
                 session.chunk_index_dimension,
