@@ -142,7 +142,11 @@ rare overflow map until eviction flushes dirty data and removes them.
 Shared reads (`get_block` / `highest_solid_y` / `column_neighborhood`) live on
 `ColumnQuery`. Authority `set_block` does not record mesh invalidation;
 presentation `apply_presentation_cell` does not enqueue fluids or mark save
-dirty. Loaded-column iteration is row-major then sorted overflow so order
+dirty. Presentation block mutations and lighting record section mesh dependencies
+directly (`apply_synced_block_change` with `SectionKey`) using state-aware light
+emission (`light_emission_for`), without whole-column invalidation rebuilds;
+whole-column invalidation is reserved for column commit and unload boundaries.
+Loaded-column iteration is row-major then sorted overflow so order
 cannot feed RNG / checksum.
 
 Worlds live in a `BTreeMap` keyed by `Dimension`. Callers pass an explicit

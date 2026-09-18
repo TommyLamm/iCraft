@@ -457,8 +457,8 @@ fn remote_block_change_updates_light_and_boundary_mesh_dependencies() {
 
     assert_eq!(manager.get_block(15, 80, 8), BlockType::Stone);
     assert_eq!(manager.get_sky_light(15, 80, 8), 0);
-    assert!(dirty.contains(&(0, 0)));
-    assert!(dirty.contains(&(1, 0)));
+    assert!(dirty.contains(&SectionKey::new(0, 5, 0)));
+    assert!(dirty.contains(&SectionKey::new(1, 5, 0)));
     // PresentationChunks has no fluid queues — type-level proof that
     // projection apply cannot enqueue authority fluid neighbors.
 }
@@ -729,3 +729,260 @@ fn terrain_shader_module_passes_wgpu_validation() {
         "terrain WGSL failed validation: {validation_error:?}"
     );
 }
+
+#[test]
+fn interior_stone_to_dirt_schedules_exactly_one_section() {
+    let mut manager = PresentationChunks::new(2);
+    manager.chunks.insert((0, 0), Chunk::empty(0, 0));
+    // Coordinate (7, 70, 7) is strictly interior to chunk (0, 0) and section 4 (ly = 6).
+    assert!(manager.apply_presentation_cell(7, 70, 7, BlockType::Stone, 0, 0));
+    let _ = manager.drain_section_mesh_invalidations();
+
+    let dirty = apply_synced_block_change(&mut manager, 7, 70, 7, BlockType::Dirt, 0, 0)
+        .expect("block change should succeed");
+
+    assert_eq!(dirty.len(), 1);
+    assert_eq!(dirty, [SectionKey::new(0, 4, 0)].into_iter().collect());
+
+    let mut scheduler = crate::chunk_schedule::SectionMeshScheduler::new();
+    for key in dirty {
+        scheduler.enqueue(
+            SectionIdentity::new(key, 1, 1),
+            DependencyReason::Block,
+            (0, 0),
+        );
+    }
+    assert_eq!(scheduler.len(), 1);
+}
+
+#[test]
+fn three_axis_boundary_ao_dependencies_schedule_eight_sections() {
+    let mut manager = PresentationChunks::new(2);
+    for cx in 0..=1 {
+        for cz in 0..=1 {
+            manager.chunks.insert((cx, cz), Chunk::empty(cx, cz));
+        }
+    }
+    // (15, 15, 15) is at positive boundaries of chunk X, section Y (sy=0, ly=15), and chunk Z.
+    assert!(manager.apply_presentation_cell(15, 15, 15, BlockType::Stone, 0, 0));
+    let _ = manager.drain_section_mesh_invalidations();
+
+    let dirty = apply_synced_block_change(&mut manager, 15, 15, 15, BlockType::Dirt, 0, 0)
+        .expect("boundary block change should succeed");
+
+    assert_eq!(dirty.len(), 8);
+    let expected: std::collections::HashSet<SectionKey> = [
+        SectionKey::new(0, 0, 0),
+        SectionKey::new(1, 0, 0),
+        SectionKey::new(0, 1, 0),
+        SectionKey::new(1, 1, 0),
+        SectionKey::new(0, 0, 1),
+        SectionKey::new(1, 0, 1),
+        SectionKey::new(0, 1, 1),
+        SectionKey::new(1, 1, 1),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(dirty, expected);
+
+    let mut scheduler = crate::chunk_schedule::SectionMeshScheduler::new();
+    for key in dirty {
+        scheduler.enqueue(
+            SectionIdentity::new(key, 1, 1),
+            DependencyReason::Block,
+            (0, 0),
+        );
+    }
+    assert_eq!(scheduler.len(), 8);
+}
+
+#[test]
+fn world_y_boundary_and_diagonal_invalidation_respects_height() {
+    let mut manager = PresentationChunks::new(2);
+    for cx in 0..=1 {
+        for cz in 0..=1 {
+            manager.chunks.insert((cx, cz), Chunk::empty(cx, cz));
+        }
+    }
+
+    // 1. Min world Y = -64 (section -4, ly = 0)
+    // Interior at (7, -64, 7): section -5 below is pruned by world height, unique section is 1.
+    assert!(manager.apply_presentation_cell(7, -64, 7, BlockType::Stone, 0, 0));
+    let _ = manager.drain_section_mesh_invalidations();
+    let dirty_min_interior =
+        apply_synced_block_change(&mut manager, 7, -64, 7, BlockType::Dirt, 0, 0).unwrap();
+    assert_eq!(
+        dirty_min_interior,
+        [SectionKey::new(0, -4, 0)].into_iter().collect()
+    );
+
+    // Corner at (15, -64, 15): 2 in X * 2 in Z * 1 in Y (section -5 pruned) = 4 sections.
+    assert!(manager.apply_presentation_cell(15, -64, 15, BlockType::Stone, 0, 0));
+    let _ = manager.drain_section_mesh_invalidations();
+    let dirty_min_corner =
+        apply_synced_block_change(&mut manager, 15, -64, 15, BlockType::Dirt, 0, 0).unwrap();
+    assert_eq!(dirty_min_corner.len(), 4);
+    assert!(dirty_min_corner.iter().all(|k| k.section_y == -4));
+
+    // 2. World Y = -1 (section -1, ly = 15): upper neighbor section 0 exists.
+    assert!(manager.apply_presentation_cell(7, -1, 7, BlockType::Stone, 0, 0));
+    let _ = manager.drain_section_mesh_invalidations();
+    let dirty_neg_one =
+        apply_synced_block_change(&mut manager, 7, -1, 7, BlockType::Dirt, 0, 0).unwrap();
+    assert_eq!(
+        dirty_neg_one,
+        [SectionKey::new(0, -1, 0), SectionKey::new(0, 0, 0)]
+            .into_iter()
+            .collect()
+    );
+
+    // 3. World Y = 0 (section 0, ly = 0): lower neighbor section -1 exists.
+    assert!(manager.apply_presentation_cell(7, 0, 7, BlockType::Stone, 0, 0));
+    let _ = manager.drain_section_mesh_invalidations();
+    let dirty_zero =
+        apply_synced_block_change(&mut manager, 7, 0, 7, BlockType::Dirt, 0, 0).unwrap();
+    assert_eq!(
+        dirty_zero,
+        [SectionKey::new(0, -1, 0), SectionKey::new(0, 0, 0)]
+            .into_iter()
+            .collect()
+    );
+
+    // 4. Max world Y = 319 (section 19, ly = 15): section 20 above is pruned by world height.
+    assert!(manager.apply_presentation_cell(7, 319, 7, BlockType::Stone, 0, 0));
+    let _ = manager.drain_section_mesh_invalidations();
+    let dirty_max_interior =
+        apply_synced_block_change(&mut manager, 7, 319, 7, BlockType::Dirt, 0, 0).unwrap();
+    assert_eq!(
+        dirty_max_interior,
+        [SectionKey::new(0, 19, 0)].into_iter().collect()
+    );
+
+    // Corner at (15, 319, 15): 2 in X * 2 in Z * 1 in Y (section 20 pruned) = 4 sections.
+    assert!(manager.apply_presentation_cell(15, 319, 15, BlockType::Stone, 0, 0));
+    let _ = manager.drain_section_mesh_invalidations();
+    let dirty_max_corner =
+        apply_synced_block_change(&mut manager, 15, 319, 15, BlockType::Dirt, 0, 0).unwrap();
+    assert_eq!(dirty_max_corner.len(), 4);
+    assert!(dirty_max_corner.iter().all(|k| k.section_y == 19));
+}
+
+#[test]
+fn state_only_lamp_and_torch_light_emission_triggers_lighting() {
+    let mut manager = PresentationChunks::new(2);
+    manager.chunks.insert((0, 0), Chunk::empty(0, 0));
+
+    // 1. RedstoneLamp: unlit (state=0, emission=0) -> lit (open bit, emission=15)
+    let lamp_pos = (7, 70, 7);
+    assert!(manager.apply_presentation_cell(
+        lamp_pos.0,
+        lamp_pos.1,
+        lamp_pos.2,
+        BlockType::RedstoneLamp,
+        0,
+        0
+    ));
+    let _ = manager.drain_section_mesh_invalidations();
+
+    // Turn lamp ON (state-only mutation)
+    let dirty_on = apply_synced_block_change(
+        &mut manager,
+        lamp_pos.0,
+        lamp_pos.1,
+        lamp_pos.2,
+        BlockType::RedstoneLamp,
+        crate::world::BLOCK_STATE_OPEN_BIT,
+        0,
+    )
+    .expect("lamp state change should succeed");
+
+    assert_eq!(manager.get_block_light(lamp_pos.0, lamp_pos.1, lamp_pos.2), 15);
+    assert_eq!(
+        manager.get_block_light(lamp_pos.0, lamp_pos.1 + 1, lamp_pos.2),
+        14
+    );
+    assert!(dirty_on.contains(&SectionKey::new(0, 4, 0)));
+
+    // Turn lamp OFF (state-only mutation)
+    let dirty_off = apply_synced_block_change(
+        &mut manager,
+        lamp_pos.0,
+        lamp_pos.1,
+        lamp_pos.2,
+        BlockType::RedstoneLamp,
+        0,
+        0,
+    )
+    .expect("lamp turn-off should succeed");
+
+    assert_eq!(manager.get_block_light(lamp_pos.0, lamp_pos.1, lamp_pos.2), 0);
+    assert_eq!(
+        manager.get_block_light(lamp_pos.0, lamp_pos.1 + 1, lamp_pos.2),
+        0
+    );
+    assert!(dirty_off.contains(&SectionKey::new(0, 4, 0)));
+
+    // 2. RedstoneTorch: lit (state=0, emission=7) -> extinguished (open bit, emission=0)
+    let torch_pos = (7, 72, 7);
+    assert!(manager.apply_presentation_cell(
+        torch_pos.0,
+        torch_pos.1,
+        torch_pos.2,
+        BlockType::RedstoneTorch,
+        0,
+        0
+    ));
+    let _ = manager.drain_section_mesh_invalidations();
+
+    // Extinguish torch (bit 4 set = inverted torch flag = extinguished)
+    let dirty_torch_off = apply_synced_block_change(
+        &mut manager,
+        torch_pos.0,
+        torch_pos.1,
+        torch_pos.2,
+        BlockType::RedstoneTorch,
+        crate::world::BLOCK_STATE_OPEN_BIT,
+        0,
+    )
+    .expect("torch extinguish should succeed");
+
+    assert_eq!(
+        manager.get_block_light(torch_pos.0, torch_pos.1, torch_pos.2),
+        0
+    );
+    assert!(dirty_torch_off.contains(&SectionKey::new(0, 4, 0)));
+}
+
+#[test]
+fn multiple_mutations_on_same_section_collapse_to_latest_revision_identity() {
+    let coord = (0, 0);
+    let lifetime = 5;
+    let mut meshes = std::collections::HashMap::from([(
+        coord,
+        ChunkMesh::pending_for_dimension(crate::dimension::Dimension::Overworld),
+    )]);
+    let key = SectionKey::new(0, 4, 0);
+    let mut scheduler = crate::chunk_schedule::SectionMeshScheduler::new();
+
+    // 3 successive mutations on the same section within the frame
+    for _ in 0..3 {
+        let section = meshes.get_mut(&coord).unwrap().section_mut(4).unwrap();
+        section.invalidate();
+        scheduler.enqueue(
+            SectionIdentity::new(key, section.revision, lifetime),
+            DependencyReason::Block,
+            coord,
+        );
+    }
+
+    assert_eq!(
+        scheduler.len(),
+        1,
+        "multiple mutations must collapse to one scheduled section"
+    );
+    let work = scheduler.pop_nearest(coord, 1).unwrap();
+    let final_revision = meshes.get(&coord).unwrap().section(4).unwrap().revision;
+    assert_eq!(work.identity.revision, final_revision);
+    assert_eq!(work.identity.key, key);
+}
+

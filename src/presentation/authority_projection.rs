@@ -412,7 +412,7 @@ impl State {
         &mut self,
         mutations: &[crate::authority::contract::WorldMutation],
     ) {
-        let mut dirty_chunks = std::collections::HashSet::new();
+        let mut dirty_sections = std::collections::HashSet::new();
         for mutation in mutations {
             let Some(dimension) = crate::dimension::Dimension::from_wire(mutation.dimension) else {
                 continue;
@@ -463,13 +463,13 @@ impl State {
                 mutation.state,
                 mutation.raw_fluid,
             ) {
-                dirty_chunks.extend(dirty);
+                dirty_sections.extend(dirty);
             }
             // Block-entity / container payloads still arrive as typed projection
             // events; never query a second local authority as a fallback.
         }
-        if !dirty_chunks.is_empty() {
-            self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Block);
+        for key in dirty_sections {
+            self.invalidate_section_mesh(key, DependencyReason::Block);
         }
     }
 

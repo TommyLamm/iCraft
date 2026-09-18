@@ -2,8 +2,7 @@
 //! and view distance. Does not enqueue fluids or mark save-dirty.
 
 use super::{
-    mark_block_mesh_dependencies, mark_section_mesh_dependencies, world_to_local, ColumnQuery,
-    DenseColumnGrid, LightColumnHost,
+    mark_section_mesh_dependencies, world_to_local, ColumnQuery, DenseColumnGrid, LightColumnHost,
 };
 use crate::world::{
     BlockType, Chunk, MeshVoxel, SectionHaloSnapshot, SectionKey, CHUNK_DEPTH, CHUNK_WIDTH,
@@ -14,7 +13,6 @@ pub struct PresentationChunks {
     pub chunks: DenseColumnGrid,
     pub view_distance: i32,
     pub dimension: crate::dimension::Dimension,
-    pending_mesh_invalidations: HashSet<(i32, i32)>,
     pending_section_mesh_invalidations: HashSet<SectionKey>,
 }
 
@@ -86,7 +84,6 @@ impl PresentationChunks {
             chunks: DenseColumnGrid::with_distance(view_distance),
             view_distance,
             dimension,
-            pending_mesh_invalidations: HashSet::new(),
             pending_section_mesh_invalidations: HashSet::new(),
         }
     }
@@ -104,16 +101,16 @@ impl PresentationChunks {
     }
 
     fn record_mesh_invalidation(&mut self, wx: i32, wy: i32, wz: i32) {
-        mark_block_mesh_dependencies(&mut self.pending_mesh_invalidations, wx, wz);
-        mark_section_mesh_dependencies(&mut self.pending_section_mesh_invalidations, wx, wy, wz);
-    }
-
-    pub fn acknowledge_mesh_invalidation(&mut self, coord: &(i32, i32)) {
-        self.pending_mesh_invalidations.remove(coord);
-    }
-
-    pub fn drain_mesh_invalidations(&mut self) -> HashSet<(i32, i32)> {
-        std::mem::take(&mut self.pending_mesh_invalidations)
+        let height = self.dimension.height();
+        let min_sy = height.min_section_y();
+        let max_sy = height.max_section_y_exclusive();
+        let mut dirty = HashSet::new();
+        mark_section_mesh_dependencies(&mut dirty, wx, wy, wz);
+        self.pending_section_mesh_invalidations.extend(
+            dirty
+                .into_iter()
+                .filter(|key| key.section_y >= min_sy && key.section_y < max_sy),
+        );
     }
 
     pub fn acknowledge_section_mesh_invalidation(&mut self, key: &SectionKey) {
@@ -519,11 +516,12 @@ mod tests {
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
         manager.chunks.insert((1, 0), Chunk::new(1, 0));
         assert!(manager.apply_presentation_cell(15, 80, 8, BlockType::Stone, 0, 0));
-        assert_eq!(
-            manager.drain_mesh_invalidations(),
-            HashSet::from([(0, 0), (1, 0)])
-        );
-        assert!(manager.drain_mesh_invalidations().is_empty());
+        let drained = manager.drain_section_mesh_invalidations();
+        assert!(drained.contains(&SectionKey::new(0, 5, 0)));
+        assert!(drained.contains(&SectionKey::new(1, 5, 0)));
+        assert!(drained.contains(&SectionKey::new(0, 4, 0)));
+        assert!(drained.contains(&SectionKey::new(1, 4, 0)));
+        assert!(manager.drain_section_mesh_invalidations().is_empty());
     }
 
     #[test]

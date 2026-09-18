@@ -1,7 +1,6 @@
 use crate::camera::{Camera, CameraUniform};
 use crate::chunk_manager::{
-    mark_block_mesh_dependencies, mark_section_mesh_dependencies, surrounding_chunk_coords,
-    PresentationChunks,
+    mark_section_mesh_dependencies, surrounding_chunk_coords, PresentationChunks,
 };
 use crate::chunk_render::{
     select_lod_for_bounds, DrawCandidate, DrawLayer, Frustum, LodLevel, LodThresholds, MeshBounds,
@@ -228,7 +227,7 @@ fn closest_melee_target(
 }
 
 /// Apply a network-visible block value to CPU presentation state and return
-/// every chunk whose mesh/light data depends on it. Writes the cell payload
+/// every section whose mesh/light data depends on it. Writes the cell payload
 /// directly — never `PresentationChunks::set_block`, which would enqueue fluids and
 /// re-run authority side effects on the GPU thread. Local lighting runs only
 /// when opacity or light emission changes.
@@ -240,7 +239,7 @@ fn apply_synced_block_change(
     block: BlockType,
     state: u8,
     raw_fluid: u8,
-) -> Option<std::collections::HashSet<(i32, i32)>> {
+) -> Option<std::collections::HashSet<crate::world::SectionKey>> {
     let ((cx, cz), _) = chunk_manager.world_to_local(x, y, z)?;
     if !chunk_manager.chunks.contains_key(&(cx, cz)) {
         return None;
@@ -254,10 +253,15 @@ fn apply_synced_block_change(
 
     let old_properties = previous.properties();
     let new_properties = block.properties();
+    let old_state = crate::world::BlockState::decode(previous_state);
+    let new_state = crate::world::BlockState::decode(state);
+    let old_light_emission = previous.light_emission_for(old_state);
+    let new_light_emission = block.light_emission_for(new_state);
+
     if !chunk_manager.apply_presentation_cell(x, y, z, block, state, raw_fluid) {
         return None;
     }
-    let mut dirty_chunks = std::collections::HashSet::new();
+    let mut lighting_dirty_chunks = std::collections::HashSet::new();
     if old_properties.is_opaque() != new_properties.is_opaque() {
         if new_properties.is_opaque() {
             crate::lighting::update_sky_light_after_placed(
@@ -265,7 +269,7 @@ fn apply_synced_block_change(
                 x,
                 y,
                 z,
-                &mut dirty_chunks,
+                &mut lighting_dirty_chunks,
             );
         } else {
             crate::lighting::update_sky_light_after_removed(
@@ -273,32 +277,33 @@ fn apply_synced_block_change(
                 x,
                 y,
                 z,
-                &mut dirty_chunks,
+                &mut lighting_dirty_chunks,
             );
         }
     }
-    if old_properties.light_emission != new_properties.light_emission {
-        crate::lighting::update_block_light_after_removed(
-            chunk_manager,
-            x,
-            y,
-            z,
-            old_properties.light_emission,
-            &mut dirty_chunks,
-        );
-        if new_properties.light_emission > 0 {
+    if old_light_emission != new_light_emission {
+        if old_light_emission > 0 {
+            crate::lighting::update_block_light_after_removed(
+                chunk_manager,
+                x,
+                y,
+                z,
+                old_light_emission,
+                &mut lighting_dirty_chunks,
+            );
+        }
+        if new_light_emission > 0 {
             crate::lighting::update_block_light_after_placed(
                 chunk_manager,
                 x,
                 y,
                 z,
-                new_properties.light_emission,
-                &mut dirty_chunks,
+                new_light_emission,
+                &mut lighting_dirty_chunks,
             );
         }
     }
-    mark_block_mesh_dependencies(&mut dirty_chunks, x, z);
-    Some(dirty_chunks)
+    Some(chunk_manager.drain_section_mesh_invalidations())
 }
 
 
@@ -3071,7 +3076,6 @@ impl State {
     }
 
     fn invalidate_chunk_mesh(&mut self, coord: (i32, i32), reason: DependencyReason) -> bool {
-        self.chunk_manager.acknowledge_mesh_invalidation(&coord);
         let mut invalidated = false;
         let height = self.chunk_manager.dimension.height();
         for section_y in height.min_section_y()..height.max_section_y_exclusive() {
@@ -3255,9 +3259,6 @@ impl State {
         for key in unreported_sections {
             self.invalidate_section_mesh(key, DependencyReason::Block);
         }
-        // Section invalidations are authoritative; drain the legacy chunk set
-        // so it cannot trigger a redundant whole-column rebuild.
-        self.chunk_manager.drain_mesh_invalidations();
         let player_pos = self.player_physics.position;
         let px = (player_pos.x / 16.0).floor() as i32;
         let pz = (player_pos.z / 16.0).floor() as i32;
@@ -4365,10 +4366,12 @@ impl State {
             return;
         }
         self.play_chest_state_edge((x, y, z), previous_block, previous_state, block, state);
-        if let Some(dirty_chunks) =
+        if let Some(dirty_sections) =
             apply_synced_block_change(&mut self.chunk_manager, x, y, z, block, state, raw_fluid)
         {
-            self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Network);
+            for key in dirty_sections {
+                self.invalidate_section_mesh(key, DependencyReason::Network);
+            }
         }
     }
 
