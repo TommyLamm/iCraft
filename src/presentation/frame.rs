@@ -4,9 +4,9 @@
 //! Timestamp query and frame-slot acquire/wait stay in the orchestrator.
 
 use super::*;
+use crate::world::chunk_xz;
 use glam::Mat4;
 use std::time::{Duration, Instant};
-use crate::world::chunk_xz;
 
 impl State {
     pub(super) fn prepare_terrain_draw_plan(&mut self) {
@@ -3400,7 +3400,6 @@ impl State {
         self.perf_counters.draw_calls = total_draw_calls;
     }
 
-
     fn stamp(&self, pass: &mut wgpu::RenderPass<'_>, query: u32) {
         if self.gpu_timestamps_inside_passes {
             if let Some(qs) = &self.gpu_timestamp_query_set {
@@ -3508,7 +3507,8 @@ impl State {
                     &self.mob_cuboid_instance_buffers[ring],
                     0,
                     bytemuck::cast_slice(
-                        &self.mob_cuboid_instances_scratch[..self.mob_cuboid_num_instances as usize],
+                        &self.mob_cuboid_instances_scratch
+                            [..self.mob_cuboid_num_instances as usize],
                     ),
                 );
             }
@@ -3597,13 +3597,13 @@ impl State {
         allocs_before: u64,
     ) -> Result<(), wgpu::SurfaceError> {
         let render_encode_started = Instant::now();
-        let mut encoder = self
-            .device
-            .as_ref()
-            .unwrap()
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Render Encoder"),
-            });
+        let mut encoder =
+            self.device
+                .as_ref()
+                .unwrap()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Render Encoder"),
+                });
         self.flush_frame_uploads(&mut encoder);
 
         let mut crack_metrics: Option<(u64, u64)> = None;
@@ -3929,11 +3929,17 @@ impl State {
         self.perf_counters.gpu_timestamps_inside_passes = self.gpu_timestamps_inside_passes;
 
         let command_buffer = encoder.finish();
-        self.queue.as_ref().unwrap().submit(std::iter::once(command_buffer));
+        self.queue
+            .as_ref()
+            .unwrap()
+            .submit(std::iter::once(command_buffer));
         let completion_tx = self.gpu_completion_tx.clone();
-        self.queue.as_ref().unwrap().on_submitted_work_done(move || {
-            let _ = completion_tx.send(frame_submission_id);
-        });
+        self.queue
+            .as_ref()
+            .unwrap()
+            .on_submitted_work_done(move || {
+                let _ = completion_tx.send(frame_submission_id);
+            });
         if let Some(slot_index) = timestamp_readback_slot {
             let slot = &self.gpu_timestamp_readback_slots[slot_index];
             if slot

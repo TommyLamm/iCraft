@@ -2,7 +2,9 @@
 
 use super::*;
 use crate::network::protocol::Packet;
-use crate::network::protocol::{BlockActionKind, RejectReason};
+use crate::network::protocol::{
+    BlockActionKind, ContainerAction, GameplayResponse, ItemWire, RejectReason, SessionGameplayWire,
+};
 use crate::world::BlockType;
 use crate::world::Chunk;
 
@@ -38,11 +40,7 @@ fn embedded_runtime(label: &str) -> (ServerRuntime, RuntimeInput) {
     .unwrap()
 }
 
-fn write_world_meta(
-    world_dir: &Path,
-    game_mode: GameMode,
-    cheats_enabled: bool,
-) -> io::Result<()> {
+fn write_world_meta(world_dir: &Path, game_mode: GameMode, cheats_enabled: bool) -> io::Result<()> {
     fs::create_dir_all(world_dir)?;
     fs::write(
         world_dir.join("world.meta"),
@@ -218,48 +216,42 @@ fn runtime_pose_validation_rejects_regression_and_speed_but_allows_server_telepo
 fn presentation_saturation_preserves_ack_and_session_and_stays_bounded() {
     let (mut runtime, _input) = embedded_runtime("presentation_saturation");
     runtime.presentation_events.clear();
-    assert!(
-        runtime.push_presentation_event(ProjectionEvent::session(
-            99,
-            Packet::GameplayResponse {
-                response: GameplayResponse {
-                    request_id: 700,
-                    server_sequence: 1,
-                    outcome: GameplayOutcome::Accepted { revision: 1 },
-                },
+    assert!(runtime.push_presentation_event(ProjectionEvent::session(
+        99,
+        Packet::GameplayResponse {
+            response: GameplayResponse {
+                request_id: 700,
+                server_sequence: 1,
+                outcome: GameplayOutcome::Accepted { revision: 1 },
             },
-        ))
-    );
+        },
+    )));
     let mut session_state = SessionGameplayWire::default();
     session_state.revision = 77;
-    assert!(
-        runtime.push_presentation_event(ProjectionEvent::session(
-            99,
-            Packet::PlayerSessionUpdate {
-                sequence: 1,
-                player_id: 99,
-                dimension: Dimension::Overworld as u8,
-                state: session_state,
-            },
-        ))
-    );
+    assert!(runtime.push_presentation_event(ProjectionEvent::session(
+        99,
+        Packet::PlayerSessionUpdate {
+            sequence: 1,
+            player_id: 99,
+            dimension: Dimension::Overworld as u8,
+            state: session_state,
+        },
+    )));
 
     for index in 0..(MAX_PRESENTATION_EVENTS_PER_TICK * 2) {
-        assert!(
-            runtime.push_presentation_event(ProjectionEvent::session(
-                99,
-                Packet::PlayerPosition {
-                    id: 10_000 + index as u64,
-                    sequence: index as u32 + 1,
-                    sender_time_millis: index as u64 + 1,
-                    x: index as f32,
-                    y: 80.0,
-                    z: 0.0,
-                    yaw: 0.0,
-                    pitch: 0.0,
-                },
-            ))
-        );
+        assert!(runtime.push_presentation_event(ProjectionEvent::session(
+            99,
+            Packet::PlayerPosition {
+                id: 10_000 + index as u64,
+                sequence: index as u32 + 1,
+                sender_time_millis: index as u64 + 1,
+                x: index as f32,
+                y: 80.0,
+                z: 0.0,
+                yaw: 0.0,
+                pitch: 0.0,
+            },
+        )));
     }
     assert_eq!(
         runtime.presentation_events.len(),
@@ -279,19 +271,18 @@ fn presentation_saturation_preserves_ack_and_session_and_stays_bounded() {
 
     runtime.presentation_events.clear();
     for index in 0..(MAX_PRESENTATION_QUEUE_LEN + 8) {
-        let accepted =
-            runtime.push_presentation_event(ProjectionEvent::session(
-                99,
-                Packet::GameplayResponse {
-                    response: GameplayResponse {
-                        request_id: index as u128,
-                        server_sequence: index as u64 + 1,
-                        outcome: GameplayOutcome::Accepted {
-                            revision: index as u64 + 1,
-                        },
+        let accepted = runtime.push_presentation_event(ProjectionEvent::session(
+            99,
+            Packet::GameplayResponse {
+                response: GameplayResponse {
+                    request_id: index as u128,
+                    server_sequence: index as u64 + 1,
+                    outcome: GameplayOutcome::Accepted {
+                        revision: index as u64 + 1,
                     },
                 },
-            ));
+            },
+        ));
         assert_eq!(accepted, index < MAX_PRESENTATION_QUEUE_LEN);
     }
     assert_eq!(
@@ -414,7 +405,12 @@ fn embedded_interest_fanout_is_private_dimension_safe_and_exactly_once() {
                 event,
                 PresentationEvent::Packet(ProjectionEvent {
                     dest: ProjectionDest::Session(99),
-                    packet: Packet::BlockChange { x: 8, y: 80, z: 8, .. },
+                    packet: Packet::BlockChange {
+                        x: 8,
+                        y: 80,
+                        z: 8,
+                        ..
+                    },
                     ..
                 })
             ))
@@ -625,17 +621,16 @@ fn opening_new_container_replaces_old_session_and_preserves_other_viewers() {
         }
     }
 
-    let prepare =
-        |runtime: &mut ServerRuntime, first: (i32, i32, i32), second: (i32, i32, i32)| {
-            runtime.authority.with_world(Dimension::Overworld, |world| {
-                world
-                    .set_block(first.0, first.1, first.2, BlockType::Chest, 0)
-                    .unwrap();
-                world
-                    .set_block(second.0, second.1, second.2, BlockType::Chest, 0)
-                    .unwrap();
-            });
-        };
+    let prepare = |runtime: &mut ServerRuntime, first: (i32, i32, i32), second: (i32, i32, i32)| {
+        runtime.authority.with_world(Dimension::Overworld, |world| {
+            world
+                .set_block(first.0, first.1, first.2, BlockType::Chest, 0)
+                .unwrap();
+            world
+                .set_block(second.0, second.1, second.2, BlockType::Chest, 0)
+                .unwrap();
+        });
+    };
 
     let first = (10, 80, 8);
     let second = (11, 80, 8);
@@ -660,8 +655,7 @@ fn opening_new_container_replaces_old_session_and_preserves_other_viewers() {
     let world = runtime.authority.world_ref(Dimension::Overworld).unwrap();
     assert!(world.container_viewers_at(first).next().is_none());
     assert!(
-        !crate::world::BlockState::decode(world.get_block_state(first.0, first.1, first.2))
-            .is_open
+        !crate::world::BlockState::decode(world.get_block_state(first.0, first.1, first.2)).is_open
     );
     assert_eq!(
         world
@@ -714,8 +708,7 @@ fn opening_new_container_replaces_old_session_and_preserves_other_viewers() {
         vec![2]
     );
     assert!(
-        crate::world::BlockState::decode(world.get_block_state(first.0, first.1, first.2))
-            .is_open
+        crate::world::BlockState::decode(world.get_block_state(first.0, first.1, first.2)).is_open
     );
     assert_eq!(
         world
@@ -828,7 +821,10 @@ fn request_deduplication_and_out_of_order_are_authoritative() {
         session_id: 1,
         dimension: 0,
         client_revision: 0,
-        operation: GameplayOperation::ItemUse { item: crate::inventory::Item::Bread as u32, count: 1 },
+        operation: GameplayOperation::ItemUse {
+            item: crate::inventory::Item::Bread as u32,
+            count: 1,
+        },
     };
     let first = runtime.submit_request(1, request.clone()).unwrap();
     let duplicate = runtime.submit_request(1, request).unwrap();
@@ -842,7 +838,10 @@ fn request_deduplication_and_out_of_order_are_authoritative() {
                 session_id: 1,
                 dimension: 0,
                 client_revision: 0,
-                operation: GameplayOperation::ItemUse { item: crate::inventory::Item::Bread as u32, count: 1 },
+                operation: GameplayOperation::ItemUse {
+                    item: crate::inventory::Item::Bread as u32,
+                    count: 1,
+                },
             },
         )
         .unwrap();
@@ -956,12 +955,7 @@ fn dimension_interest_and_session_transfer_are_isolated() {
     runtime.handle_join(2, "steve".into()).unwrap();
 
     runtime.authority.with_world(Dimension::Overworld, |world| {
-        assert!(world.ensure_entity(
-            101,
-            crate::entity::EntityType::Cow,
-            [8.0, 80.0, 8.0],
-            10.0,
-        ));
+        assert!(world.ensure_entity(101, crate::entity::EntityType::Cow, [8.0, 80.0, 8.0], 10.0,));
     });
     runtime.authority.with_world(Dimension::Nether, |world| {
         assert!(world.ensure_entity(
@@ -983,10 +977,7 @@ fn dimension_interest_and_session_transfer_are_isolated() {
     let _ = fs::remove_dir_all(&runtime.world_dir);
 }
 
-fn entity_lifecycle_counts(
-    events: &[PresentationEvent],
-    entity_id: u64,
-) -> (usize, usize, usize) {
+fn entity_lifecycle_counts(events: &[PresentationEvent], entity_id: u64) -> (usize, usize, usize) {
     let mut spawns = 0;
     let mut states = 0;
     let mut despawns = 0;
@@ -1060,8 +1051,7 @@ fn entity_state_broadcasts_dirty_or_entered_only() {
     let (_, states, _) = entity_lifecycle_counts(&dirty.presentation_events, ENTITY_ID);
     assert_eq!(states, 1);
     let quiet_after_dirty = runtime.tick_with_output().unwrap();
-    let (_, states, _) =
-        entity_lifecycle_counts(&quiet_after_dirty.presentation_events, ENTITY_ID);
+    let (_, states, _) = entity_lifecycle_counts(&quiet_after_dirty.presentation_events, ENTITY_ID);
     assert_eq!(states, 0);
 
     let far = [player_pos[0] + 10_000.0, player_pos[1], player_pos[2]];
@@ -1094,8 +1084,7 @@ fn entity_state_broadcasts_dirty_or_entered_only() {
         "re-entering the simulation set must send a full EntityState once"
     );
     let quiet_reentered = runtime.tick_with_output().unwrap();
-    let (_, states, _) =
-        entity_lifecycle_counts(&quiet_reentered.presentation_events, ENTITY_ID);
+    let (_, states, _) = entity_lifecycle_counts(&quiet_reentered.presentation_events, ENTITY_ID);
     assert_eq!(states, 0);
 
     let world_dir = runtime.world_dir.clone();
@@ -1656,7 +1645,7 @@ fn runtime_instances_have_isolated_worldgen_channels() {
 
     // Wait briefly for Rayon to finish the job for runtime_a
     let mut attempts = 0;
-    while attempts < 100 {
+    while attempts < 500 {
         runtime_a.collect_worldgen_results();
         runtime_a.authority.tick();
         if runtime_a
@@ -1715,18 +1704,20 @@ fn materialized_mutated_column_survives_runtime_worldgen_collection() {
     // Materialize chunk (1, 1) and mutate a block to Obsidian
     runtime.authority.with_world(Dimension::Overworld, |world| {
         world.materialize_chunk(1, 1);
-        world.set_block(16 + 4, 80, 16 + 4, BlockType::Obsidian, 0).unwrap();
+        world
+            .set_block(16 + 4, 80, 16 + 4, BlockType::Obsidian, 0)
+            .unwrap();
     });
 
     // Directly queue late worldgen result for (1, 1) containing empty/default chunk
-    runtime.authority.queue_worldgen_results(vec![
-        crate::authority::PendingWorldgenColumn {
+    runtime
+        .authority
+        .queue_worldgen_results(vec![crate::authority::PendingWorldgenColumn {
             dimension: Dimension::Overworld,
             chunk_x: 1,
             chunk_z: 1,
             chunk: Chunk::empty_in_dimension(Dimension::Overworld, 1, 1),
-        },
-    ]);
+        }]);
 
     // Tick authority so it processes queued worldgen results
     runtime.authority.tick();
@@ -1737,7 +1728,11 @@ fn materialized_mutated_column_survives_runtime_worldgen_collection() {
         .world_ref(Dimension::Overworld)
         .unwrap()
         .get_block(16 + 4, 80, 16 + 4);
-    assert_eq!(block, BlockType::Obsidian, "late worldgen must not overwrite materialized mutated chunk");
+    assert_eq!(
+        block,
+        BlockType::Obsidian,
+        "late worldgen must not overwrite materialized mutated chunk"
+    );
 
     let world_dir = runtime.world_dir.clone();
     let _ = runtime.shutdown();
@@ -1768,14 +1763,14 @@ fn failed_restore_column_rejects_runtime_worldgen_collection() {
     });
 
     // Queue worldgen result for (2, 2)
-    runtime.authority.queue_worldgen_results(vec![
-        crate::authority::PendingWorldgenColumn {
+    runtime
+        .authority
+        .queue_worldgen_results(vec![crate::authority::PendingWorldgenColumn {
             dimension: Dimension::Overworld,
             chunk_x: 2,
             chunk_z: 2,
             chunk: Chunk::empty_in_dimension(Dimension::Overworld, 2, 2),
-        },
-    ]);
+        }]);
 
     // Tick authority
     runtime.authority.tick();
@@ -1802,19 +1797,40 @@ fn embedded_local_view_distance_expansion_projects_outer_columns() {
     let (cx, cz) = {
         let session = runtime.players.get(&99).expect("local session");
         let pos = session.last_pose_position;
-        ((pos[0] / 16.0).floor() as i32, (pos[2] / 16.0).floor() as i32)
+        (
+            (pos[0] / 16.0).floor() as i32,
+            (pos[2] / 16.0).floor() as i32,
+        )
     };
-    assert!(!runtime.players.get(&99).unwrap().interest.chunks.contains(&(cx + 4, cz)));
+    assert!(!runtime
+        .players
+        .get(&99)
+        .unwrap()
+        .interest
+        .chunks
+        .contains(&(cx + 4, cz)));
 
     assert!(runtime.set_local_view_distance(4));
     assert_eq!(runtime.players.get(&99).unwrap().interest.view_distance, 4);
-    assert!(runtime.players.get(&99).unwrap().interest.chunks.contains(&(cx + 4, cz)));
+    assert!(runtime
+        .players
+        .get(&99)
+        .unwrap()
+        .interest
+        .chunks
+        .contains(&(cx + 4, cz)));
 
     let mut saw_outer = false;
     for _ in 0..10 {
         let output = runtime.tick_with_output().unwrap();
         for event in output.presentation_events {
-            if let PresentationEvent::ChunkColumn { to, cx: ecx, cz: ecz, .. } = event {
+            if let PresentationEvent::ChunkColumn {
+                to,
+                cx: ecx,
+                cz: ecz,
+                ..
+            } = event
+            {
                 if to == 99 && ecx == cx + 4 && ecz == cz {
                     saw_outer = true;
                     break;
@@ -1844,10 +1860,19 @@ fn embedded_local_view_distance_shrink_updates_coverage_and_reverse_index() {
     let (cx, cz) = {
         let session = runtime.players.get(&99).expect("local session");
         let pos = session.last_pose_position;
-        ((pos[0] / 16.0).floor() as i32, (pos[2] / 16.0).floor() as i32)
+        (
+            (pos[0] / 16.0).floor() as i32,
+            (pos[2] / 16.0).floor() as i32,
+        )
     };
     let outer = (cx + 4, cz);
-    assert!(runtime.players.get(&99).unwrap().interest.chunks.contains(&outer));
+    assert!(runtime
+        .players
+        .get(&99)
+        .unwrap()
+        .interest
+        .chunks
+        .contains(&outer));
     assert!(
         runtime
             .chunk_interest_index
@@ -1859,7 +1884,13 @@ fn embedded_local_view_distance_shrink_updates_coverage_and_reverse_index() {
     assert!(runtime.set_local_view_distance(2));
     assert_eq!(runtime.players.get(&99).unwrap().interest.view_distance, 2);
     assert!(
-        !runtime.players.get(&99).unwrap().interest.chunks.contains(&outer),
+        !runtime
+            .players
+            .get(&99)
+            .unwrap()
+            .interest
+            .chunks
+            .contains(&outer),
         "coverage must drop outer chunk after shrinking to distance 2"
     );
     assert!(
@@ -1904,7 +1935,10 @@ fn local_view_distance_same_value_does_not_rebuild() {
         .get(&99)
         .map(|session| session.interest.chunk_rebuilds())
         .expect("local session");
-    assert!(rebuilds_at_4 > rebuilds_before, "changing view distance must rebuild");
+    assert!(
+        rebuilds_at_4 > rebuilds_before,
+        "changing view distance must rebuild"
+    );
 
     // Setting 4 again must not rebuild
     assert!(runtime.set_local_view_distance(4));
@@ -1938,7 +1972,10 @@ fn local_view_distance_override_preserves_remote_coverage() {
     // Local session changes to 4
     assert!(runtime.set_local_view_distance(4));
     assert_eq!(runtime.players.get(&99).unwrap().interest.view_distance, 4);
-    assert_eq!(runtime.players.get(&99).unwrap().view_distance_override, Some(4));
+    assert_eq!(
+        runtime.players.get(&99).unwrap().view_distance_override,
+        Some(4)
+    );
 
     // Remote session must remain on server default (2)
     let remote_session = runtime.players.get(&2).unwrap();
@@ -1968,7 +2005,10 @@ fn local_view_distance_override_preserves_remote_coverage() {
 fn local_view_distance_override_persists_across_dimension_transfer() {
     let (mut runtime, _input) = embedded_runtime("dimension_transfer_override");
     assert!(runtime.set_local_view_distance(4));
-    assert_eq!(runtime.players.get(&99).unwrap().view_distance_override, Some(4));
+    assert_eq!(
+        runtime.players.get(&99).unwrap().view_distance_override,
+        Some(4)
+    );
     assert_eq!(runtime.players.get(&99).unwrap().interest.view_distance, 4);
 
     let transferred = runtime.transfer_session_dimension(99, Dimension::Nether, [0.0, 70.0, 0.0]);
@@ -2026,8 +2066,16 @@ fn worldgen_completed_backlog_exceeding_apply_limit_not_rescheduled() {
         std::thread::sleep(std::time::Duration::from_millis(10));
         attempts += 1;
     }
-    assert_eq!(runtime.authority.pending_worldgen_count(), 20, "worker should complete and collect all jobs");
-    assert_eq!(runtime.in_flight_worldgen_count(), 0, "in_flight count must be 0 after collection");
+    assert_eq!(
+        runtime.authority.pending_worldgen_count(),
+        20,
+        "worker should complete and collect all jobs"
+    );
+    assert_eq!(
+        runtime.in_flight_worldgen_count(),
+        0,
+        "in_flight count must be 0 after collection"
+    );
 
     runtime.authority.tick();
     assert_eq!(runtime.authority.pending_worldgen_count(), 4);
@@ -2096,7 +2144,8 @@ fn worldgen_sync_materialize_mutation_not_overwritten_by_late_result() {
 
     runtime.authority.with_world(Dimension::Overworld, |w| {
         w.materialize_chunk(10, 10);
-        w.set_block(160 + 2, 80, 160 + 2, BlockType::Obsidian, 0).unwrap();
+        w.set_block(160 + 2, 80, 160 + 2, BlockType::Obsidian, 0)
+            .unwrap();
     });
 
     let mut attempts = 0;
@@ -2143,18 +2192,21 @@ fn worldgen_withdrawn_demand_not_regenerated_and_not_materialized() {
     runtime.schedule_pending_worldgen();
     assert!(!runtime.is_worldgen_in_flight(Dimension::Overworld, 11, 11));
 
-    runtime.authority.queue_worldgen_results(vec![
-        crate::authority::PendingWorldgenColumn {
+    runtime
+        .authority
+        .queue_worldgen_results(vec![crate::authority::PendingWorldgenColumn {
             dimension: Dimension::Overworld,
             chunk_x: 11,
             chunk_z: 11,
             chunk: Chunk::empty_in_dimension(Dimension::Overworld, 11, 11),
-        },
-    ]);
+        }]);
     runtime.authority.tick();
 
     let world = runtime.authority.world_ref(Dimension::Overworld).unwrap();
-    assert!(!world.chunk_is_resident(11, 11), "withdrawn demand must not materialize into resident storage");
+    assert!(
+        !world.chunk_is_resident(11, 11),
+        "withdrawn demand must not materialize into resident storage"
+    );
 
     let world_dir = runtime.world_dir.clone();
     let _ = runtime.shutdown();
@@ -2186,37 +2238,49 @@ fn worldgen_cross_dimension_same_coordinates_isolated() {
     assert!(runtime.is_worldgen_in_flight(Dimension::Overworld, 12, 12));
     assert!(runtime.is_worldgen_in_flight(Dimension::Nether, 12, 12));
 
-    runtime.authority.queue_worldgen_results(vec![
-        crate::authority::PendingWorldgenColumn {
+    runtime
+        .authority
+        .queue_worldgen_results(vec![crate::authority::PendingWorldgenColumn {
             dimension: Dimension::Nether,
             chunk_x: 12,
             chunk_z: 12,
             chunk: Chunk::empty_in_dimension(Dimension::Nether, 12, 12),
-        },
-    ]);
+        }]);
     runtime.authority.tick();
 
     assert!(
-        runtime.authority.world_ref(Dimension::Nether).unwrap().chunk_is_resident(12, 12),
+        runtime
+            .authority
+            .world_ref(Dimension::Nether)
+            .unwrap()
+            .chunk_is_resident(12, 12),
         "Nether (12, 12) should be resident"
     );
     assert!(
-        !runtime.authority.world_ref(Dimension::Overworld).unwrap().chunk_is_resident(12, 12),
+        !runtime
+            .authority
+            .world_ref(Dimension::Overworld)
+            .unwrap()
+            .chunk_is_resident(12, 12),
         "Overworld (12, 12) must not be affected by Nether application"
     );
 
-    runtime.authority.queue_worldgen_results(vec![
-        crate::authority::PendingWorldgenColumn {
+    runtime
+        .authority
+        .queue_worldgen_results(vec![crate::authority::PendingWorldgenColumn {
             dimension: Dimension::Overworld,
             chunk_x: 12,
             chunk_z: 12,
             chunk: Chunk::empty_in_dimension(Dimension::Overworld, 12, 12),
-        },
-    ]);
+        }]);
     runtime.authority.tick();
 
     assert!(
-        runtime.authority.world_ref(Dimension::Overworld).unwrap().chunk_is_resident(12, 12),
+        runtime
+            .authority
+            .world_ref(Dimension::Overworld)
+            .unwrap()
+            .chunk_is_resident(12, 12),
         "Overworld (12, 12) should now be resident"
     );
 
@@ -2247,14 +2311,14 @@ fn worldgen_rejection_releases_capacity_and_unblocks_future_schedules() {
         assert!(w.failed_restore_chunks().contains(&(7, 7)));
     });
 
-    runtime.authority.queue_worldgen_results(vec![
-        crate::authority::PendingWorldgenColumn {
+    runtime
+        .authority
+        .queue_worldgen_results(vec![crate::authority::PendingWorldgenColumn {
             dimension: Dimension::Overworld,
             chunk_x: 7,
             chunk_z: 7,
             chunk: Chunk::empty_in_dimension(Dimension::Overworld, 7, 7),
-        },
-    ]);
+        }]);
     assert_eq!(runtime.authority.pending_worldgen_count(), 1);
     assert!(runtime.is_worldgen_pending_in_backlog(Dimension::Overworld, 7, 7));
 
@@ -2262,7 +2326,11 @@ fn worldgen_rejection_releases_capacity_and_unblocks_future_schedules() {
 
     assert_eq!(runtime.authority.pending_worldgen_count(), 0);
     assert!(!runtime.is_worldgen_pending_in_backlog(Dimension::Overworld, 7, 7));
-    assert!(!runtime.authority.world_ref(Dimension::Overworld).unwrap().chunk_is_resident(7, 7));
+    assert!(!runtime
+        .authority
+        .world_ref(Dimension::Overworld)
+        .unwrap()
+        .chunk_is_resident(7, 7));
 
     runtime.authority.with_world(Dimension::Overworld, |w| {
         w.ensure_chunk(8, 8);
@@ -2274,5 +2342,3 @@ fn worldgen_rejection_releases_capacity_and_unblocks_future_schedules() {
     let _ = runtime.shutdown();
     let _ = fs::remove_dir_all(world_dir);
 }
-
-

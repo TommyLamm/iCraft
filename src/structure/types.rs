@@ -1,7 +1,7 @@
 use crate::block_entity::BlockEntity;
+use crate::world::chunk_origin;
 use crate::world::BlockType;
 use serde::{Deserialize, Serialize};
-use crate::world::chunk_origin;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StructureId {

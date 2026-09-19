@@ -53,8 +53,6 @@ fn preflight_session(
     })
 }
 
-
-
 mod block_action;
 mod combat;
 mod command;
@@ -106,14 +104,8 @@ impl AuthorityCore {
             ctx.dimension,
             ctx.position,
             ctx.operator,
-        )
-        {
-            return self.reject_for_session(
-                id,
-                request_id,
-                reason,
-                Some(request.client_sequence),
-            );
+        ) {
+            return self.reject_for_session(id, request_id, reason, Some(request.client_sequence));
         }
 
         self.pending_session_revisions.clear();
@@ -164,9 +156,9 @@ impl AuthorityCore {
             GameplayOperation::Combat { target, action } => {
                 self.apply_authoritative_combat(&request, id, *target, *action)
             }
-            GameplayOperation::Sleep { x, y, z } => {
-                self.world_mut_expect(session_dimension).sleep_player(*x, *y, *z, id)
-            }
+            GameplayOperation::Sleep { x, y, z } => self
+                .world_mut_expect(session_dimension)
+                .sleep_player(*x, *y, *z, id),
             GameplayOperation::Trade {
                 villager_id,
                 offer_index,
@@ -195,7 +187,9 @@ impl AuthorityCore {
                 self.apply_transaction_operation(id, &request.operation)
             }
         };
-        let pending_world_mutations = self.world_mut_expect(session_dimension).take_pending_mutations();
+        let pending_world_mutations = self
+            .world_mut_expect(session_dimension)
+            .take_pending_mutations();
         self.pending_mutations.extend(pending_world_mutations);
         let response = match result {
             Ok(mutation) => {
@@ -204,7 +198,11 @@ impl AuthorityCore {
                 }
                 let revision = mutation
                     .map(|mutation| mutation.revision)
-                    .unwrap_or_else(|| self.world_mut_expect(session_dimension).revisions.allocate());
+                    .unwrap_or_else(|| {
+                        self.world_mut_expect(session_dimension)
+                            .revisions
+                            .allocate()
+                    });
                 GameplayResponse {
                     request_id,
                     server_sequence: revision,
@@ -316,8 +314,12 @@ impl AuthorityCore {
             return Err(RejectReason::Unauthorized);
         };
         let original = gameplay;
-        self.world_mut_expect(dimension)
-            .apply_trade(&mut gameplay, villager_id, offer_index, position)?;
+        self.world_mut_expect(dimension).apply_trade(
+            &mut gameplay,
+            villager_id,
+            offer_index,
+            position,
+        )?;
         if !preserves_brew_locks(&original, &gameplay) {
             return Err(RejectReason::InvalidState);
         }
@@ -366,7 +368,10 @@ pub(super) fn slot_wire_matches(slot: Option<SessionInventorySlot>, claimed: &It
     })
 }
 
-pub(super) fn find_hotbar_source(gameplay: &SessionGameplayState, claimed: &ItemWire) -> Option<usize> {
+pub(super) fn find_hotbar_source(
+    gameplay: &SessionGameplayState,
+    claimed: &ItemWire,
+) -> Option<usize> {
     let selected = usize::from(gameplay.selected_hotbar_slot.min(8));
     if slot_wire_matches(gameplay.inventory[selected], claimed) {
         return Some(selected);
@@ -374,7 +379,10 @@ pub(super) fn find_hotbar_source(gameplay: &SessionGameplayState, claimed: &Item
     (0..9).find(|&index| slot_wire_matches(gameplay.inventory[index], claimed))
 }
 
-pub(super) fn held_slot_index(gameplay: &SessionGameplayState, hand: u8) -> Result<u8, RejectReason> {
+pub(super) fn held_slot_index(
+    gameplay: &SessionGameplayState,
+    hand: u8,
+) -> Result<u8, RejectReason> {
     match hand {
         0 if gameplay.selected_hotbar_slot < 9 => Ok(gameplay.selected_hotbar_slot),
         1 => Ok((contract::SESSION_INVENTORY_SLOTS - 1) as u8),
@@ -382,7 +390,10 @@ pub(super) fn held_slot_index(gameplay: &SessionGameplayState, hand: u8) -> Resu
     }
 }
 
-pub(super) fn preserves_brew_locks(before: &SessionGameplayState, after: &SessionGameplayState) -> bool {
+pub(super) fn preserves_brew_locks(
+    before: &SessionGameplayState,
+    after: &SessionGameplayState,
+) -> bool {
     (0..contract::SESSION_INVENTORY_SLOTS).all(|index| {
         !transactions::brew_locks_slot(before, index as u8)
             || before.inventory[index] == after.inventory[index]

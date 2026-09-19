@@ -12,7 +12,7 @@ pub mod transactions;
 
 use crate::dimension::Dimension;
 use crate::game_rules::{Difficulty, WorldRules, WorldType};
-use crate::network::protocol::{GameplayRequest, GameplayResponse, PlayerId, RejectReason};
+use crate::network::protocol::{PlayerId, RejectReason};
 use crate::server_world::{ServerWorld, WorldgenMode};
 use crate::world::Chunk;
 use contract::{
@@ -220,9 +220,9 @@ impl AuthorityCore {
     }
 
     pub fn is_worldgen_pending(&self, dimension: Dimension, chunk_x: i32, chunk_z: i32) -> bool {
-        self.pending_worldgen
-            .iter()
-            .any(|col| col.dimension == dimension && col.chunk_x == chunk_x && col.chunk_z == chunk_z)
+        self.pending_worldgen.iter().any(|col| {
+            col.dimension == dimension && col.chunk_x == chunk_x && col.chunk_z == chunk_z
+        })
     }
 
     pub fn pending_worldgen_count(&self) -> usize {
@@ -254,12 +254,14 @@ impl AuthorityCore {
 
     /// Resident column / entity totals without allocating a dimension Vec.
     pub fn resident_metrics(&self) -> (usize, usize) {
-        self.worlds.values().fold((0, 0), |(chunks, entities), world| {
-            (
-                chunks.saturating_add(world.chunks.chunks.len()),
-                entities.saturating_add(world.entities.entities.len()),
-            )
-        })
+        self.worlds
+            .values()
+            .fold((0, 0), |(chunks, entities), world| {
+                (
+                    chunks.saturating_add(world.chunks.chunks.len()),
+                    entities.saturating_add(world.entities.entities.len()),
+                )
+            })
     }
 
     /// Read a loaded dimension. Prefer this over any ambient "active world".
@@ -634,4 +636,3 @@ impl AuthorityCore {
 
 #[cfg(test)]
 mod tests;
-

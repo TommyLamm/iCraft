@@ -112,11 +112,8 @@ impl Chunk {
     pub fn new_with_seed(chunk_x: i32, chunk_z: i32, world_seed: u32) -> Self {
         let height = crate::dimension::WorldHeight::OVERWORLD;
         let min_y = height.min_y();
-        let mut chunk = Self::empty_in_dimension(
-            crate::dimension::Dimension::Overworld,
-            chunk_x,
-            chunk_z,
-        );
+        let mut chunk =
+            Self::empty_in_dimension(crate::dimension::Dimension::Overworld, chunk_x, chunk_z);
 
         let ctx = crate::worldgen::WorldGenContext::new(world_seed);
 
@@ -158,9 +155,8 @@ impl Chunk {
         }
 
         ctx.ore.place_ores(&mut chunk, chunk_x, chunk_z);
-        crate::worldgen::feature::FeaturePlacer::new(world_seed).place_features(
-            &ctx, &mut chunk, chunk_x, chunk_z,
-        );
+        crate::worldgen::feature::FeaturePlacer::new(world_seed)
+            .place_features(&ctx, &mut chunk, chunk_x, chunk_z);
 
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
@@ -1051,12 +1047,16 @@ mod tests {
         let mut ref_random_tick = Vec::new();
 
         for (sec_idx, sec_opt) in chunk.sections.iter().enumerate() {
-            let Some(sec) = sec_opt else { continue; };
+            let Some(sec) = sec_opt else {
+                continue;
+            };
             let sec_y = chunk.min_section_y + sec_idx as i8;
             if sec.random_tick_count() > 0 {
                 ref_random_tick.push(sec_y);
             }
-            if sec.non_air_count() == 0 { continue; };
+            if sec.non_air_count() == 0 {
+                continue;
+            };
             for ly in 0..SECTION_SIZE {
                 let wy = section_and_local_y_to_world_y(sec_y, ly as u8);
                 for z in 0..CHUNK_DEPTH {

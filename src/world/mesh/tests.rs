@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::chunk_render::LodLevel;
+use crate::world::section::NO_HEIGHT;
 use std::collections::HashSet;
 use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -65,10 +66,7 @@ fn end_portal_frames_use_distinct_top_side_and_filled_top_tiles() {
     assert_eq!(BlockType::EndPortalFrame.get_face_tex_index(4), (15, 15));
     let mut filled = crate::world::BlockState::default();
     filled.is_open = true;
-    assert_eq!(
-        BlockType::EndPortalFrame.face_tex_for(filled, 4),
-        (6, 4)
-    );
+    assert_eq!(BlockType::EndPortalFrame.face_tex_for(filled, 4), (6, 4));
 }
 
 fn empty_test_chunk() -> Chunk {
@@ -115,8 +113,8 @@ fn production_mesh_entries_apply_selected_tiles_and_keep_default_fallback() {
     chunk.set_block_local(9, 64, 8, BlockType::Dirt);
     let key = SectionKey::new(0, 4, 0);
 
-    let bundle_default = chunk
-        .generate_section_mesh_bundle(key, 1, 1, |x, y, z| test_chunk_lookup(&chunk, x, y, z));
+    let bundle_default =
+        chunk.generate_section_mesh_bundle(key, 1, 1, |x, y, z| test_chunk_lookup(&chunk, x, y, z));
     let default_stone_tile = BlockType::Stone.get_face_tex_index(0);
     let default_dirt_tile = BlockType::Dirt.get_face_tex_index(0);
     let default_vertices = &bundle_default.levels[0].opaque.vertices;
@@ -261,8 +259,8 @@ fn debug_negative_section_mesh_bounds() {
     let mut chunk = empty_test_chunk();
     chunk.set_block_local(8, -32, 8, BlockType::Stone);
     let key = SectionKey::new(0, -2, 0);
-    let bundle = chunk
-        .generate_section_mesh_bundle(key, 1, 1, |x, y, z| test_chunk_lookup(&chunk, x, y, z));
+    let bundle =
+        chunk.generate_section_mesh_bundle(key, 1, 1, |x, y, z| test_chunk_lookup(&chunk, x, y, z));
     let (min_y, _max_y, vertex_count) = match bundle.bounds {
         Some(bounds) => (
             bounds.min.y,
@@ -282,8 +280,7 @@ fn debug_negative_section_mesh_bounds() {
 fn section_halo_occludes_boundary_neighbor() {
     let key = SectionKey::new(0, 0, 0);
     let snapshot = SectionHaloSnapshot::from_chunk(key, |wx, wy, wz| {
-        let in_section =
-            (0..16).contains(&wx) && (0..16).contains(&wy) && (0..16).contains(&wz);
+        let in_section = (0..16).contains(&wx) && (0..16).contains(&wy) && (0..16).contains(&wz);
         let neighbor_block = (wx, wy, wz) == (16, 0, 0);
         MeshVoxel {
             block: if in_section || neighbor_block {
@@ -319,8 +316,6 @@ fn mesh_voxel_render_inputs_flow_through_core() {
     assert_ne!(voxel.raw_fluid & 8, 0);
 }
 
-
-
 fn mesh_chunk_l0_with_lookup<F>(
     chunk: &Chunk,
     get_block_at: F,
@@ -335,34 +330,36 @@ where
         min_y,
         chunk.chunk_z * CHUNK_DEPTH as i32,
     ];
-    Chunk::mesh_l0_volume(origin, [CHUNK_WIDTH, total_height, CHUNK_DEPTH], |x, y, z| {
-        let (lookup_block, sky, block_light, level, falling) = get_block_at(x, y, z);
-        let in_chunk = x.div_euclid(CHUNK_WIDTH as i32) == chunk.chunk_x
-            && z.div_euclid(CHUNK_DEPTH as i32) == chunk.chunk_z
-            && y >= min_y
-            && y < min_y + total_height as i32;
-        let block = if in_chunk {
-            chunk.get_block_local(
-                x.rem_euclid(CHUNK_WIDTH as i32) as usize,
-                y,
-                z.rem_euclid(CHUNK_DEPTH as i32) as usize,
-            )
-        } else {
-            lookup_block
-        };
-        MeshVoxel {
-            block,
-            state: chunk.get_block_state(x - origin[0], y, z - origin[2]),
-            sky,
-            block_light,
-            raw_fluid: level | if falling { 8 } else { 0 },
-        }
-    })
+    Chunk::mesh_l0_volume(
+        origin,
+        [CHUNK_WIDTH, total_height, CHUNK_DEPTH],
+        |x, y, z| {
+            let (lookup_block, sky, block_light, level, falling) = get_block_at(x, y, z);
+            let in_chunk = x.div_euclid(CHUNK_WIDTH as i32) == chunk.chunk_x
+                && z.div_euclid(CHUNK_DEPTH as i32) == chunk.chunk_z
+                && y >= min_y
+                && y < min_y + total_height as i32;
+            let block = if in_chunk {
+                chunk.get_block_local(
+                    x.rem_euclid(CHUNK_WIDTH as i32) as usize,
+                    y,
+                    z.rem_euclid(CHUNK_DEPTH as i32) as usize,
+                )
+            } else {
+                lookup_block
+            };
+            MeshVoxel {
+                block,
+                state: chunk.get_block_state(x - origin[0], y, z - origin[2]),
+                sky,
+                block_light,
+                raw_fluid: level | if falling { 8 } else { 0 },
+            }
+        },
+    )
 }
 
-fn mesh_chunk_l0(
-    chunk: &Chunk,
-) -> (Vec<TerrainVertex>, Vec<u32>, Vec<TerrainVertex>, Vec<u32>) {
+fn mesh_chunk_l0(chunk: &Chunk) -> (Vec<TerrainVertex>, Vec<u32>, Vec<TerrainVertex>, Vec<u32>) {
     mesh_chunk_l0_with_lookup(chunk, |x, y, z| test_chunk_lookup(chunk, x, y, z))
 }
 
@@ -372,10 +369,7 @@ fn test_chunk_lookup(
     world_y: i32,
     world_z: i32,
 ) -> (BlockType, u8, u8, u8, bool) {
-    if world_x < 0
-        || world_x >= CHUNK_WIDTH as i32
-        || world_z < 0
-        || world_z >= CHUNK_DEPTH as i32
+    if world_x < 0 || world_x >= CHUNK_WIDTH as i32 || world_z < 0 || world_z >= CHUNK_DEPTH as i32
     {
         return (BlockType::Air, 15, 0, 0, false);
     }
@@ -592,8 +586,7 @@ fn greedy_meshing_does_not_merge_different_light_or_material() {
         light_chunk.heightmap[x][8] = 1;
     }
     light_chunk.set_sky_light(9, 2, 8, 14);
-    let (light_vertices, _, _, _) =
-        mesh_chunk_l0(&light_chunk);
+    let (light_vertices, _, _, _) = mesh_chunk_l0(&light_chunk);
     let light_top_quads = light_vertices
         .chunks_exact(4)
         .filter(|quad| quad.iter().all(|vertex| vertex.local_position()[1] == 2.0))
@@ -605,8 +598,7 @@ fn greedy_meshing_does_not_merge_different_light_or_material() {
     material_chunk.set_block_local(9, 1, 8, BlockType::Dirt);
     material_chunk.heightmap[8][8] = 1;
     material_chunk.heightmap[9][8] = 1;
-    let (material_vertices, _, _, _) =
-        mesh_chunk_l0(&material_chunk);
+    let (material_vertices, _, _, _) = mesh_chunk_l0(&material_chunk);
     let material_top_quads = material_vertices
         .chunks_exact(4)
         .filter(|quad| quad.iter().all(|vertex| vertex.local_position()[1] == 2.0))
@@ -640,7 +632,10 @@ fn section_halo_lod_coarsens_varied_terrain() {
         LodLevel::MASK_ALL,
     );
     assert!(!flat_bundle.levels[0].opaque.indices.is_empty());
-    assert!(!flat_bundle.levels[1].opaque.indices.is_empty() || !flat_bundle.levels[2].opaque.indices.is_empty());
+    assert!(
+        !flat_bundle.levels[1].opaque.indices.is_empty()
+            || !flat_bundle.levels[2].opaque.indices.is_empty()
+    );
 
     let mut varied = empty_test_chunk();
     for x in 0..CHUNK_WIDTH {
@@ -711,8 +706,7 @@ fn cross_model_blocks_generate_x_mesh() {
         chunk.set_block_local(8, 64, 8, plant);
         chunk.heightmap[8][8] = 64;
 
-        let (vertices, indices, transparent_vertices, transparent_indices) =
-            mesh_chunk_l0(&chunk);
+        let (vertices, indices, transparent_vertices, transparent_indices) = mesh_chunk_l0(&chunk);
 
         assert_eq!(
             vertices.len(),
@@ -824,8 +818,7 @@ fn trapdoor_mesh_generation_open_and_closed_bounds() {
         ..BlockState::default()
     };
     chunk.set_block_state(8, 1, 8, open_state.encode());
-    let (opaque_v2, _, _, _) =
-        mesh_chunk_l0(&chunk);
+    let (opaque_v2, _, _, _) = mesh_chunk_l0(&chunk);
     let min_z = opaque_v2
         .iter()
         .map(|v| v.pos[2] as f32 / 32.0)
@@ -1048,8 +1041,7 @@ fn end_portal_frame_and_surface_use_lower_minecraft_heights() {
         assert!((max_y - (1.0 + END_PORTAL_FRAME_HEIGHT)).abs() < 1e-4);
     }
 
-    let (opaque_v, opaque_i, trans_v, trans_i) =
-        single_torch_mesh(BlockType::EndPortal, 15, 15);
+    let (opaque_v, opaque_i, trans_v, trans_i) = single_torch_mesh(BlockType::EndPortal, 15, 15);
     assert!(opaque_v.is_empty() && opaque_i.is_empty());
     assert_eq!(trans_v.len(), 8);
     assert_eq!(trans_i.len(), 12);

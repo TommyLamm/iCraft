@@ -1,4 +1,4 @@
-use crate::chunk_manager::{WorldColumns, ColumnNeighborhood};
+use crate::chunk_manager::{ColumnNeighborhood, WorldColumns};
 use crate::physics::AABB;
 use glam::Vec3;
 

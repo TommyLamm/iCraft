@@ -16,7 +16,13 @@ pub fn rejected_place(
     client_sequence: u64,
     client_revision: u64,
 ) -> GameplayRequest {
-    rejected_place_with_held(session_id, request_id, client_sequence, client_revision, None)
+    rejected_place_with_held(
+        session_id,
+        request_id,
+        client_sequence,
+        client_revision,
+        None,
+    )
 }
 
 /// Place DiamondOre that authority rejects (wrong/empty held vs block wire).

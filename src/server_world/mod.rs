@@ -23,7 +23,7 @@ use crate::network::protocol::{
 };
 use crate::redstone::{RedstoneAction, RedstoneSystem};
 use crate::save::{ChunkSaveData, EntitySaveData, MutationRevisionIndex};
-use crate::world::{BlockType, chunk_origin, chunk_xz};
+use crate::world::{chunk_origin, chunk_xz, BlockType};
 use glam::Vec3;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -108,7 +108,6 @@ pub struct ContainerClosure {
     pub position: (i32, i32, i32),
 }
 
-
 pub use columns::WorldgenApplyOutcome;
 mod columns;
 mod containers;
@@ -118,4 +117,3 @@ mod tick;
 
 #[cfg(test)]
 mod tests;
-

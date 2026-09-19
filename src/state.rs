@@ -64,42 +64,39 @@ mod inventory_ui;
 #[path = "presentation/authority_projection.rs"]
 mod authority_projection;
 
-
-
-#[cfg(test)]
-#[path = "presentation/tests/remote_sync_tests.rs"]
-mod remote_sync_tests;
-#[cfg(test)]
-#[path = "presentation/tests/camera_input_tests.rs"]
-mod camera_input_tests;
-#[cfg(test)]
-#[path = "presentation/tests/creative_flight_input_tests.rs"]
-mod creative_flight_input_tests;
-#[cfg(test)]
-#[path = "presentation/tests/sprint_policy_tests.rs"]
-mod sprint_policy_tests;
 #[cfg(test)]
 #[path = "presentation/tests/authority_policy_tests.rs"]
 mod authority_policy_tests;
 #[cfg(test)]
-#[path = "presentation/tests/gpu_timestamp_state_tests.rs"]
-mod gpu_timestamp_state_tests;
+#[path = "presentation/tests/authority_projection_tests.rs"]
+mod authority_projection_tests;
+#[cfg(test)]
+#[path = "presentation/tests/camera_input_tests.rs"]
+mod camera_input_tests;
 #[cfg(test)]
 #[path = "presentation/tests/camera_perspective_tests.rs"]
 mod camera_perspective_tests;
 #[cfg(test)]
-#[path = "presentation/tests/render_region_lifecycle_tests.rs"]
-mod render_region_lifecycle_tests;
+#[path = "presentation/tests/creative_flight_input_tests.rs"]
+mod creative_flight_input_tests;
 #[cfg(test)]
 #[path = "presentation/tests/debug_tests.rs"]
 mod debug_tests;
 #[cfg(test)]
+#[path = "presentation/tests/gpu_timestamp_state_tests.rs"]
+mod gpu_timestamp_state_tests;
+#[cfg(test)]
 #[path = "presentation/tests/reach_tests.rs"]
 mod reach_tests;
 #[cfg(test)]
-#[path = "presentation/tests/authority_projection_tests.rs"]
-mod authority_projection_tests;
-
+#[path = "presentation/tests/remote_sync_tests.rs"]
+mod remote_sync_tests;
+#[cfg(test)]
+#[path = "presentation/tests/render_region_lifecycle_tests.rs"]
+mod render_region_lifecycle_tests;
+#[cfg(test)]
+#[path = "presentation/tests/sprint_policy_tests.rs"]
+mod sprint_policy_tests;
 
 use embedded_runtime::EmbeddedRuntimeBridge;
 
@@ -305,7 +302,6 @@ fn apply_synced_block_change(
     }
     Some(chunk_manager.drain_section_mesh_invalidations())
 }
-
 
 const MAX_CHUNK_MESH_JOBS: usize = 4;
 
@@ -521,7 +517,11 @@ impl State {
             return;
         }
         let active_chunks = region.active_chunks;
-        let mut rebuilt = RenderRegion::new(self.device.as_ref().unwrap(), &self.region_bind_group_layout, coord);
+        let mut rebuilt = RenderRegion::new(
+            self.device.as_ref().unwrap(),
+            &self.region_bind_group_layout,
+            coord,
+        );
         rebuilt.active_chunks = active_chunks;
         self.render_regions.insert(coord, rebuilt);
     }
@@ -738,7 +738,6 @@ fn cursor_position_to_ndc(x: f64, y: f64, width: u32, height: u32) -> [f32; 2] {
     ]
 }
 
-
 #[derive(Debug, Default)]
 struct DoubleTapTracker {
     last_tap: Option<Instant>,
@@ -794,9 +793,6 @@ fn sprint_exhaustion_amount(
         0.0
     }
 }
-
-
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StationKind {
@@ -915,7 +911,6 @@ struct GpuTimestampReadbackSlot {
 pub const fn gpu_timestamp_capability(timestamp_query: bool, inside_passes: bool) -> bool {
     timestamp_query && inside_passes
 }
-
 
 fn apply_entity_wire_state(
     entity: &mut crate::entity::Entity,
@@ -1077,7 +1072,6 @@ fn perspective_camera_transform(
         CameraPerspective::ThirdPersonFront => (forward * 4.0, yaw + std::f32::consts::PI, -pitch),
     }
 }
-
 
 pub struct State {
     pub window: Arc<Window>,
@@ -1324,9 +1318,8 @@ pub struct State {
     client_chunk_revisions: std::collections::HashMap<(crate::dimension::Dimension, i32, i32), u64>,
 }
 
-
-use inventory_ui::*;
 pub use inventory_ui::SlotType;
+use inventory_ui::*;
 
 impl State {
     fn sync_translation_catalog(&mut self) {
@@ -1394,10 +1387,7 @@ impl State {
                 .device
                 .take()
                 .expect("presentation device already taken"),
-            queue: self
-                .queue
-                .take()
-                .expect("presentation queue already taken"),
+            queue: self.queue.take().expect("presentation queue already taken"),
             config: self.config.clone(),
             size: self.size,
             supported_present_modes: self.supported_present_modes.clone(),
@@ -1405,7 +1395,6 @@ impl State {
             gpu_timestamps_inside_passes: self.gpu_timestamps_inside_passes,
         }
     }
-
 
     pub async fn new(
         window: Arc<Window>,
@@ -1844,7 +1833,8 @@ impl State {
         // Presentation chunk maps start empty; terrain arrives from ServerRuntime
         // projection or join `ChunkData`, then `update_chunks`.
         let render_distance = settings.render_distance;
-        let chunk_manager = PresentationChunks::new_in_dimension(render_distance, current_dimension);
+        let chunk_manager =
+            PresentationChunks::new_in_dimension(render_distance, current_dimension);
         let chunk_meshes = std::collections::HashMap::new();
         let (terrain_worker_tx, terrain_worker_rx) = std::sync::mpsc::channel();
         let chunk_lifetimes = std::collections::HashMap::new();
@@ -3140,13 +3130,9 @@ impl State {
             }
             let coord = (identity.key.cx, identity.key.cz);
             let region_coord = crate::chunk_render::chunk_to_region_coord(coord.0, coord.1);
-            let register_resident_chunk =
-                self.chunk_meshes.get(&coord).is_some_and(|mesh| {
-                    !chunk_mesh_is_registered_with_region(
-                        mesh,
-                        self.render_regions.get(&region_coord),
-                    )
-                });
+            let register_resident_chunk = self.chunk_meshes.get(&coord).is_some_and(|mesh| {
+                !chunk_mesh_is_registered_with_region(mesh, self.render_regions.get(&region_coord))
+            });
             let Some(mesh) = self.chunk_meshes.get_mut(&coord) else {
                 continue;
             };
@@ -3223,10 +3209,7 @@ impl State {
                 &model_registry,
                 lod_mask,
             );
-            let _ = sender.send(SectionMeshResult {
-                generation,
-                bundle,
-            });
+            let _ = sender.send(SectionMeshResult { generation, bundle });
         });
         true
     }
@@ -4273,8 +4256,11 @@ impl State {
             0,
             bytemuck::cast_slice(&vertices),
         );
-        self.queue.as_ref().unwrap()
-            .write_buffer(&self.crack_index_buffer, 0, bytemuck::cast_slice(&indices));
+        self.queue.as_ref().unwrap().write_buffer(
+            &self.crack_index_buffer,
+            0,
+            bytemuck::cast_slice(&indices),
+        );
 
         Some((
             vertices.len() as u32,
@@ -4895,7 +4881,6 @@ impl State {
         }
     }
 
-
     fn submit_inventory_container_click(&mut self, slot: usize, is_left: bool) {
         if let Some(position) = self.container_target {
             let _ = self.submit_local_authority_operation(
@@ -5136,7 +5121,8 @@ impl State {
                 .expect("presentation surface")
                 .configure(self.device.as_ref().unwrap(), &self.config);
             // Recreate depth texture on resize
-            self.depth_view = Self::create_depth_texture(self.device.as_ref().unwrap(), &self.config);
+            self.depth_view =
+                Self::create_depth_texture(self.device.as_ref().unwrap(), &self.config);
         }
     }
 
@@ -5222,11 +5208,7 @@ impl State {
             drop(range);
             slot.buffer.unmap();
             slot.mapping.store(false, Ordering::Release);
-            let consumed = slot
-                .status
-                .lock()
-                .unwrap()
-                .consume(submission_tag);
+            let consumed = slot.status.lock().unwrap().consume(submission_tag);
             debug_assert!(consumed, "mapped timestamp slot must be consumed once");
         }
 
@@ -5883,7 +5865,6 @@ fn add_char_lines_with_source(
     }
 }
 
-
 fn add_string_lines_with_source(
     font_source: &crate::resources::FontSource,
     s: &str,
@@ -5910,7 +5891,6 @@ fn add_string_lines_with_source(
         current_x += char_w + spacing;
     }
 }
-
 
 /// Built-in compatibility helper used by unit tests and non-State callers.
 /// State's render paths install their selected `FontSource` through the local
@@ -6006,7 +5986,3 @@ fn biome_debug_name(biome: Biome) -> &'static str {
 fn debug_chunk_coordinate(position: f32, chunk_size: usize) -> i32 {
     (position.floor() as i32).div_euclid(chunk_size as i32)
 }
-
-
-
-

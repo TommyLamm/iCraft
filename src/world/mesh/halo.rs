@@ -117,4 +117,3 @@ pub(super) const BLOCK_FACES: [([i32; 3], [FaceCorner; 4]); 6] = [
         ],
     ),
 ];
-

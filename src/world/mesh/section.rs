@@ -1,15 +1,6 @@
 use super::*;
 
 impl Chunk {
-
-    pub(super) fn mesh_section_lod_from_halo(
-        key: SectionKey,
-        halo: &SectionHaloSnapshot,
-        step: usize,
-    ) -> ChunkLodMeshData {
-        Self::mesh_section_lod_from_halo_with_registry(key, halo, step, None)
-    }
-
     pub(super) fn mesh_section_lod_from_halo_with_registry(
         key: SectionKey,
         halo: &SectionHaloSnapshot,

@@ -254,7 +254,8 @@ fn validate_identity_set(key: &str, names: &HashSet<String>) -> Result<(), Serve
 }
 
 fn parse_bool(key: &str, value: &str) -> Result<bool, ServerConfigError> {
-    crate::game_rules::parse_bool_flag(value).ok_or_else(|| invalid(key, value, "expected true or false"))
+    crate::game_rules::parse_bool_flag(value)
+        .ok_or_else(|| invalid(key, value, "expected true or false"))
 }
 
 fn parse_range<T>(

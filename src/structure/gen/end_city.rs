@@ -1,7 +1,5 @@
 use crate::loot::LootTableId;
-use crate::structure::gen::helpers::{
-    finish_start, fill_box, hollow_box, place_loot_chest,
-};
+use crate::structure::gen::helpers::{fill_box, finish_start, hollow_box, place_loot_chest};
 use crate::structure::types::*;
 use crate::world::BlockType;
 

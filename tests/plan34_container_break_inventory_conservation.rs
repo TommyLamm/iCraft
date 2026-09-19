@@ -14,7 +14,10 @@ use icraft::enchantment::Enchantment;
 use icraft::entity::EntityType;
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::client::ClientToGame;
-use icraft::network::protocol::{BlockActionKind, GameplayOperation, GameplayOutcome, GameplayRequest, ItemWire, SessionSlotWire, Packet};
+use icraft::network::protocol::{
+    BlockActionKind, GameplayOperation, GameplayOutcome, GameplayRequest, ItemWire, Packet,
+    SessionSlotWire,
+};
 use icraft::redstone::Direction;
 use icraft::server_runtime::{
     EmbeddedRuntimeOptions, LocalSessionProfile, ServerProperties, ServerRuntime, TransportMode,
@@ -149,8 +152,12 @@ fn core_with_pick() -> AuthorityCore {
     let pick = ItemStack::new(Item::StonePickaxe, 1);
     gameplay.inventory[0] = Some(tcp_slot(pick));
     assert!(core.set_session_gameplay(SESSION_ID, gameplay));
-    core.world_mut(Dimension::Overworld).unwrap().ensure_chunk(0, 0);
-    core.world_mut(Dimension::Overworld).unwrap().ensure_chunk(1, 0);
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
+        .ensure_chunk(0, 0);
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
+        .ensure_chunk(1, 0);
     core
 }
 
@@ -255,9 +262,8 @@ fn matching_drop_events(client: &TcpClient, expected: ItemStack) -> Vec<(u64, It
     let mut matching = BTreeMap::new();
     for event in client.events() {
         let state = match event {
-            ClientToGame::Packet(Packet::EntitySpawn { state, .. }) | ClientToGame::Packet(Packet::EntityState { state, .. }) => {
-                state
-            }
+            ClientToGame::Packet(Packet::EntitySpawn { state, .. })
+            | ClientToGame::Packet(Packet::EntityState { state, .. }) => state,
             _ => continue,
         };
         if state.item.and_then(|item| item.to_stack()) == Some(expected) {
@@ -316,16 +322,26 @@ fn run_tcp_container_vector(label: &str, listen: bool) {
         rich_stack(ContainerKind::Chest, 1),
     ];
     let axe = ItemStack::new(Item::StoneAxe, 1);
-    runtime.authority.world_mut(Dimension::Overworld).unwrap().ensure_chunk(0, 0);
-    runtime.authority.world_mut(Dimension::Overworld).unwrap().ensure_chunk(1, 0);
     runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
+        .ensure_chunk(0, 0);
+    runtime
+        .authority
+        .world_mut(Dimension::Overworld)
+        .unwrap()
+        .ensure_chunk(1, 0);
+    runtime
+        .authority
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(TARGET.0, TARGET.1, TARGET.2, BlockType::Chest, 0)
         .expect("seed TCP chest block");
     runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .chunks
         .set_block_entity(
             TARGET.0,
@@ -569,15 +585,14 @@ fn stale_state_failure_preserves_container_and_session_resources() {
         rich_stack(ContainerKind::Chest, 1),
     ];
     let source_entity = ContainerKind::Chest.entity(stacks);
-    core.world_mut(Dimension::Overworld).unwrap()
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(TARGET.0, TARGET.1, TARGET.2, BlockType::Chest, 0)
         .expect("seed atomicity chest");
-    core.world_mut(Dimension::Overworld).unwrap().chunks.set_block_entity(
-        TARGET.0,
-        TARGET.1,
-        TARGET.2,
-        Some(source_entity.clone()),
-    );
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
+        .chunks
+        .set_block_entity(TARGET.0, TARGET.1, TARGET.2, Some(source_entity.clone()));
     let axe = ItemStack::new(Item::StoneAxe, 1);
     let mut gameplay = core.session(SESSION_ID).unwrap().gameplay;
     gameplay.inventory[0] = Some(tcp_slot(axe));
@@ -591,17 +606,20 @@ fn stale_state_failure_preserves_container_and_session_resources() {
     // A state change invalidates the latched mining progress while preserving
     // the chest block entity. The next fixed tick must clear only that stale
     // progress, never run the Plan34 commit.
-    core.world_mut(Dimension::Overworld).unwrap()
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
         .chunks
         .set_block_state(TARGET.0, TARGET.1, TARGET.2, 1);
     let _ = core.tick();
     let after_failure = core.session(SESSION_ID).unwrap().gameplay;
     assert_eq!(
-        core.world(Dimension::Overworld).get_block(TARGET.0, TARGET.1, TARGET.2),
+        core.world(Dimension::Overworld)
+            .get_block(TARGET.0, TARGET.1, TARGET.2),
         BlockType::Chest
     );
     assert_eq!(
-        core.world(Dimension::Overworld).get_block_entity(TARGET.0, TARGET.1, TARGET.2),
+        core.world(Dimension::Overworld)
+            .get_block_entity(TARGET.0, TARGET.1, TARGET.2),
         Some(&source_entity)
     );
     assert!(dropped_entities(&core).is_empty());
@@ -640,10 +658,12 @@ fn double_chest_break_only_drops_target_half() {
         ..BlockState::default()
     }
     .encode();
-    core.world_mut(Dimension::Overworld).unwrap()
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(TARGET.0, TARGET.1, TARGET.2, BlockType::Chest, left_state)
         .expect("seed double chest target");
-    core.world_mut(Dimension::Overworld).unwrap()
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(
             partner.0,
             partner.1,
@@ -652,18 +672,19 @@ fn double_chest_break_only_drops_target_half() {
             right_state,
         )
         .expect("seed double chest partner");
-    core.world_mut(Dimension::Overworld).unwrap().chunks.set_block_entity(
-        TARGET.0,
-        TARGET.1,
-        TARGET.2,
-        Some(target_entity.clone()),
-    );
-    core.world_mut(Dimension::Overworld).unwrap().chunks.set_block_entity(
-        partner.0,
-        partner.1,
-        partner.2,
-        Some(partner_entity.clone()),
-    );
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
+        .chunks
+        .set_block_entity(TARGET.0, TARGET.1, TARGET.2, Some(target_entity.clone()));
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
+        .chunks
+        .set_block_entity(
+            partner.0,
+            partner.1,
+            partner.2,
+            Some(partner_entity.clone()),
+        );
     let axe = ItemStack::new(Item::StoneAxe, 1);
     let mut gameplay = core.session(SESSION_ID).unwrap().gameplay;
     gameplay.inventory[0] = Some(tcp_slot(axe));
@@ -675,16 +696,22 @@ fn double_chest_break_only_drops_target_half() {
     ));
     for _ in 0..600 {
         let _ = core.tick();
-        if core.world(Dimension::Overworld).get_block(TARGET.0, TARGET.1, TARGET.2) == BlockType::Air {
+        if core
+            .world(Dimension::Overworld)
+            .get_block(TARGET.0, TARGET.1, TARGET.2)
+            == BlockType::Air
+        {
             break;
         }
     }
     assert_eq!(
-        core.world(Dimension::Overworld).get_block(TARGET.0, TARGET.1, TARGET.2),
+        core.world(Dimension::Overworld)
+            .get_block(TARGET.0, TARGET.1, TARGET.2),
         BlockType::Air
     );
     assert_eq!(
-        core.world(Dimension::Overworld).get_block(partner.0, partner.1, partner.2),
+        core.world(Dimension::Overworld)
+            .get_block(partner.0, partner.1, partner.2),
         BlockType::Chest
     );
     assert!(core
@@ -733,15 +760,14 @@ fn authority_matrix_conserves_two_noncontiguous_metadata_stacks_and_retries() {
         let tool_stack = ItemStack::new(tool, 1);
         gameplay.inventory[0] = Some(tcp_slot(tool_stack));
         assert!(core.set_session_gameplay(SESSION_ID, gameplay));
-        core.world_mut(Dimension::Overworld).unwrap()
+        core.world_mut(Dimension::Overworld)
+            .unwrap()
             .set_block(TARGET.0, TARGET.1, TARGET.2, kind.block(), 0)
             .expect("seed container block");
-        core.world_mut(Dimension::Overworld).unwrap().chunks.set_block_entity(
-            TARGET.0,
-            TARGET.1,
-            TARGET.2,
-            Some(kind.entity(stacks)),
-        );
+        core.world_mut(Dimension::Overworld)
+            .unwrap()
+            .chunks
+            .set_block_entity(TARGET.0, TARGET.1, TARGET.2, Some(kind.entity(stacks)));
         let request = break_request(&core, next_request_id, next_sequence, tool);
         let accepted = core.submit_request(request.clone());
         assert!(
@@ -752,7 +778,9 @@ fn authority_matrix_conserves_two_noncontiguous_metadata_stacks_and_retries() {
         assert_eq!(core.submit_request(request), accepted, "cached duplicate");
         let before_stale = dropped_stacks(&core).len();
         let mut stale = break_request(&core, next_request_id + 10_000, next_sequence + 1, tool);
-        stale.client_revision = core.current_revision(Dimension::Overworld).saturating_sub(1);
+        stale.client_revision = core
+            .current_revision(Dimension::Overworld)
+            .saturating_sub(1);
         assert!(matches!(
             core.submit_request(stale).outcome,
             GameplayOutcome::Rejected { .. }
@@ -761,12 +789,17 @@ fn authority_matrix_conserves_two_noncontiguous_metadata_stacks_and_retries() {
 
         for _ in 0..600 {
             let _ = core.tick();
-            if core.world(Dimension::Overworld).get_block(TARGET.0, TARGET.1, TARGET.2) == BlockType::Air {
+            if core
+                .world(Dimension::Overworld)
+                .get_block(TARGET.0, TARGET.1, TARGET.2)
+                == BlockType::Air
+            {
                 break;
             }
         }
         assert_eq!(
-            core.world(Dimension::Overworld).get_block(TARGET.0, TARGET.1, TARGET.2),
+            core.world(Dimension::Overworld)
+                .get_block(TARGET.0, TARGET.1, TARGET.2),
             BlockType::Air,
             "{kind:?} committed block break"
         );

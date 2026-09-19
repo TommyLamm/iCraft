@@ -81,9 +81,7 @@ impl PresentationTopology {
                     PresentationInventoryAction::LocalMutate
                 }
             }
-            PresentationInventoryTarget::Workstation => {
-                PresentationInventoryAction::Reject
-            }
+            PresentationInventoryTarget::Workstation => PresentationInventoryAction::Reject,
         }
     }
 

@@ -156,10 +156,7 @@ impl DenseColumnGrid {
                 let cz = self.origin_cz + dz as i32;
                 let ndx = cx - new_origin_cx;
                 let ndz = cz - new_origin_cz;
-                if ndx >= 0
-                    && ndz >= 0
-                    && (ndx as usize) < self.side
-                    && (ndz as usize) < self.side
+                if ndx >= 0 && ndz >= 0 && (ndx as usize) < self.side && (ndz as usize) < self.side
                 {
                     next[ndz as usize * self.side + ndx as usize] = Some(chunk);
                     next_occupied += 1;
@@ -171,11 +168,7 @@ impl DenseColumnGrid {
         for (key, chunk) in self.overflow.drain() {
             let ndx = key.0 - new_origin_cx;
             let ndz = key.1 - new_origin_cz;
-            if ndx >= 0
-                && ndz >= 0
-                && (ndx as usize) < self.side
-                && (ndz as usize) < self.side
-            {
+            if ndx >= 0 && ndz >= 0 && (ndx as usize) < self.side && (ndz as usize) < self.side {
                 let index = ndz as usize * self.side + ndx as usize;
                 if next[index].is_none() {
                     next_occupied += 1;
@@ -279,9 +272,12 @@ impl DenseColumnGrid {
     pub fn iter(&self) -> impl Iterator<Item = ((i32, i32), &Chunk)> {
         let window = (0..self.side).flat_map(move |dz| {
             (0..self.side).filter_map(move |dx| {
-                self.slots[dz * self.side + dx]
-                    .as_ref()
-                    .map(|chunk| ((self.origin_cx + dx as i32, self.origin_cz + dz as i32), chunk))
+                self.slots[dz * self.side + dx].as_ref().map(|chunk| {
+                    (
+                        (self.origin_cx + dx as i32, self.origin_cz + dz as i32),
+                        chunk,
+                    )
+                })
             })
         });
         let mut overflow: Vec<_> = self.overflow.iter().map(|(&k, v)| (k, v)).collect();
@@ -345,7 +341,10 @@ mod tests {
         grid.insert((1, 0), Chunk::empty(1, 0));
         grid.insert((-1, -1), Chunk::empty(-1, -1));
         grid.insert((0, 0), Chunk::empty(0, 0));
-        assert_eq!(grid.keys().collect::<Vec<_>>(), vec![(-1, -1), (0, 0), (1, 0)]);
+        assert_eq!(
+            grid.keys().collect::<Vec<_>>(),
+            vec![(-1, -1), (0, 0), (1, 0)]
+        );
     }
 
     #[test]
@@ -364,7 +363,10 @@ mod tests {
         grid.insert((3, 0), Chunk::empty(3, 0));
         grid.recenter(10, 0);
         assert!(!grid.in_window(0, 0));
-        assert!(grid.contains_key(&(0, 0)), "outside columns stay in overflow");
+        assert!(
+            grid.contains_key(&(0, 0)),
+            "outside columns stay in overflow"
+        );
         grid.insert((10, 0), Chunk::empty(10, 0));
         assert!(grid.contains_key(&(10, 0)));
     }

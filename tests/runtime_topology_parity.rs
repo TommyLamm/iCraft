@@ -9,9 +9,9 @@ use icraft::block_entity::{BlockEntity, FurnaceBlockEntity};
 use icraft::dimension::Dimension;
 use icraft::entity::EntityType;
 use icraft::inventory::{GameMode, Inventory};
-use icraft::network::protocol::{Packet, 
-    GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse,
-    ItemWire, RejectReason, SlotRefWire,
+use icraft::network::protocol::{
+    GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse, ItemWire, Packet,
+    RejectReason, SlotRefWire,
 };
 use icraft::server_runtime::{
     EmbeddedRuntimeOptions, LocalSessionProfile, LocalSessionStorage, ProjectionDest,
@@ -42,14 +42,16 @@ fn response_for(
     target: u64,
     request_id: u128,
 ) -> Option<&GameplayResponse> {
-    events.iter().find_map(|event| match event.as_packet_event() {
-        Some(ProjectionEvent {
-            dest: ProjectionDest::Session(event_target),
-            packet: Packet::GameplayResponse { response, .. },
-            ..
-        }) if *event_target == target && response.request_id == request_id => Some(response),
-        _ => None,
-    })
+    events
+        .iter()
+        .find_map(|event| match event.as_packet_event() {
+            Some(ProjectionEvent {
+                dest: ProjectionDest::Session(event_target),
+                packet: Packet::GameplayResponse { response, .. },
+                ..
+            }) if *event_target == target && response.request_id == request_id => Some(response),
+            _ => None,
+        })
 }
 
 const TOPOLOGY_SESSION_ID: u64 = u64::MAX - 20;
@@ -161,7 +163,8 @@ fn prepare_topology_fixture(harness: &mut EmbeddedVectorHarness) {
         harness
             .runtime
             .authority
-            .world_mut(Dimension::Overworld).unwrap()
+            .world_mut(Dimension::Overworld)
+            .unwrap()
             .set_block(position[0], position[1], position[2], block, 0)
             .unwrap();
     }
@@ -174,7 +177,8 @@ fn prepare_topology_fixture(harness: &mut EmbeddedVectorHarness) {
     harness
         .runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .chunks
         .set_block_entity(
             furnace_position[0],
@@ -261,19 +265,22 @@ fn prepare_dispenser_fixture(harness: &mut EmbeddedVectorHarness) -> ItemWire {
     harness
         .runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(source.0, source.1, source.2, BlockType::Dispenser, 0)
         .unwrap();
     harness
         .runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(front.0, front.1, front.2, BlockType::Air, 0)
         .unwrap();
     harness
         .runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(lever.0, lever.1, lever.2, BlockType::Lever, {
             let mut state = icraft::world::BlockState::default();
             state.is_open = true;
@@ -288,7 +295,8 @@ fn prepare_dispenser_fixture(harness: &mut EmbeddedVectorHarness) -> ItemWire {
     if let Some(BlockEntity::Dispenser(dispenser)) = harness
         .runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .chunks
         .get_block_entity_mut(source.0, source.1, source.2)
     {
@@ -299,13 +307,21 @@ fn prepare_dispenser_fixture(harness: &mut EmbeddedVectorHarness) -> ItemWire {
         panic!("dispenser block entity fixture is missing");
     }
     {
-        let world = harness.runtime.authority.world_mut(Dimension::Overworld).unwrap();
+        let world = harness
+            .runtime
+            .authority
+            .world_mut(Dimension::Overworld)
+            .unwrap();
         world
             .redstone
             .on_block_changed(&world.chunks, lever, icraft::redstone::Direction::East);
     }
     {
-        let world = harness.runtime.authority.world_mut(Dimension::Overworld).unwrap();
+        let world = harness
+            .runtime
+            .authority
+            .world_mut(Dimension::Overworld)
+            .unwrap();
         world
             .redstone
             .on_block_changed(&world.chunks, source, icraft::redstone::Direction::East);
@@ -355,7 +371,10 @@ fn owner_session_update(
         .find_map(|event| match event.as_packet_event() {
             Some(ProjectionEvent {
                 dest: ProjectionDest::Session(target),
-                packet: Packet::PlayerSessionUpdate { player_id, state, .. },
+                packet:
+                    Packet::PlayerSessionUpdate {
+                        player_id, state, ..
+                    },
                 ..
             }) if *target == session_id && *player_id == session_id => Some(*state),
             _ => None,
@@ -368,355 +387,360 @@ fn plan24_plan22_gameplay_vectors_match_all_runtime_topologies() {
     let mut harness = EmbeddedVectorHarness::new("vector_embedded");
     prepare_topology_fixture(&mut harness);
 
-        // Fishing uses the offhand rod, so the combat sword remains selected.
-        // The fixed-tick path owns hook creation and reel cleanup; a replay is
-        // served by the ACK cache and cannot allocate a second hook.
-        let (cast_request, cast_output) = harness.request(GameplayOperation::Fishing {
-            action: 0,
-            hand: 1,
-            look_milli: [0, 0, 1_000],
-        });
-        let cast_response =
-            accepted_response(&cast_output, harness.session_id, cast_request.request_id);
-        let cast_state = owner_session_update(&cast_output, harness.session_id);
-        assert!(cast_state.fishing_hook.is_some());
-        let duplicate_cast = harness.replay(cast_request.clone());
-        assert_eq!(
-            response_for(
-                &duplicate_cast.presentation_events,
-                harness.session_id,
-                cast_request.request_id
-            ),
-            Some(&cast_response)
-        );
+    // Fishing uses the offhand rod, so the combat sword remains selected.
+    // The fixed-tick path owns hook creation and reel cleanup; a replay is
+    // served by the ACK cache and cannot allocate a second hook.
+    let (cast_request, cast_output) = harness.request(GameplayOperation::Fishing {
+        action: 0,
+        hand: 1,
+        look_milli: [0, 0, 1_000],
+    });
+    let cast_response =
+        accepted_response(&cast_output, harness.session_id, cast_request.request_id);
+    let cast_state = owner_session_update(&cast_output, harness.session_id);
+    assert!(cast_state.fishing_hook.is_some());
+    let duplicate_cast = harness.replay(cast_request.clone());
+    assert_eq!(
+        response_for(
+            &duplicate_cast.presentation_events,
+            harness.session_id,
+            cast_request.request_id
+        ),
+        Some(&cast_response)
+    );
+    let _ = harness.runtime.tick_with_output().unwrap();
+    let (reel_request, reel_output) = harness.request(GameplayOperation::Fishing {
+        action: 1,
+        hand: 1,
+        look_milli: [0, 0, 1_000],
+    });
+    accepted_response(&reel_output, harness.session_id, reel_request.request_id);
+    assert!(harness.session_state().fishing_hook.is_none());
+
+    let (furnace_request, furnace_output) = harness.request(GameplayOperation::FurnaceTakeOutput {
+        x: 8,
+        y: 80,
+        z: 9,
+        count: 1,
+    });
+    accepted_response(
+        &furnace_output,
+        harness.session_id,
+        furnace_request.request_id,
+    );
+    assert!(furnace_output
+        .presentation_events
+        .iter()
+        .any(|event| matches!(
+            event.as_packet_event(),
+            Some(ProjectionEvent {
+                packet: Packet::BlockEntityDelta { .. },
+                ..
+            })
+        )));
+
+    let plank = harness.source(1, 1);
+    let mut craft_sources = [None; 9];
+    craft_sources[0] = Some(plank);
+    craft_sources[2] = Some(plank);
+    let (craft_request, craft_output) = harness.request(GameplayOperation::Craft {
+        grid: 2,
+        sources: craft_sources,
+        station: None,
+    });
+    accepted_response(&craft_output, harness.session_id, craft_request.request_id);
+    let craft_projection = owner_session_update(&craft_output, harness.session_id);
+    assert_eq!(
+        craft_projection.hotbar[1].unwrap().item.item,
+        icraft::inventory::Item::Stick.to_u32()
+    );
+    assert_eq!(craft_projection.hotbar[1].unwrap().item.count, 4);
+    assert!(
+        harness
+            .session_state()
+            .count_item(icraft::inventory::Item::Stick.to_u32())
+            >= 4
+    );
+
+    let (enchant_request, enchant_output) = harness.request(GameplayOperation::Enchant {
+        x: 8,
+        y: 80,
+        z: 11,
+        source: harness.source(3, 1),
+        option: 2,
+    });
+    accepted_response(
+        &enchant_output,
+        harness.session_id,
+        enchant_request.request_id,
+    );
+    let enchant_projection = owner_session_update(&enchant_output, harness.session_id);
+    assert!(enchant_projection.hotbar[3]
+        .unwrap()
+        .item
+        .enchantments
+        .iter()
+        .any(|value| *value != 0));
+
+    let (anvil_request, anvil_output) = harness.request(GameplayOperation::Anvil {
+        x: 8,
+        y: 80,
+        z: 12,
+        left: harness.source(3, 1),
+        right: None,
+        rename: "Plan24 Pick".into(),
+    });
+    accepted_response(&anvil_output, harness.session_id, anvil_request.request_id);
+    let anvil_projection = owner_session_update(&anvil_output, harness.session_id);
+    let custom_name = anvil_projection.hotbar[3].unwrap().item.custom_name;
+    let name_end = custom_name
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(custom_name.len());
+    assert_eq!(&custom_name[..name_end], b"Plan24 Pick");
+
+    let brew_ingredient = harness.source(5, 1);
+    let brew_bottle = harness.source(2, 1);
+    let (brew_start, brew_output) = harness.request(GameplayOperation::Brew {
+        action: 0,
+        x: 8,
+        y: 80,
+        z: 10,
+        ingredient: Some(brew_ingredient),
+        bottles: [Some(brew_bottle), None, None],
+    });
+    accepted_response(&brew_output, harness.session_id, brew_start.request_id);
+    let inventory_before_brew = harness.session_state().inventory;
+    for _ in 0..BREW_TICKS {
         let _ = harness.runtime.tick_with_output().unwrap();
-        let (reel_request, reel_output) = harness.request(GameplayOperation::Fishing {
-            action: 1,
-            hand: 1,
-            look_milli: [0, 0, 1_000],
-        });
-        accepted_response(&reel_output, harness.session_id, reel_request.request_id);
-        assert!(harness.session_state().fishing_hook.is_none());
-
-        let (furnace_request, furnace_output) =
-            harness.request(GameplayOperation::FurnaceTakeOutput {
-                x: 8,
-                y: 80,
-                z: 9,
-                count: 1,
-            });
-        accepted_response(
-            &furnace_output,
-            harness.session_id,
-            furnace_request.request_id,
-        );
-        assert!(furnace_output
-            .presentation_events
-            .iter()
-            .any(|event| matches!(
-                event.as_packet_event(),
-                Some(ProjectionEvent { packet: Packet::BlockEntityDelta { .. }, .. })
-            )));
-
-        let plank = harness.source(1, 1);
-        let mut craft_sources = [None; 9];
-        craft_sources[0] = Some(plank);
-        craft_sources[2] = Some(plank);
-        let (craft_request, craft_output) = harness.request(GameplayOperation::Craft {
-            grid: 2,
-            sources: craft_sources,
-            station: None,
-        });
-        accepted_response(&craft_output, harness.session_id, craft_request.request_id);
-        let craft_projection = owner_session_update(&craft_output, harness.session_id);
-        assert_eq!(
-            craft_projection.hotbar[1].unwrap().item.item,
-            icraft::inventory::Item::Stick.to_u32()
-        );
-        assert_eq!(craft_projection.hotbar[1].unwrap().item.count, 4);
-        assert!(
-            harness
-                .session_state()
-                .count_item(icraft::inventory::Item::Stick.to_u32())
-                >= 4
-        );
-
-        let (enchant_request, enchant_output) = harness.request(GameplayOperation::Enchant {
-            x: 8,
-            y: 80,
-            z: 11,
-            source: harness.source(3, 1),
-            option: 2,
-        });
-        accepted_response(
-            &enchant_output,
-            harness.session_id,
-            enchant_request.request_id,
-        );
-        let enchant_projection = owner_session_update(&enchant_output, harness.session_id);
-        assert!(enchant_projection.hotbar[3]
+    }
+    let ready = harness.session_state();
+    assert_eq!(ready.inventory, inventory_before_brew);
+    assert_eq!(ready.brew.unwrap().remaining_ticks, 0);
+    let (brew_take, brew_take_output) = harness.request(GameplayOperation::Brew {
+        action: 2,
+        x: 8,
+        y: 80,
+        z: 10,
+        ingredient: None,
+        bottles: [None, None, None],
+    });
+    accepted_response(&brew_take_output, harness.session_id, brew_take.request_id);
+    assert!(harness.session_state().brew.is_none());
+    assert_eq!(
+        harness.session_state().inventory[2]
             .unwrap()
             .item
-            .enchantments
-            .iter()
-            .any(|value| *value != 0));
-
-        let (anvil_request, anvil_output) = harness.request(GameplayOperation::Anvil {
-            x: 8,
-            y: 80,
-            z: 12,
-            left: harness.source(3, 1),
-            right: None,
-            rename: "Plan24 Pick".into(),
-        });
-        accepted_response(&anvil_output, harness.session_id, anvil_request.request_id);
-        let anvil_projection = owner_session_update(&anvil_output, harness.session_id);
-        let custom_name = anvil_projection.hotbar[3].unwrap().item.custom_name;
-        let name_end = custom_name
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(custom_name.len());
-        assert_eq!(&custom_name[..name_end], b"Plan24 Pick");
-
-        let brew_ingredient = harness.source(5, 1);
-        let brew_bottle = harness.source(2, 1);
-        let (brew_start, brew_output) = harness.request(GameplayOperation::Brew {
-            action: 0,
-            x: 8,
-            y: 80,
-            z: 10,
-            ingredient: Some(brew_ingredient),
-            bottles: [Some(brew_bottle), None, None],
-        });
-        accepted_response(&brew_output, harness.session_id, brew_start.request_id);
-        let inventory_before_brew = harness.session_state().inventory;
-        for _ in 0..BREW_TICKS {
-            let _ = harness.runtime.tick_with_output().unwrap();
-        }
-        let ready = harness.session_state();
-        assert_eq!(ready.inventory, inventory_before_brew);
-        assert_eq!(ready.brew.unwrap().remaining_ticks, 0);
-        let (brew_take, brew_take_output) = harness.request(GameplayOperation::Brew {
-            action: 2,
-            x: 8,
-            y: 80,
-            z: 10,
-            ingredient: None,
-            bottles: [None, None, None],
-        });
-        accepted_response(&brew_take_output, harness.session_id, brew_take.request_id);
-        assert!(harness.session_state().brew.is_none());
-        assert_eq!(
-            harness.session_state().inventory[2]
-                .unwrap()
-                .item
-                .potion
-                .unwrap()
-                .kind,
-            icraft::brewing::PotionKind::Awkward as u8
-        );
-        let brew_duplicate = harness.replay(brew_take.clone());
-        assert_eq!(
-            response_for(
-                &brew_duplicate.presentation_events,
-                harness.session_id,
-                brew_take.request_id
-            ),
-            response_for(
-                &brew_take_output.presentation_events,
-                harness.session_id,
-                brew_take.request_id
-            )
-        );
-
-        // The world/entity combat path is driven after the long brew tick, so
-        // the fixed tick has naturally restored the attack cooldown.
-        let target_entity = harness
-            .runtime
-            .authority
-            .world_mut(Dimension::Overworld).unwrap()
-            .entities
-            .spawn(EntityType::Zombie, Vec3::new(8.0, 80.0, 9.0));
-        harness
-            .runtime
-            .authority
-            .world_mut(Dimension::Overworld).unwrap()
-            .entities
-            .get_by_id_mut(target_entity)
+            .potion
             .unwrap()
-            .health = 1.0;
-        let (entity_attack, entity_output) = harness.request(GameplayOperation::Combat {
-            target: target_entity,
-            action: 0,
-        });
-        accepted_response(&entity_output, harness.session_id, entity_attack.request_id);
-        assert!(harness
-            .runtime
-            .authority
-            .world_mut(Dimension::Overworld).unwrap()
-            .entities
-            .get_by_id(target_entity)
-            .is_none());
-        let _ = harness.replay(entity_attack);
-        for _ in 0..4 {
-            let _ = harness.runtime.tick_with_output().unwrap();
-        }
+            .kind,
+        icraft::brewing::PotionKind::Awkward as u8
+    );
+    let brew_duplicate = harness.replay(brew_take.clone());
+    assert_eq!(
+        response_for(
+            &brew_duplicate.presentation_events,
+            harness.session_id,
+            brew_take.request_id
+        ),
+        response_for(
+            &brew_take_output.presentation_events,
+            harness.session_id,
+            brew_take.request_id
+        )
+    );
 
-        let (player_attack, player_output) = harness.request(GameplayOperation::Combat {
-            target: TOPOLOGY_VICTIM_ID,
-            action: 0,
-        });
-        accepted_response(&player_output, harness.session_id, player_attack.request_id);
-        let victim_dead = player_output
-            .snapshot
-            .session_updates
-            .iter()
-            .find(|update| update.player_id == TOPOLOGY_VICTIM_ID)
-            .expect("victim death session update");
-        assert!(victim_dead.state.is_dead);
-        assert_eq!(victim_dead.state.health_milli, 0);
-        assert!(harness
+    // The world/entity combat path is driven after the long brew tick, so
+    // the fixed tick has naturally restored the attack cooldown.
+    let target_entity = harness
+        .runtime
+        .authority
+        .world_mut(Dimension::Overworld)
+        .unwrap()
+        .entities
+        .spawn(EntityType::Zombie, Vec3::new(8.0, 80.0, 9.0));
+    harness
+        .runtime
+        .authority
+        .world_mut(Dimension::Overworld)
+        .unwrap()
+        .entities
+        .get_by_id_mut(target_entity)
+        .unwrap()
+        .health = 1.0;
+    let (entity_attack, entity_output) = harness.request(GameplayOperation::Combat {
+        target: target_entity,
+        action: 0,
+    });
+    accepted_response(&entity_output, harness.session_id, entity_attack.request_id);
+    assert!(harness
+        .runtime
+        .authority
+        .world_mut(Dimension::Overworld)
+        .unwrap()
+        .entities
+        .get_by_id(target_entity)
+        .is_none());
+    let _ = harness.replay(entity_attack);
+    for _ in 0..4 {
+        let _ = harness.runtime.tick_with_output().unwrap();
+    }
+
+    let (player_attack, player_output) = harness.request(GameplayOperation::Combat {
+        target: TOPOLOGY_VICTIM_ID,
+        action: 0,
+    });
+    accepted_response(&player_output, harness.session_id, player_attack.request_id);
+    let victim_dead = player_output
+        .snapshot
+        .session_updates
+        .iter()
+        .find(|update| update.player_id == TOPOLOGY_VICTIM_ID)
+        .expect("victim death session update");
+    assert!(victim_dead.state.is_dead);
+    assert_eq!(victim_dead.state.health_milli, 0);
+    assert!(harness
+        .runtime
+        .authority
+        .session(TOPOLOGY_VICTIM_ID)
+        .unwrap()
+        .gameplay
+        .inventory
+        .iter()
+        .all(Option::is_none));
+    let player_duplicate = harness.replay(player_attack.clone());
+    assert_eq!(
+        response_for(
+            &player_duplicate.presentation_events,
+            harness.session_id,
+            player_attack.request_id
+        ),
+        response_for(
+            &player_output.presentation_events,
+            harness.session_id,
+            player_attack.request_id
+        )
+    );
+    assert!(
+        harness
             .runtime
             .authority
             .session(TOPOLOGY_VICTIM_ID)
             .unwrap()
             .gameplay
-            .inventory
-            .iter()
-            .all(Option::is_none));
-        let player_duplicate = harness.replay(player_attack.clone());
-        assert_eq!(
-            response_for(
-                &player_duplicate.presentation_events,
-                harness.session_id,
-                player_attack.request_id
-            ),
-            response_for(
-                &player_output.presentation_events,
-                harness.session_id,
-                player_attack.request_id
-            )
-        );
-        assert!(
-            harness
-                .runtime
-                .authority
-                .session(TOPOLOGY_VICTIM_ID)
-                .unwrap()
-                .gameplay
-                .is_dead
-        );
+            .is_dead
+    );
 
-        let stale_request = GameplayRequest {
-            request_id: harness.next_request_id,
-            client_sequence: harness.next_sequence,
-            session_id: harness.session_id,
-            dimension: Dimension::Overworld as u8,
-            client_revision: 0,
-            operation: GameplayOperation::ItemUse {
-                item: icraft::inventory::Item::Bread.to_u32(),
-                count: 1,
+    let stale_request = GameplayRequest {
+        request_id: harness.next_request_id,
+        client_sequence: harness.next_sequence,
+        session_id: harness.session_id,
+        dimension: Dimension::Overworld as u8,
+        client_revision: 0,
+        operation: GameplayOperation::ItemUse {
+            item: icraft::inventory::Item::Bread.to_u32(),
+            count: 1,
+        },
+    };
+    harness.next_request_id = harness.next_request_id.saturating_add(1);
+    harness.next_sequence = harness.next_sequence.saturating_add(1);
+    let stale_output = harness.replay(stale_request.clone());
+    rejected_response(
+        &stale_output,
+        harness.session_id,
+        stale_request.request_id,
+        RejectReason::InvalidRevision,
+    );
+    let out_of_order = GameplayRequest {
+        request_id: harness.next_request_id,
+        client_sequence: 1,
+        session_id: harness.session_id,
+        dimension: Dimension::Overworld as u8,
+        client_revision: harness.current_revision(),
+        operation: GameplayOperation::ItemUse {
+            item: icraft::inventory::Item::Bread.to_u32(),
+            count: 1,
+        },
+    };
+    harness.next_request_id = harness.next_request_id.saturating_add(1);
+    let out_of_order_output = harness.replay(out_of_order.clone());
+    rejected_response(
+        &out_of_order_output,
+        harness.session_id,
+        out_of_order.request_id,
+        RejectReason::OutOfOrder,
+    );
+
+    harness
+        .input
+        .try_send(
+            icraft::network::server::ServerToHost::ClientRespawnRequest {
+                id: TOPOLOGY_VICTIM_ID,
             },
-        };
-        harness.next_request_id = harness.next_request_id.saturating_add(1);
-        harness.next_sequence = harness.next_sequence.saturating_add(1);
-        let stale_output = harness.replay(stale_request.clone());
-        rejected_response(
-            &stale_output,
-            harness.session_id,
-            stale_request.request_id,
-            RejectReason::InvalidRevision,
-        );
-        let out_of_order = GameplayRequest {
-            request_id: harness.next_request_id,
-            client_sequence: 1,
-            session_id: harness.session_id,
-            dimension: Dimension::Overworld as u8,
-            client_revision: harness.current_revision(),
-            operation: GameplayOperation::ItemUse {
-                item: icraft::inventory::Item::Bread.to_u32(),
-                count: 1,
-            },
-        };
-        harness.next_request_id = harness.next_request_id.saturating_add(1);
-        let out_of_order_output = harness.replay(out_of_order.clone());
-        rejected_response(
-            &out_of_order_output,
-            harness.session_id,
-            out_of_order.request_id,
-            RejectReason::OutOfOrder,
-        );
+        )
+        .unwrap();
+    let respawn_output = harness.runtime.tick_with_output().unwrap();
+    let victim_alive = harness
+        .runtime
+        .authority
+        .session(TOPOLOGY_VICTIM_ID)
+        .unwrap()
+        .gameplay;
+    assert!(!victim_alive.is_dead);
+    assert_eq!(victim_alive.health_milli, victim_alive.max_health_milli);
+    assert_eq!(victim_alive.velocity_milli, [0; 3]);
+    assert!(respawn_output
+        .snapshot
+        .session_updates
+        .iter()
+        .any(|update| update.player_id == TOPOLOGY_VICTIM_ID && !update.state.is_dead));
 
-        harness
-            .input
-            .try_send(
-                icraft::network::server::ServerToHost::ClientRespawnRequest {
-                    id: TOPOLOGY_VICTIM_ID,
-                },
-            )
-            .unwrap();
-        let respawn_output = harness.runtime.tick_with_output().unwrap();
-        let victim_alive = harness
-            .runtime
-            .authority
-            .session(TOPOLOGY_VICTIM_ID)
-            .unwrap()
-            .gameplay;
-        assert!(!victim_alive.is_dead);
-        assert_eq!(victim_alive.health_milli, victim_alive.max_health_milli);
-        assert_eq!(victim_alive.velocity_milli, [0; 3]);
-        assert!(respawn_output
-            .snapshot
-            .session_updates
-            .iter()
-            .any(|update| update.player_id == TOPOLOGY_VICTIM_ID && !update.state.is_dead));
+    assert!(harness
+        .runtime
+        .set_session_dimension(harness.session_id, Dimension::Nether));
+    let dimension_output = harness.runtime.tick_with_output().unwrap();
+    assert!(dimension_output.presentation_events.iter().all(|event| {
+        !matches!(
+            event.as_packet_event(),
+            Some(ProjectionEvent {
+                dest: ProjectionDest::Session(target),
+                packet: Packet::PlayerSessionUpdate { dimension, .. },
+                ..
+            }) if *target == harness.session_id && *dimension != Dimension::Nether as u8
+        )
+    }));
 
-        assert!(harness
-            .runtime
-            .set_session_dimension(harness.session_id, Dimension::Nether));
-        let dimension_output = harness.runtime.tick_with_output().unwrap();
-        assert!(dimension_output.presentation_events.iter().all(|event| {
-            !matches!(
-                event.as_packet_event(),
-                Some(ProjectionEvent {
-                    dest: ProjectionDest::Session(target),
-                    packet: Packet::PlayerSessionUpdate { dimension, .. },
-                    ..
-                }) if *target == harness.session_id && *dimension != Dimension::Nether as u8
-            )
-        }));
-
-        // A named session must persist its authoritative dimension across a
-        // disconnect/reconnect.  Reconnecting through the public runtime seam
-        // also proves that stale projections from the previous session are not
-        // retained in the new interest set.
-        assert!(harness
-            .runtime
-            .set_session_dimension(TOPOLOGY_VICTIM_ID, Dimension::Nether));
-        let _ = harness.runtime.tick_with_output().unwrap();
-        harness.runtime.logout_session(TOPOLOGY_VICTIM_ID).unwrap();
-        assert!(!harness.runtime.players.contains_key(&TOPOLOGY_VICTIM_ID));
-        harness
-            .runtime
-            .login_session(TOPOLOGY_VICTIM_ID, "victim")
-            .unwrap();
-        let reconnect_output = harness.runtime.tick_with_output().unwrap();
-        assert_eq!(
-            harness.runtime.players[&TOPOLOGY_VICTIM_ID]
-                .interest
-                .dimension,
-            Dimension::Nether
-        );
-        assert!(reconnect_output.presentation_events.iter().all(|event| {
-            !matches!(
-                event.as_packet_event(),
-                Some(ProjectionEvent {
-                    dest: ProjectionDest::Session(target),
-                    packet: Packet::PlayerSessionUpdate { player_id, .. },
-                    ..
-                }) if *target == harness.session_id && *player_id == TOPOLOGY_VICTIM_ID
-            )
-        }));
+    // A named session must persist its authoritative dimension across a
+    // disconnect/reconnect.  Reconnecting through the public runtime seam
+    // also proves that stale projections from the previous session are not
+    // retained in the new interest set.
+    assert!(harness
+        .runtime
+        .set_session_dimension(TOPOLOGY_VICTIM_ID, Dimension::Nether));
+    let _ = harness.runtime.tick_with_output().unwrap();
+    harness.runtime.logout_session(TOPOLOGY_VICTIM_ID).unwrap();
+    assert!(!harness.runtime.players.contains_key(&TOPOLOGY_VICTIM_ID));
+    harness
+        .runtime
+        .login_session(TOPOLOGY_VICTIM_ID, "victim")
+        .unwrap();
+    let reconnect_output = harness.runtime.tick_with_output().unwrap();
+    assert_eq!(
+        harness.runtime.players[&TOPOLOGY_VICTIM_ID]
+            .interest
+            .dimension,
+        Dimension::Nether
+    );
+    assert!(reconnect_output.presentation_events.iter().all(|event| {
+        !matches!(
+            event.as_packet_event(),
+            Some(ProjectionEvent {
+                dest: ProjectionDest::Session(target),
+                packet: Packet::PlayerSessionUpdate { player_id, .. },
+                ..
+            }) if *target == harness.session_id && *player_id == TOPOLOGY_VICTIM_ID
+        )
+    }));
     harness.shutdown();
 }
 
@@ -749,7 +773,12 @@ fn plan28_dispenser_item_projection_matches_embedded_runtime() {
     let projection =
         projection.unwrap_or_else(|| panic!("embedded runtime did not project dispenser output"));
     assert_eq!(projection.1, expected);
-    let source_count = match harness.runtime.authority.world(Dimension::Overworld).get_block_entity(8, 80, 8) {
+    let source_count = match harness
+        .runtime
+        .authority
+        .world(Dimension::Overworld)
+        .get_block_entity(8, 80, 8)
+    {
         Some(BlockEntity::Dispenser(dispenser)) => {
             dispenser.slots[0].map_or(0, |stack| stack.count)
         }
@@ -777,14 +806,23 @@ fn disabled_singleplayer_drains_local_request_through_fixed_tick_fifo() {
     let revision = runtime
         .authority
         .revision_for_dimension(Dimension::Overworld);
-    let before = runtime.authority.world(Dimension::Overworld).get_block(8, 80, 8);
+    let before = runtime
+        .authority
+        .world(Dimension::Overworld)
+        .get_block(8, 80, 8);
     input
         .submit_request(local_id, rejected_place(local_id, 41, 1, revision))
         .unwrap();
 
     // Publication is queued: authority state cannot change before the fixed
     // tick consumes the same bounded FIFO used by listen transport events.
-    assert_eq!(runtime.authority.world(Dimension::Overworld).get_block(8, 80, 8), before);
+    assert_eq!(
+        runtime
+            .authority
+            .world(Dimension::Overworld)
+            .get_block(8, 80, 8),
+        before
+    );
     let output = runtime.tick_with_output().unwrap();
     let response = response_for(&output.presentation_events, local_id, 41).unwrap();
     assert!(matches!(
@@ -798,7 +836,13 @@ fn disabled_singleplayer_drains_local_request_through_fixed_tick_fifo() {
         .mutations
         .iter()
         .any(|mutation| mutation.position == (8, 80, 8)));
-    assert_eq!(runtime.authority.world(Dimension::Overworld).get_block(8, 80, 8), before);
+    assert_eq!(
+        runtime
+            .authority
+            .world(Dimension::Overworld)
+            .get_block(8, 80, 8),
+        before
+    );
     assert_eq!(runtime.metrics().queue_depth, 0);
     assert_eq!(runtime.metrics().queue_full, 0);
     assert_eq!(runtime.metrics().outbound_packets, 0);
@@ -823,7 +867,10 @@ fn listen_runtime_routes_local_response_to_tick_output() {
     let revision = runtime
         .authority
         .revision_for_dimension(Dimension::Overworld);
-    let before = runtime.authority.world(Dimension::Overworld).get_block(8, 80, 8);
+    let before = runtime
+        .authority
+        .world(Dimension::Overworld)
+        .get_block(8, 80, 8);
     input
         .submit_request(local_id, rejected_place(local_id, 42, 1, revision))
         .unwrap();
@@ -843,7 +890,13 @@ fn listen_runtime_routes_local_response_to_tick_output() {
         .mutations
         .iter()
         .any(|mutation| mutation.position == (8, 80, 8)));
-    assert_eq!(runtime.authority.world(Dimension::Overworld).get_block(8, 80, 8), before);
+    assert_eq!(
+        runtime
+            .authority
+            .world(Dimension::Overworld)
+            .get_block(8, 80, 8),
+        before
+    );
 
     runtime.shutdown().unwrap();
     drop(runtime);

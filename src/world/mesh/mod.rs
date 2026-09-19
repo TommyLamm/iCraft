@@ -5,7 +5,7 @@ use crate::world::block::{
 };
 use crate::world::chunk::Chunk;
 use crate::world::section::{
-    world_y_to_section_y, SectionIdentity, SectionKey, NO_HEIGHT, SECTION_SIZE, SECTION_VOLUME,
+    world_y_to_section_y, SectionIdentity, SectionKey, SECTION_SIZE, SECTION_VOLUME,
 };
 
 mod faces;

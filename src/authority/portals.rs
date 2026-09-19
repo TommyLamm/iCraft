@@ -3,9 +3,9 @@ use crate::dimension::Dimension;
 use crate::inventory::GameMode;
 use crate::network::protocol::PlayerId;
 use crate::server_world::FIXED_DT;
+use crate::world::chunk_xz;
 use crate::world::BlockType;
 use glam::Vec3;
-use crate::world::chunk_xz;
 
 impl AuthorityCore {
     pub(crate) fn tick_portal_travel(&mut self, dimension: Dimension) {

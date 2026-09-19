@@ -936,9 +936,7 @@ pub fn default_stub_for_block(block_type: BlockType) -> Option<BlockEntity> {
             loot_seed: None,
             revision: 0,
         })),
-        BlockType::Furnace => {
-            Some(BlockEntity::Furnace(FurnaceBlockEntity::new()))
-        }
+        BlockType::Furnace => Some(BlockEntity::Furnace(FurnaceBlockEntity::new())),
         BlockType::OakSign => Some(BlockEntity::Sign(SignBlockEntity::new())),
         BlockType::Hopper => Some(BlockEntity::Hopper(HopperBlockEntity::new())),
         BlockType::Dispenser => Some(BlockEntity::Dispenser(DispenserBlockEntity::new())),

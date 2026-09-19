@@ -94,9 +94,7 @@ mod fingerprint_tests {
             ),
             (
                 "fortress",
-                placement_fingerprint(&nether_fortress::generate_nether_fortress(
-                    OX, OY, OZ, SEED,
-                )),
+                placement_fingerprint(&nether_fortress::generate_nether_fortress(OX, OY, OZ, SEED)),
             ),
             (
                 "end_city",

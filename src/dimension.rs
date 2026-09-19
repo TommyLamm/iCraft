@@ -1,8 +1,8 @@
+use crate::structure::placement::{END_CITY_BASE_Y, END_CITY_X, END_CITY_Z};
 use crate::world::{
     section_and_local_y_to_world_y, BlockType, Chunk, ChunkSection, CHUNK_DEPTH, CHUNK_WIDTH,
     SECTION_SIZE,
 };
-use crate::structure::placement::{END_CITY_BASE_Y, END_CITY_X, END_CITY_Z};
 use glam::Vec3;
 use noise::{NoiseFn, Perlin};
 
@@ -384,7 +384,12 @@ fn generate_nether_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
     // Make both signature low-Nether features observable even for seeds whose
     // noise happens to keep this chunk unusually solid.
     if !chunk_has_block(&chunk, BlockType::Lava) {
-        chunk.set_block_local(CHUNK_WIDTH / 2, LAVA_LEVEL as i32, CHUNK_DEPTH / 2, BlockType::Lava);
+        chunk.set_block_local(
+            CHUNK_WIDTH / 2,
+            LAVA_LEVEL as i32,
+            CHUNK_DEPTH / 2,
+            BlockType::Lava,
+        );
     }
     if !chunk_has_block(&chunk, BlockType::SoulSand) {
         'surface: for x in 0..CHUNK_WIDTH {
@@ -420,8 +425,7 @@ fn generate_nether_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
 
     // Propagate block light within this column via the shared lighting path
     // (replaces the former private Nether BFS).
-    let mut manager =
-        crate::chunk_manager::WorldColumns::new_in_dimension(0, Dimension::Nether);
+    let mut manager = crate::chunk_manager::WorldColumns::new_in_dimension(0, Dimension::Nether);
     manager.insert_resident_chunk((chunk_x, chunk_z), chunk);
     let mut dirty = std::collections::HashSet::new();
     crate::lighting::propagate_chunk_lighting(&mut manager, chunk_x, chunk_z, &mut dirty);
@@ -1231,8 +1235,7 @@ mod tests {
             world_type: crate::game_rules::WorldType::Default,
             generate_structures: false,
         };
-        let overworld =
-            generate_chunk_with_options(Dimension::Overworld, 3, -2, 99991, options);
+        let overworld = generate_chunk_with_options(Dimension::Overworld, 3, -2, 99991, options);
         let nether = generate_chunk_with_options(Dimension::Nether, -3, 5, 99, options);
         let end = generate_chunk_with_options(Dimension::End, 15, -8, 123, options);
         let flat = generate_chunk_with_options(
@@ -1268,9 +1271,36 @@ mod tests {
         let fp_neg_neg = column_block_fingerprint(&c_neg_neg);
 
         assert_eq!(fp_pos_neg, 6656363810664605235);
-        assert_eq!(fp_pos_pos, column_block_fingerprint(&generate_chunk_with_options(Dimension::Overworld, 2, 3, 99991, options)));
-        assert_eq!(fp_neg_pos, column_block_fingerprint(&generate_chunk_with_options(Dimension::Overworld, -2, 3, 99991, options)));
-        assert_eq!(fp_neg_neg, column_block_fingerprint(&generate_chunk_with_options(Dimension::Overworld, -3, -2, 99991, options)));
+        assert_eq!(
+            fp_pos_pos,
+            column_block_fingerprint(&generate_chunk_with_options(
+                Dimension::Overworld,
+                2,
+                3,
+                99991,
+                options
+            ))
+        );
+        assert_eq!(
+            fp_neg_pos,
+            column_block_fingerprint(&generate_chunk_with_options(
+                Dimension::Overworld,
+                -2,
+                3,
+                99991,
+                options
+            ))
+        );
+        assert_eq!(
+            fp_neg_neg,
+            column_block_fingerprint(&generate_chunk_with_options(
+                Dimension::Overworld,
+                -3,
+                -2,
+                99991,
+                options
+            ))
+        );
         assert_ne!(fp_pos_pos, fp_neg_pos);
         assert_ne!(fp_neg_pos, fp_neg_neg);
         assert_ne!(fp_pos_pos, fp_neg_neg);

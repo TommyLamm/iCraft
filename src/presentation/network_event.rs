@@ -387,7 +387,9 @@ impl State {
                     self.apply_lightning_strike(strike);
                 }
             }
-            Packet::ChatMessage { sender, message, .. } => {
+            Packet::ChatMessage {
+                sender, message, ..
+            } => {
                 let Some(message) = normalized_chat_message(&message) else {
                     return;
                 };

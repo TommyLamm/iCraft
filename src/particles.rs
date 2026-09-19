@@ -281,7 +281,6 @@ pub fn block_debris_uv(block: BlockType, rng: &mut u32) -> [f32; 4] {
     [u0, v0, u1, v1]
 }
 
-
 /// Spawn a few footstep dust particles at the player's feet, using the texture
 /// of the block directly below.
 pub fn spawn_footstep_dust(

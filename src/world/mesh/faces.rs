@@ -539,5 +539,3 @@ pub(super) fn is_greedy_cube(block: BlockType) -> bool {
                 | BlockType::EndCityChest
         )
 }
-
-

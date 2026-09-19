@@ -1,6 +1,6 @@
 # 22 — 公開面、測試與文件總驗收
 
-狀態：待執行。基線：`83e751d`，2026-09-17。
+狀態：已完成。基線：`83e751d`，2026-09-17。
 前置：本輪選定的 01–21 全部完成後。
 
 ## 實作步驟
@@ -38,5 +38,26 @@ cargo tree --no-default-features -e normal
 
 ## 實作紀錄
 
-尚未執行；完成時記錄實際修改、驗證結果、刪碼量及文件更新。
+- 實作完成於 2026-09-19。
+- 刪除無 caller 死 API 與死原型測試：
+  - 刪除 `src/mob.rs` 中無引用之 `calculate_explosion_damage` 與 `explode` 函式及對應原型測試。
+  - 刪除 `src/voxel_shape.rs` 中無外部呼叫之 `get_connections` 包裝函式，呼叫點直接調用 `get_connections_sampled`。
+  - 刪除 `src/world/mesh/section.rs` 中無 caller 之內部包裝 `mesh_section_lod_from_halo`。
+- 收窄跨 crate 與跨模組可見性，清理過期 imports 與失效 allow：
+  - 將各模組中僅內部或測試使用的 API 收窄為 `pub(crate)` 或 `#[cfg(test)]`。
+  - 清理跨模組之 unused imports（包含 `tests/review_hardening_invariants.rs`、`tests/waterlogging_authority.rs`、`src/physics.rs`、`src/worldgen/mod.rs` 等），並在對應測試模組中補全具體引用，嚴格保持 pub 收窄原則，不隨意放寬。
+- 測試強固化與 Windows 檔案系統競態防護：
+  - 修復 `src/save/region.rs` 中 Windows 平臺原子替換檔案 `replace_file_atomically`：加入針對 `ERROR_ACCESS_DENIED (5)` 與 `ERROR_SHARING_VIOLATION (32)` 的短暫鎖定重試機制，消除在 Windows 檔案系統並發及防毒/索引掃描時的瞬間競爭。
+  - 修復 `src/server_runtime/tests.rs` 中 `runtime_instances_have_isolated_worldgen_channels` 在高並發全套測試負載下的 Rayon worker 排程等待逾時 flake。
+- 執行並全數通過 6 項驗證命令：
+  - `cargo fmt --all -- --check`：通過（exit 0）。
+  - `cargo check --all-targets --all-features`：通過（exit 0）。
+  - `cargo check --no-default-features --bin icraft-server`：通過（exit 0，零編譯警告）。
+  - `cargo test --all-targets --all-features`：通過（722 lib tests、228 bin tests、2 server tests 及全部 integration tests 通過）。
+  - `cargo test --no-default-features --lib --tests`：通過（722 unit tests 及全數 headless 整合測試通過）。
+  - `cargo tree --no-default-features -e normal`：通過，驗證無 winit/wgpu/rodio/image/pollster 桌面依賴進入 headless 目標。
+- 文件更新：
+  - 更新 `ARCHITECTURE.md`，同步記錄 dead helpers (`calculate_explosion_damage`, `explode`, `get_connections`) 移除。
+  - 更新 `plans/11_code_cleanup/README.md`，將 22 號計劃狀態標記為「已完成」。
+- 淨增刪統計（全代碼庫格式化與清理）：143 files changed, 3568 insertions(+), 3311 deletions(-)。
 

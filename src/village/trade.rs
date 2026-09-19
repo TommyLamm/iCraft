@@ -86,4 +86,3 @@ mod tests {
         assert_eq!(cost, 7);
     }
 }
-

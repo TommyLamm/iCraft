@@ -73,12 +73,10 @@ pub(super) fn set_open_flag(
     is_open: bool,
     mutations: &mut Vec<BlockMutation>,
 ) {
-    let mut bstate =
-        crate::world::BlockState::decode(manager.get_block_state(pos.0, pos.1, pos.2));
+    let mut bstate = crate::world::BlockState::decode(manager.get_block_state(pos.0, pos.1, pos.2));
     if get_block(manager, pos) == block && bstate.is_open == is_open {
         return;
     }
     bstate.is_open = is_open;
     set_block_record_with_state(manager, pos, block, bstate.encode(), mutations);
 }
-

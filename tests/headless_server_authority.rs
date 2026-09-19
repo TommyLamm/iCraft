@@ -12,8 +12,10 @@ use icraft::dimension::Dimension;
 use icraft::entity::EntityType;
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::client::{ClientToGame, GameToClient};
-use icraft::network::protocol::{ContainerAction, GameplayOperation, GameplayOutcome, GameplayRequest,
-    GameplayResponse, ItemWire, RejectReason, SessionSlotWire, Packet};
+use icraft::network::protocol::{
+    ContainerAction, GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse,
+    ItemWire, Packet, RejectReason, SessionSlotWire,
+};
 use icraft::redstone::Direction;
 use icraft::server_runtime::{ServerProperties, ServerRuntime};
 use icraft::world::BlockType;
@@ -74,12 +76,9 @@ fn drive_one_until(
     description: &str,
     mut ready: impl FnMut(&ServerRuntime, &TcpClient) -> bool,
 ) {
-    drive_until(
-        runtime,
-        &mut [client],
-        description,
-        |runtime, views| ready(runtime, views[0]),
-    );
+    drive_until(runtime, &mut [client], description, |runtime, views| {
+        ready(runtime, views[0])
+    });
 }
 
 fn accepted_revision(response: &GameplayResponse) -> u64 {
@@ -126,11 +125,23 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     assert_eq!(runtime.metrics.players_online, 2);
     assert_eq!(
         runtime.metrics.loaded_chunks,
-        runtime.authority.world_mut(Dimension::Overworld).unwrap().chunks.chunks.len()
+        runtime
+            .authority
+            .world_mut(Dimension::Overworld)
+            .unwrap()
+            .chunks
+            .chunks
+            .len()
     );
     assert_eq!(
         runtime.metrics.entities,
-        runtime.authority.world_mut(Dimension::Overworld).unwrap().entities.entities.len()
+        runtime
+            .authority
+            .world_mut(Dimension::Overworld)
+            .unwrap()
+            .entities
+            .entities
+            .len()
     );
     assert!(runtime.metrics.inbound_packets >= 2);
     assert!(runtime.metrics.outbound_packets >= 2);
@@ -197,7 +208,8 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     let base_revision = runtime.authority.current_revision(Dimension::Overworld);
     let chest_mutation = runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(
             CHEST_POSITION.0,
             CHEST_POSITION.1,
@@ -210,10 +222,11 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     let block_revision = chest_mutation.revision;
     assert!(block_revision > base_revision);
     assert_eq!(
-        runtime
-            .authority
-            .world(Dimension::Overworld)
-            .get_block(CHEST_POSITION.0, CHEST_POSITION.1, CHEST_POSITION.2),
+        runtime.authority.world(Dimension::Overworld).get_block(
+            CHEST_POSITION.0,
+            CHEST_POSITION.1,
+            CHEST_POSITION.2
+        ),
         BlockType::Chest
     );
 
@@ -224,15 +237,8 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
             0,
             0,
         ));
-        let template =
-            rejected_place_with_held(alice_id, BLOCK_REQUEST, 1, 0, held);
-        gameplay_request(
-            &runtime,
-            alice_id,
-            BLOCK_REQUEST,
-            1,
-            template.operation,
-        )
+        let template = rejected_place_with_held(alice_id, BLOCK_REQUEST, 1, 0, held);
+        gameplay_request(&runtime, alice_id, BLOCK_REQUEST, 1, template.operation)
     };
     alice.send(GameToClient::GameplayRequest {
         request: rejected_place.clone(),
@@ -264,10 +270,11 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
         }
     );
     assert_eq!(
-        runtime
-            .authority
-            .world(Dimension::Overworld)
-            .get_block(CHEST_POSITION.0, CHEST_POSITION.1, CHEST_POSITION.2),
+        runtime.authority.world(Dimension::Overworld).get_block(
+            CHEST_POSITION.0,
+            CHEST_POSITION.1,
+            CHEST_POSITION.2
+        ),
         BlockType::Chest,
         "rejected BlockAction must not overwrite the seeded chest"
     );
@@ -548,7 +555,8 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     chest.set_stack(0, Some(dirt));
     runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .chunks
         .set_block_entity(
             CHEST_POSITION.0,
@@ -664,16 +672,18 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     let mut restarted =
         ServerRuntime::new(server_properties).expect("restart authority from persisted world");
     assert_eq!(
-        restarted
-            .authority
-            .world(Dimension::Overworld)
-            .get_block(CHEST_POSITION.0, CHEST_POSITION.1, CHEST_POSITION.2),
+        restarted.authority.world(Dimension::Overworld).get_block(
+            CHEST_POSITION.0,
+            CHEST_POSITION.1,
+            CHEST_POSITION.2
+        ),
         BlockType::Chest
     );
     assert_eq!(
         restarted
             .authority
-            .world_mut(Dimension::Overworld).unwrap()
+            .world_mut(Dimension::Overworld)
+            .unwrap()
             .container_slot_wire(CHEST_POSITION, 0),
         Some(Some(stone)),
         "container mutation must survive server restart exactly once"
@@ -681,7 +691,8 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     assert!(
         restarted
             .authority
-            .world_mut(Dimension::Overworld).unwrap()
+            .world_mut(Dimension::Overworld)
+            .unwrap()
             .container_viewers_at(CHEST_POSITION)
             .next()
             .is_none(),
@@ -725,7 +736,8 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
 fn projected_dropped_item(client: &TcpClient) -> Option<(u64, ItemWire)> {
     client.events().iter().find_map(|event| {
         let state = match event {
-            ClientToGame::Packet(Packet::EntitySpawn { state, .. }) | ClientToGame::Packet(Packet::EntityState { state, .. })
+            ClientToGame::Packet(Packet::EntitySpawn { state, .. })
+            | ClientToGame::Packet(Packet::EntityState { state, .. })
                 if state.entity_type == EntityType::DroppedItem.to_wire() =>
             {
                 state
@@ -806,12 +818,14 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
     let lever = (7, 80, 8);
     runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(source.0, source.1, source.2, BlockType::Dispenser, 0)
         .expect("place dispenser fixture");
     runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(front.0, front.1, front.2, BlockType::Air, 0)
         .expect("clear dispenser front");
     let mut lever_on = icraft::world::BlockState::default();
@@ -819,7 +833,8 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
     let lever_on = lever_on.encode();
     runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(lever.0, lever.1, lever.2, BlockType::Lever, lever_on)
         .expect("place powered lever fixture");
     let mut stack = ItemStack::new(Item::Stone, 2)
@@ -828,7 +843,8 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
     stack.custom_name.set("tcp-drop");
     if let Some(BlockEntity::Dispenser(dispenser)) = runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .chunks
         .get_block_entity_mut(source.0, source.1, source.2)
     {
@@ -933,7 +949,8 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
     // decrement and target merge; no second DroppedItem may be spawned.
     runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(lever.0, lever.1, lever.2, BlockType::Lever, 0)
         .expect("turn dispenser fixture off");
     {
@@ -962,24 +979,28 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
 
     runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .chunks
         .set_block_entity(source.0, source.1, source.2, None);
     runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(source.0, source.1, source.2, BlockType::Dropper, 0)
         .expect("replace source with dropper");
     runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(front.0, front.1, front.2, BlockType::Chest, 0)
         .expect("place dropper target chest");
     let mut dropper_stack = stack;
     dropper_stack.count = 2;
     if let Some(BlockEntity::Dropper(dropper)) = runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .chunks
         .get_block_entity_mut(source.0, source.1, source.2)
     {
@@ -991,7 +1012,8 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
     }
     if let Some(BlockEntity::Chest(chest)) = runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .chunks
         .get_block_entity_mut(front.0, front.1, front.2)
     {
@@ -1010,7 +1032,8 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
     }
     runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(lever.0, lever.1, lever.2, BlockType::Lever, {
             let mut state = icraft::world::BlockState::default();
             state.is_open = true;

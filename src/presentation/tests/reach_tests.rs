@@ -9,20 +9,14 @@ fn calculate_block_break_rewards_harvest_and_drops() {
     let pos = (10, 60, 10);
 
     // Stone with bare hand in Survival -> not eligible to harvest (no drops)
-    let rewards =
-        calculate_block_break_rewards(BlockType::Stone, 0, pos, None, GameMode::Survival);
+    let rewards = calculate_block_break_rewards(BlockType::Stone, 0, pos, None, GameMode::Survival);
     assert!(rewards.drops.is_empty());
     assert_eq!(rewards.xp, 0);
 
     // Stone with Pickaxe -> eligible, drops Stone
     let pick = ItemStack::new(Item::StonePickaxe, 1);
-    let rewards = calculate_block_break_rewards(
-        BlockType::Stone,
-        0,
-        pos,
-        Some(&pick),
-        GameMode::Survival,
-    );
+    let rewards =
+        calculate_block_break_rewards(BlockType::Stone, 0, pos, Some(&pick), GameMode::Survival);
     assert_eq!(rewards.drops.len(), 1);
     assert_eq!(rewards.drops[0].item, Item::Stone);
 
@@ -54,13 +48,8 @@ fn calculate_block_break_rewards_harvest_and_drops() {
     assert_eq!(rewards.xp, 0);
 
     // Creative mode -> zero drops
-    let rewards = calculate_block_break_rewards(
-        BlockType::Stone,
-        0,
-        pos,
-        Some(&pick),
-        GameMode::Creative,
-    );
+    let rewards =
+        calculate_block_break_rewards(BlockType::Stone, 0, pos, Some(&pick), GameMode::Creative);
     assert!(rewards.drops.is_empty());
 }
 

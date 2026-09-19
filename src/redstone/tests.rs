@@ -194,7 +194,10 @@ fn dust_propagates_and_loses_one_level_per_block() {
     assert_eq!(system.power_at((1, Y, 0)), 15);
     assert_eq!(system.power_at((2, Y, 0)), 14);
     assert_eq!(manager.get_block(3, Y, 0), BlockType::RedstoneLamp);
-    assert_eq!(crate::world::BlockState::decode(manager.get_block_state(3, Y, 0)).is_open, true);
+    assert_eq!(
+        crate::world::BlockState::decode(manager.get_block_state(3, Y, 0)).is_open,
+        true
+    );
 }
 
 #[test]
@@ -232,7 +235,10 @@ fn repeater_applies_configured_tick_delay_and_restores_full_power() {
     system.tick(&mut manager, &[]);
     assert_eq!(system.power_at((1, Y, 0)), 15);
     assert_eq!(manager.get_block(2, Y, 0), BlockType::RedstoneLamp);
-    assert_eq!(crate::world::BlockState::decode(manager.get_block_state(2, Y, 0)).is_open, true);
+    assert_eq!(
+        crate::world::BlockState::decode(manager.get_block_state(2, Y, 0)).is_open,
+        true
+    );
 }
 
 #[test]
@@ -267,7 +273,10 @@ fn piston_pushes_one_movable_block() {
     system.tick(&mut manager, &[]);
 
     assert_eq!(manager.get_block(2, Y, 0), BlockType::Piston);
-    assert_eq!(crate::world::BlockState::decode(manager.get_block_state(2, Y, 0)).is_open, true);
+    assert_eq!(
+        crate::world::BlockState::decode(manager.get_block_state(2, Y, 0)).is_open,
+        true
+    );
     assert_eq!(manager.get_block(3, Y, 0), BlockType::Air);
     assert_eq!(manager.get_block(4, Y, 0), BlockType::Stone);
 }
@@ -311,7 +320,10 @@ fn door_and_trapdoor_redstone_toggle_preserves_facing_and_updates_open_bit() {
     system.tick(&mut manager, &[]);
 
     assert_eq!(manager.get_block(2, Y, 0), BlockType::OakDoor);
-    assert_eq!(crate::world::BlockState::decode(manager.get_block_state(2, Y, 0)).is_open, true);
+    assert_eq!(
+        crate::world::BlockState::decode(manager.get_block_state(2, Y, 0)).is_open,
+        true
+    );
     let toggled_raw = manager.get_block_state(2, Y, 0);
     let toggled_state = BlockState::decode(toggled_raw);
     assert_eq!(toggled_state.facing, Direction::West);
@@ -340,9 +352,15 @@ fn pressure_plate_opens_and_closes_an_adjacent_door() {
 
     system.tick(&mut manager, &[(0, Y + 1, 0)]);
     assert_eq!(manager.get_block(0, Y, 0), BlockType::PressurePlate);
-    assert_eq!(crate::world::BlockState::decode(manager.get_block_state(0, Y, 0)).is_open, true);
+    assert_eq!(
+        crate::world::BlockState::decode(manager.get_block_state(0, Y, 0)).is_open,
+        true
+    );
     assert_eq!(manager.get_block(1, Y, 0), BlockType::OakDoor);
-    assert_eq!(crate::world::BlockState::decode(manager.get_block_state(1, Y, 0)).is_open, true);
+    assert_eq!(
+        crate::world::BlockState::decode(manager.get_block_state(1, Y, 0)).is_open,
+        true
+    );
 
     system.tick(&mut manager, &[]);
     assert_eq!(manager.get_block(0, Y, 0), BlockType::PressurePlate);
@@ -396,9 +414,15 @@ fn occupant_movement_wakes_sleeping_pressure_plate_processing() {
     system.tick(&mut manager, &[occupant]);
     system.tick(&mut manager, &[occupant]);
     assert_eq!(manager.get_block(0, Y, 0), BlockType::PressurePlate);
-    assert_eq!(crate::world::BlockState::decode(manager.get_block_state(0, Y, 0)).is_open, true);
+    assert_eq!(
+        crate::world::BlockState::decode(manager.get_block_state(0, Y, 0)).is_open,
+        true
+    );
     assert_eq!(manager.get_block(1, Y, 0), BlockType::OakDoor);
-    assert_eq!(crate::world::BlockState::decode(manager.get_block_state(1, Y, 0)).is_open, true);
+    assert_eq!(
+        crate::world::BlockState::decode(manager.get_block_state(1, Y, 0)).is_open,
+        true
+    );
     assert!(system.is_sleeping());
 
     let scans = system.pressure_plate_scans;
@@ -1087,8 +1111,8 @@ fn reference_full_settle(
         block: BlockType,
         _state: ComponentState,
     ) -> u8 {
-        let open = crate::world::BlockState::decode(manager.get_block_state(pos.0, pos.1, pos.2))
-            .is_open;
+        let open =
+            crate::world::BlockState::decode(manager.get_block_state(pos.0, pos.1, pos.2)).is_open;
         let own_source = match block {
             BlockType::RedstoneTorch => !open,
             BlockType::Lever | BlockType::StoneButton | BlockType::PressurePlate => open,
@@ -1122,14 +1146,11 @@ fn reference_full_settle(
             .is_open;
             let mut emitted = neighbor_state.signal.power;
             if matches!(neighbor_block, BlockType::Repeater | BlockType::Comparator) {
-                if !neighbor_open
-                    || add(neighbor, neighbor_state.facing.delta()) != pos
-                {
+                if !neighbor_open || add(neighbor, neighbor_state.facing.delta()) != pos {
                     emitted = 0;
                 }
             }
-            if neighbor_block == BlockType::RedstoneWire
-                && matches!(block, BlockType::RedstoneWire)
+            if neighbor_block == BlockType::RedstoneWire && matches!(block, BlockType::RedstoneWire)
             {
                 emitted = emitted.saturating_sub(1);
             }

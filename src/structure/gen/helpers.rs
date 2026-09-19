@@ -9,13 +9,7 @@ use crate::structure::types::{
 use crate::world::BlockType;
 
 #[inline]
-pub fn push_block(
-    blocks: &mut Vec<BlockPlacement>,
-    x: i32,
-    y: i32,
-    z: i32,
-    block_type: BlockType,
-) {
+pub fn push_block(blocks: &mut Vec<BlockPlacement>, x: i32, y: i32, z: i32, block_type: BlockType) {
     blocks.push(BlockPlacement {
         world_x: x,
         world_y: y,

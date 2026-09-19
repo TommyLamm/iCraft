@@ -89,7 +89,10 @@ impl SaveWorker {
         }
     }
 
-    pub fn enqueue_blocking(&self, payload: SavePayload) -> Result<(), mpsc::SendError<SavePayload>> {
+    pub fn enqueue_blocking(
+        &self,
+        payload: SavePayload,
+    ) -> Result<(), mpsc::SendError<SavePayload>> {
         match self.job_tx.as_ref() {
             Some(tx) => tx.send(payload),
             None => Err(mpsc::SendError(payload)),
@@ -211,7 +214,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("icraft_worker_{label}_{}_{}", std::process::id(), unique));
+        let dir = std::env::temp_dir().join(format!(
+            "icraft_worker_{label}_{}_{}",
+            std::process::id(),
+            unique
+        ));
         let _ = fs::create_dir_all(&dir);
         dir
     }
@@ -231,7 +238,8 @@ mod tests {
             .expect("enqueue chunks");
 
         let entities_path = world_dir.join("entities.dat");
-        let entities_bytes = bincode::serialize(&Vec::<EntitySaveData>::new()).expect("serialize entities");
+        let entities_bytes =
+            bincode::serialize(&Vec::<EntitySaveData>::new()).expect("serialize entities");
         worker
             .enqueue_blocking(SavePayload::Entities {
                 dimension: Dimension::Overworld,

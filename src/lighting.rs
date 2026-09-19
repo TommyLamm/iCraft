@@ -74,7 +74,8 @@ struct LightNeighborhood {
 
 impl LightNeighborhood {
     fn take(chunk_manager: &mut impl LightColumnHost, origin_cx: i32, origin_cz: i32) -> Self {
-        let mut columns: [[Option<Chunk>; 3]; 3] = std::array::from_fn(|_| std::array::from_fn(|_| None));
+        let mut columns: [[Option<Chunk>; 3]; 3] =
+            std::array::from_fn(|_| std::array::from_fn(|_| None));
         for dz in 0..3i32 {
             for dx in 0..3i32 {
                 let key = (origin_cx + dx - 1, origin_cz + dz - 1);
@@ -102,7 +103,9 @@ impl LightNeighborhood {
         for dz in 0..3i32 {
             for dx in 0..3i32 {
                 if let Some(chunk) = columns[dz as usize][dx as usize].take() {
-                    chunk_manager.chunks_mut().insert((origin_cx + dx - 1, origin_cz + dz - 1), chunk);
+                    chunk_manager
+                        .chunks_mut()
+                        .insert((origin_cx + dx - 1, origin_cz + dz - 1), chunk);
                 }
             }
         }
@@ -289,13 +292,7 @@ fn run_remove(
         return;
     }
     let mut nb = LightNeighborhood::take(chunk_manager, origin_cx, origin_cz);
-    remove_light(
-        &mut nb,
-        kind,
-        removal_queue,
-        propagate_queue,
-        dirty_chunks,
-    );
+    remove_light(&mut nb, kind, removal_queue, propagate_queue, dirty_chunks);
     nb.restore(chunk_manager);
 }
 
@@ -315,14 +312,7 @@ pub fn propagate_sky_light(
         return;
     };
     let (ox, oz) = origin_from_node(first.x, first.z);
-    run_propagate(
-        chunk_manager,
-        ox,
-        oz,
-        LightKind::Sky,
-        queue,
-        dirty_chunks,
-    );
+    run_propagate(chunk_manager, ox, oz, LightKind::Sky, queue, dirty_chunks);
 }
 
 pub fn remove_sky_light(
@@ -355,14 +345,7 @@ pub fn propagate_block_light(
         return;
     };
     let (ox, oz) = origin_from_node(first.x, first.z);
-    run_propagate(
-        chunk_manager,
-        ox,
-        oz,
-        LightKind::Block,
-        queue,
-        dirty_chunks,
-    );
+    run_propagate(chunk_manager, ox, oz, LightKind::Block, queue, dirty_chunks);
 }
 
 pub fn remove_block_light(
@@ -635,7 +618,13 @@ fn neighbor_needs_propagation(
         };
         let bx = nx.rem_euclid(CHUNK_WIDTH as i32) as usize;
         let bz = nz.rem_euclid(CHUNK_DEPTH as i32) as usize;
-        if chunk.get_block_local(bx, ny, bz).def().properties.render_type == RenderType::Opaque {
+        if chunk
+            .get_block_local(bx, ny, bz)
+            .def()
+            .properties
+            .render_type
+            == RenderType::Opaque
+        {
             continue;
         }
         if get_light(chunk, bx, ny, bz) < light - 1 {
@@ -890,8 +879,8 @@ pub fn propagate_chunk_lighting(
 
 #[cfg(test)]
 mod tests {
-    use crate::chunk_manager::WorldColumns;
     use super::*;
+    use crate::chunk_manager::WorldColumns;
     use crate::world::{BlockType, Chunk};
 
     #[test]
@@ -1076,7 +1065,11 @@ mod tests {
         assert_eq!(sky_after_propagate, 15);
     }
 
-    fn lighting_checksum(chunk_manager: &crate::chunk_manager::WorldColumns, cx: i32, cz: i32) -> u64 {
+    fn lighting_checksum(
+        chunk_manager: &crate::chunk_manager::WorldColumns,
+        cx: i32,
+        cz: i32,
+    ) -> u64 {
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
         let chunk = chunk_manager.chunks.get(&(cx, cz)).expect("column present");
         for x in 0..CHUNK_WIDTH {
@@ -1154,14 +1147,7 @@ mod tests {
                         &mut dirty,
                     );
                 } else {
-                    update_block_light_after_removed(
-                        &mut chunk_manager,
-                        x,
-                        y,
-                        z,
-                        0,
-                        &mut dirty,
-                    );
+                    update_block_light_after_removed(&mut chunk_manager, x, y, z, 0, &mut dirty);
                 }
             }
         }

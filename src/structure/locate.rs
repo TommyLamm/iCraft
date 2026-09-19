@@ -51,10 +51,7 @@ pub fn locate_structure(
 
     // Always compete the pinned familiar city so locate matches manager placement.
     if id == StructureId::EndCity && dimension == Dimension::End {
-        consider(
-            (END_CITY_X, END_CITY_BASE_Y, END_CITY_Z),
-            &mut closest,
-        );
+        consider((END_CITY_X, END_CITY_BASE_Y, END_CITY_Z), &mut closest);
     }
 
     closest.map(|(pos, _)| pos)
@@ -130,13 +127,8 @@ mod tests {
     #[test]
     fn locate_end_city_matches_pinned_placement() {
         let seed = 7;
-        let pos = locate_structure(
-            StructureId::EndCity,
-            (1000, 64, 0),
-            seed,
-            Dimension::End,
-        )
-        .expect("End City");
+        let pos = locate_structure(StructureId::EndCity, (1000, 64, 0), seed, Dimension::End)
+            .expect("End City");
         assert_eq!(pos, (END_CITY_X, END_CITY_BASE_Y, END_CITY_Z));
 
         let manager = crate::structure::StructureManager::new();
@@ -144,9 +136,7 @@ mod tests {
         let city = starts
             .iter()
             .find(|s| {
-                s.id == StructureId::EndCity
-                    && s.origin_x == END_CITY_X
-                    && s.origin_z == END_CITY_Z
+                s.id == StructureId::EndCity && s.origin_x == END_CITY_X && s.origin_z == END_CITY_Z
             })
             .expect("pinned city in manager");
         assert_eq!(city.origin_x, pos.0);

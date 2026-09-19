@@ -43,7 +43,11 @@ fn embedded_runtime_uses_world_player_profile_and_fifo_ack() {
         crate::server_runtime::LocalSessionStorage::WorldPlayer
     );
 
-    let before = bridge.runtime.authority.world(Dimension::Overworld).get_block(8, 80, 8);
+    let before = bridge
+        .runtime
+        .authority
+        .world(Dimension::Overworld)
+        .get_block(8, 80, 8);
     bridge
         .queue_request(crate::network::protocol::GameplayRequest {
             request_id: 0,
@@ -64,7 +68,14 @@ fn embedded_runtime_uses_world_player_profile_and_fifo_ack() {
             },
         })
         .expect("request should enter bounded FIFO");
-    assert_eq!(bridge.runtime.authority.world(Dimension::Overworld).get_block(8, 80, 8), before);
+    assert_eq!(
+        bridge
+            .runtime
+            .authority
+            .world(Dimension::Overworld)
+            .get_block(8, 80, 8),
+        before
+    );
     let output = bridge.tick().expect("fixed tick should run");
     assert!(!output
         .snapshot
@@ -72,7 +83,14 @@ fn embedded_runtime_uses_world_player_profile_and_fifo_ack() {
         .iter()
         .any(|mutation| mutation.position == (8, 80, 8)
             && mutation.block == BlockType::Glass.to_wire()));
-    assert_eq!(bridge.runtime.authority.world(Dimension::Overworld).get_block(8, 80, 8), before);
+    assert_eq!(
+        bridge
+            .runtime
+            .authority
+            .world(Dimension::Overworld)
+            .get_block(8, 80, 8),
+        before
+    );
     assert!(output.presentation_events.iter().any(|event| {
         matches!(
             event.as_packet_event(),
@@ -478,13 +496,17 @@ fn network_handle_preserves_client_chat_and_disconnect_payloads() {
         thread: None,
     };
     inbound_tx
-        .send(crate::network::client::ClientToGame::packet(Packet::ChatMessage {
-            sender: "Alex".to_string(),
-            message: "hello".to_string(),
-        }))
+        .send(crate::network::client::ClientToGame::packet(
+            Packet::ChatMessage {
+                sender: "Alex".to_string(),
+                message: "hello".to_string(),
+            },
+        ))
         .unwrap();
     inbound_tx
-        .send(crate::network::client::ClientToGame::disconnect("server stopped"))
+        .send(crate::network::client::ClientToGame::disconnect(
+            "server stopped",
+        ))
         .unwrap();
 
     let events = handle.drain_inbound();
@@ -516,16 +538,18 @@ fn client_block_change_is_classified_as_host_authority() {
         thread: None,
     };
     inbound_tx
-        .send(crate::network::client::ClientToGame::packet(Packet::BlockChange {
-            dimension: 0,
-            revision: 1,
-            x: 3,
-            y: 80,
-            z: -4,
-            block: BlockType::Stone.to_wire(),
-            state: 0,
-            raw_fluid: 0,
-        }))
+        .send(crate::network::client::ClientToGame::packet(
+            Packet::BlockChange {
+                dimension: 0,
+                revision: 1,
+                x: 3,
+                y: 80,
+                z: -4,
+                block: BlockType::Stone.to_wire(),
+                state: 0,
+                raw_fluid: 0,
+            },
+        ))
         .unwrap();
 
     assert!(matches!(
@@ -666,8 +690,7 @@ fn door_and_trapdoor_placement_states_and_hinges() {
     assert!(bottom_hinge.is_right_hinge);
 
     // Trapdoor state
-    let trapdoor =
-        crate::world::BlockState::for_trapdoor_placement(-std::f32::consts::FRAC_PI_2);
+    let trapdoor = crate::world::BlockState::for_trapdoor_placement(-std::f32::consts::FRAC_PI_2);
     assert_eq!(trapdoor.facing, crate::redstone::Direction::North);
     assert!(!trapdoor.is_open);
 }

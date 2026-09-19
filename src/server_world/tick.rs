@@ -112,6 +112,4 @@ impl ServerWorld {
         let union = self.simulation_union_from_players(players);
         self.tick(players, &union)
     }
-
 }
-

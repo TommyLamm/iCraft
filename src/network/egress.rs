@@ -5,9 +5,7 @@ use super::channels::{
     HostEventSender, HostToServer, ProjectionDest, ProjectionEvent, ServerToHost,
 };
 use super::protocol::{Packet, PlayerId};
-use super::session::{
-    reliable_send, reliable_send_encoded, NetworkMetrics, Sessions,
-};
+use super::session::{reliable_send, reliable_send_encoded, NetworkMetrics, Sessions};
 
 pub(crate) async fn normalize_host_response(
     sessions: &Sessions,
@@ -70,14 +68,7 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
             evict_slow_clients(sessions, server_to_host, vec![to]).await;
         }
         HostToServer::DisconnectClient { to, reason } => {
-            let failed = send_to(
-                sessions,
-                to,
-                Packet::Disconnect {
-                    reason,
-                },
-            )
-            .await;
+            let failed = send_to(sessions, to, Packet::Disconnect { reason }).await;
             evict_slow_clients(sessions, server_to_host, failed).await;
         }
         HostToServer::Project(event) => {
@@ -92,15 +83,10 @@ async fn deliver_projection<S: HostEventSender>(
     metrics: &NetworkMetrics,
     event: ProjectionEvent,
 ) {
-    let ProjectionEvent {
-        dest,
-        mut packet,
-    } = event;
+    let ProjectionEvent { dest, mut packet } = event;
 
-    if let (
-        ProjectionDest::Session(to),
-        Packet::PlayerSessionUpdate { player_id, .. },
-    ) = (dest, &packet)
+    if let (ProjectionDest::Session(to), Packet::PlayerSessionUpdate { player_id, .. }) =
+        (dest, &packet)
     {
         if to != *player_id {
             metrics.record_rejected_request();
@@ -247,13 +233,7 @@ pub(crate) async fn evict_slow_clients<S: HostEventSender>(
             session.username, id
         );
         let _ = server_to_host.send(ServerToHost::ClientLeft { id });
-        let failed = broadcast_reliably(
-            sessions,
-            Packet::PlayerLeave {
-                id,
-            },
-        )
-        .await;
+        let failed = broadcast_reliably(sessions, Packet::PlayerLeave { id }).await;
         pending.extend(failed);
     }
 }

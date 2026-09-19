@@ -11,14 +11,14 @@ use crate::authority::interest::{
 use crate::dimension::Dimension;
 use crate::network::protocol::{
     ContainerAction, EntityStateWire, GameplayResponse, ItemWire, Packet, PlayerEffectWire,
-    SessionGameplayWire, PROTOCOL_VERSION,
+    SessionGameplayWire,
 };
 use crate::network::server::{HostToServer, ProjectionEvent};
 use crate::save::ChunkSaveData;
+use crate::world::chunk_xz;
 use glam::Vec3;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use crate::world::chunk_xz;
 
 /// Pose / health / anim signature used to skip unchanged entity state fanout.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -306,12 +306,7 @@ impl ServerRuntime {
     }
 
     pub(super) fn send_response(&mut self, to: u64, response: GameplayResponse) {
-        self.send_targeted(
-            to,
-            Packet::GameplayResponse {
-                response,
-            },
-        );
+        self.send_targeted(to, Packet::GameplayResponse { response });
     }
 
     pub(super) fn send_respawn_result(
@@ -652,9 +647,9 @@ impl ServerRuntime {
                 let chunk = chunk_xz(position.0, position.2);
                 let mut ids = self.sessions_interested_in_chunk(dimension, chunk);
                 ids.retain(|id| {
-                    self.players
-                        .get(id)
-                        .is_some_and(|session| session.interest.wants_container(dimension, position))
+                    self.players.get(id).is_some_and(|session| {
+                        session.interest.wants_container(dimension, position)
+                    })
                 });
                 ids
             }
@@ -736,7 +731,10 @@ impl ServerRuntime {
                 self.authority
                     .session(id)
                     .map(|authority| (session.interest.dimension, authority.position))
-                    .or(Some((session.interest.dimension, session.last_pose_position)))
+                    .or(Some((
+                        session.interest.dimension,
+                        session.last_pose_position,
+                    )))
             }) {
                 self.update_interest_for_at(id, dimension, position, snapshot.tick);
             }
@@ -840,8 +838,12 @@ impl ServerRuntime {
                         continue;
                     }
                     session.prune_projected_entity_states();
-                    let mut entity_ids: Vec<_> =
-                        session.interest.simulation_entities.iter().copied().collect();
+                    let mut entity_ids: Vec<_> = session
+                        .interest
+                        .simulation_entities
+                        .iter()
+                        .copied()
+                        .collect();
                     entity_ids.sort_unstable();
                     entity_ids
                 };
@@ -932,7 +934,10 @@ impl ServerRuntime {
         if let Some(session) = self.players.get(&id) {
             self.effective_distances_for_session(session)
         } else {
-            (self.properties.view_distance, self.properties.simulation_distance)
+            (
+                self.properties.view_distance,
+                self.properties.simulation_distance,
+            )
         }
     }
 
@@ -1027,10 +1032,7 @@ impl ServerRuntime {
             .map(|world| {
                 let entities = world
                     .entities
-                    .query_radius(
-                        Vec3::from_array(position),
-                        f32::from(view_distance) * 16.0,
-                    )
+                    .query_radius(Vec3::from_array(position), f32::from(view_distance) * 16.0)
                     .map(|entity| entity.id)
                     .collect::<Vec<_>>();
                 let simulation_entities = world

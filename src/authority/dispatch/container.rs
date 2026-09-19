@@ -132,15 +132,19 @@ impl AuthorityCore {
                 if transactions::brew_locks_slot(&candidate, rod_slot) {
                     return Err(RejectReason::InvalidState);
                 }
-                let context = self
-                    .world_mut_expect(dimension)
-                    .fishing_context(&candidate, position, game_mode != GameMode::Creative)?;
+                let context = self.world_mut_expect(dimension).fishing_context(
+                    &candidate,
+                    position,
+                    game_mode != GameMode::Creative,
+                )?;
                 fishing::reel(&mut candidate, session_id, hand, context)?;
             }
             2 => {
-                let context = self
-                    .world_mut_expect(dimension)
-                    .fishing_context(&candidate, position, game_mode != GameMode::Creative)?;
+                let context = self.world_mut_expect(dimension).fishing_context(
+                    &candidate,
+                    position,
+                    game_mode != GameMode::Creative,
+                )?;
                 fishing::cancel(&mut candidate, hand, context)?;
             }
             _ => return Err(RejectReason::InvalidState),
@@ -188,7 +192,10 @@ impl AuthorityCore {
             return Err(RejectReason::PermissionDenied);
         }
         let slot_index = usize::from(slot);
-        let Some(mut slots) = self.world_mut_expect(dimension).container_item_slots(position) else {
+        let Some(mut slots) = self
+            .world_mut_expect(dimension)
+            .container_item_slots(position)
+        else {
             return Err(RejectReason::InvalidState);
         };
         if slot_index >= slots.len() {

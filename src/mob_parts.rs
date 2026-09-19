@@ -79,7 +79,6 @@ pub enum TexMode {
     PlayerArm,
 }
 
-
 pub const ZOMBIE_PARTS: &[MobPart] = &[
     MobPart {
         size: [0.5, 0.5, 0.5],
@@ -305,35 +304,31 @@ pub const CREEPER_PARTS: &[MobPart] = &[
     },
 ];
 
-pub const ARROW_PARTS: &[MobPart] = &[
-    MobPart {
-        size: [0.06, 0.06, 0.6],
-        offset: [0.0, 0.0, 0.0],
-        pivot: [0.0, 0.0, 0.0],
-        tex_cols: [8; 6],
-        tex_row: 9,
-        limb: Limb::Look,
-        scale: PartScale::None,
-        pivot_mode: PivotMode::World,
-        tex_mode: TexMode::Fixed,
-        flags: 0,
-    },
-];
+pub const ARROW_PARTS: &[MobPart] = &[MobPart {
+    size: [0.06, 0.06, 0.6],
+    offset: [0.0, 0.0, 0.0],
+    pivot: [0.0, 0.0, 0.0],
+    tex_cols: [8; 6],
+    tex_row: 9,
+    limb: Limb::Look,
+    scale: PartScale::None,
+    pivot_mode: PivotMode::World,
+    tex_mode: TexMode::Fixed,
+    flags: 0,
+}];
 
-pub const SPLASHPOTION_PARTS: &[MobPart] = &[
-    MobPart {
-        size: [0.06, 0.06, 0.6],
-        offset: [0.0, 0.0, 0.0],
-        pivot: [0.0, 0.0, 0.0],
-        tex_cols: [8; 6],
-        tex_row: 9,
-        limb: Limb::Look,
-        scale: PartScale::None,
-        pivot_mode: PivotMode::World,
-        tex_mode: TexMode::Fixed,
-        flags: 0,
-    },
-];
+pub const SPLASHPOTION_PARTS: &[MobPart] = &[MobPart {
+    size: [0.06, 0.06, 0.6],
+    offset: [0.0, 0.0, 0.0],
+    pivot: [0.0, 0.0, 0.0],
+    tex_cols: [8; 6],
+    tex_row: 9,
+    limb: Limb::Look,
+    scale: PartScale::None,
+    pivot_mode: PivotMode::World,
+    tex_mode: TexMode::Fixed,
+    flags: 0,
+}];
 
 pub const PIG_PARTS: &[MobPart] = &[
     MobPart {
@@ -1049,50 +1044,44 @@ pub const ENDCRYSTAL_PARTS: &[MobPart] = &[
     },
 ];
 
-pub const WITHERSKULL_PARTS: &[MobPart] = &[
-    MobPart {
-        size: [0.3, 0.3, 0.3],
-        offset: [0.0, 0.0, 0.0],
-        pivot: [0.0, 0.0, 0.0],
-        tex_cols: [8; 6],
-        tex_row: 8,
-        limb: Limb::Look,
-        scale: PartScale::None,
-        pivot_mode: PivotMode::World,
-        tex_mode: TexMode::Fixed,
-        flags: 16,
-    },
-];
+pub const WITHERSKULL_PARTS: &[MobPart] = &[MobPart {
+    size: [0.3, 0.3, 0.3],
+    offset: [0.0, 0.0, 0.0],
+    pivot: [0.0, 0.0, 0.0],
+    tex_cols: [8; 6],
+    tex_row: 8,
+    limb: Limb::Look,
+    scale: PartScale::None,
+    pivot_mode: PivotMode::World,
+    tex_mode: TexMode::Fixed,
+    flags: 16,
+}];
 
-pub const DRAGONBREATH_PARTS: &[MobPart] = &[
-    MobPart {
-        size: [0.22, 0.22, 0.22],
-        offset: [0.0, 0.0, 0.0],
-        pivot: [0.0, 0.0, 0.0],
-        tex_cols: [6; 6],
-        tex_row: 4,
-        limb: Limb::Look,
-        scale: PartScale::BreathPulse,
-        pivot_mode: PivotMode::World,
-        tex_mode: TexMode::Fixed,
-        flags: 16,
-    },
-];
+pub const DRAGONBREATH_PARTS: &[MobPart] = &[MobPart {
+    size: [0.22, 0.22, 0.22],
+    offset: [0.0, 0.0, 0.0],
+    pivot: [0.0, 0.0, 0.0],
+    tex_cols: [6; 6],
+    tex_row: 4,
+    limb: Limb::Look,
+    scale: PartScale::BreathPulse,
+    pivot_mode: PivotMode::World,
+    tex_mode: TexMode::Fixed,
+    flags: 16,
+}];
 
-pub const HEARTPARTICLE_PARTS: &[MobPart] = &[
-    MobPart {
-        size: [0.25, 0.25, 0.01],
-        offset: [0.0, 0.0, 0.0],
-        pivot: [0.0, 0.0, 0.0],
-        tex_cols: [0; 6],
-        tex_row: 8,
-        limb: Limb::Look,
-        scale: PartScale::None,
-        pivot_mode: PivotMode::World,
-        tex_mode: TexMode::Fixed,
-        flags: 0,
-    },
-];
+pub const HEARTPARTICLE_PARTS: &[MobPart] = &[MobPart {
+    size: [0.25, 0.25, 0.01],
+    offset: [0.0, 0.0, 0.0],
+    pivot: [0.0, 0.0, 0.0],
+    tex_cols: [0; 6],
+    tex_row: 8,
+    limb: Limb::Look,
+    scale: PartScale::None,
+    pivot_mode: PivotMode::World,
+    tex_mode: TexMode::Fixed,
+    flags: 0,
+}];
 
 pub const REMOTEPLAYER_PARTS: &[MobPart] = &[
     MobPart {
@@ -1220,20 +1209,18 @@ pub const SPIDER_PARTS: &[MobPart] = &[
     },
 ];
 
-pub const SLIME_PARTS: &[MobPart] = &[
-    MobPart {
-        size: [0.5, 0.5, 0.5],
-        offset: [0.0, 0.0, 0.0],
-        pivot: [0.0, 0.25, 0.0],
-        tex_cols: [2; 6],
-        tex_row: 11,
-        limb: Limb::Static,
-        scale: PartScale::SlimeSize,
-        pivot_mode: PivotMode::Local,
-        tex_mode: TexMode::Fixed,
-        flags: 2,
-    },
-];
+pub const SLIME_PARTS: &[MobPart] = &[MobPart {
+    size: [0.5, 0.5, 0.5],
+    offset: [0.0, 0.0, 0.0],
+    pivot: [0.0, 0.25, 0.0],
+    tex_cols: [2; 6],
+    tex_row: 11,
+    limb: Limb::Static,
+    scale: PartScale::SlimeSize,
+    pivot_mode: PivotMode::Local,
+    tex_mode: TexMode::Fixed,
+    flags: 2,
+}];
 
 pub const WITCH_PARTS: &[MobPart] = &[
     MobPart {
@@ -1289,35 +1276,31 @@ pub const DROWNED_PARTS: &[MobPart] = &[
     },
 ];
 
-pub const GHAST_PARTS: &[MobPart] = &[
-    MobPart {
-        size: [3.5, 3.5, 3.5],
-        offset: [0.0, 0.0, 0.0],
-        pivot: [0.0, 2.0, 0.0],
-        tex_cols: [7; 6],
-        tex_row: 11,
-        limb: Limb::Static,
-        scale: PartScale::None,
-        pivot_mode: PivotMode::Local,
-        tex_mode: TexMode::Fixed,
-        flags: 0,
-    },
-];
+pub const GHAST_PARTS: &[MobPart] = &[MobPart {
+    size: [3.5, 3.5, 3.5],
+    offset: [0.0, 0.0, 0.0],
+    pivot: [0.0, 2.0, 0.0],
+    tex_cols: [7; 6],
+    tex_row: 11,
+    limb: Limb::Static,
+    scale: PartScale::None,
+    pivot_mode: PivotMode::Local,
+    tex_mode: TexMode::Fixed,
+    flags: 0,
+}];
 
-pub const MAGMACUBE_PARTS: &[MobPart] = &[
-    MobPart {
-        size: [0.5, 0.5, 0.5],
-        offset: [0.0, 0.0, 0.0],
-        pivot: [0.0, 0.25, 0.0],
-        tex_cols: [8; 6],
-        tex_row: 11,
-        limb: Limb::Static,
-        scale: PartScale::SlimeSize,
-        pivot_mode: PivotMode::Local,
-        tex_mode: TexMode::Fixed,
-        flags: 2,
-    },
-];
+pub const MAGMACUBE_PARTS: &[MobPart] = &[MobPart {
+    size: [0.5, 0.5, 0.5],
+    offset: [0.0, 0.0, 0.0],
+    pivot: [0.0, 0.25, 0.0],
+    tex_cols: [8; 6],
+    tex_row: 11,
+    limb: Limb::Static,
+    scale: PartScale::SlimeSize,
+    pivot_mode: PivotMode::Local,
+    tex_mode: TexMode::Fixed,
+    flags: 2,
+}];
 
 pub const WITHERSKELETON_PARTS: &[MobPart] = &[
     MobPart {
@@ -1427,35 +1410,31 @@ pub const HORSE_PARTS: &[MobPart] = &[
     },
 ];
 
-pub const BAT_PARTS: &[MobPart] = &[
-    MobPart {
-        size: [0.3, 0.3, 0.3],
-        offset: [0.0, 0.0, 0.0],
-        pivot: [0.0, 0.3, 0.0],
-        tex_cols: [15; 6],
-        tex_row: 11,
-        limb: Limb::Static,
-        scale: PartScale::None,
-        pivot_mode: PivotMode::Local,
-        tex_mode: TexMode::Fixed,
-        flags: 0,
-    },
-];
+pub const BAT_PARTS: &[MobPart] = &[MobPart {
+    size: [0.3, 0.3, 0.3],
+    offset: [0.0, 0.0, 0.0],
+    pivot: [0.0, 0.3, 0.0],
+    tex_cols: [15; 6],
+    tex_row: 11,
+    limb: Limb::Static,
+    scale: PartScale::None,
+    pivot_mode: PivotMode::Local,
+    tex_mode: TexMode::Fixed,
+    flags: 0,
+}];
 
-pub const SQUID_PARTS: &[MobPart] = &[
-    MobPart {
-        size: [0.7, 0.7, 0.7],
-        offset: [0.0, 0.0, 0.0],
-        pivot: [0.0, 0.5, 0.0],
-        tex_cols: [0; 6],
-        tex_row: 12,
-        limb: Limb::Look,
-        scale: PartScale::None,
-        pivot_mode: PivotMode::Local,
-        tex_mode: TexMode::Fixed,
-        flags: 0,
-    },
-];
+pub const SQUID_PARTS: &[MobPart] = &[MobPart {
+    size: [0.7, 0.7, 0.7],
+    offset: [0.0, 0.0, 0.0],
+    pivot: [0.0, 0.5, 0.0],
+    tex_cols: [0; 6],
+    tex_row: 12,
+    limb: Limb::Look,
+    scale: PartScale::None,
+    pivot_mode: PivotMode::Local,
+    tex_mode: TexMode::Fixed,
+    flags: 0,
+}];
 
 pub const VILLAGER_PARTS: &[MobPart] = &[
     MobPart {
@@ -1685,18 +1664,13 @@ pub const RAVAGER_PARTS: &[MobPart] = &[
     },
 ];
 
-pub const EXPERIENCEORB_PARTS: &[MobPart] = &[
-];
+pub const EXPERIENCEORB_PARTS: &[MobPart] = &[];
 
-pub const BOAT_PARTS: &[MobPart] = &[
-];
+pub const BOAT_PARTS: &[MobPart] = &[];
 
-pub const MINECART_PARTS: &[MobPart] = &[
-];
+pub const MINECART_PARTS: &[MobPart] = &[];
 
-pub const FISHINGHOOK_PARTS: &[MobPart] = &[
-];
-
+pub const FISHINGHOOK_PARTS: &[MobPart] = &[];
 
 pub fn parts_for(ty: EntityType) -> Option<&'static [MobPart]> {
     Some(match ty {
@@ -1938,7 +1912,9 @@ pub fn emit_table_parts(
 
     // Small animator post-passes that are awkward as static parts.
     match entity.entity_type {
-        EntityType::Skeleton => emit_skeleton_bow(entity, cuboid_instances, to_world, time, light_val),
+        EntityType::Skeleton => {
+            emit_skeleton_bow(entity, cuboid_instances, to_world, time, light_val)
+        }
         EntityType::Blaze => emit_blaze_rods(entity, cuboid_instances, to_world, time, light_val),
         _ => {}
     }
@@ -1969,11 +1945,51 @@ fn emit_skeleton_bow(
     let sin_lp = left_arm_pitch.sin();
     let hand_rel = Vec3::new(0.0, -0.65 * cos_lp, -0.65 * sin_lp);
     let bow_pivot = to_world(left_shoulder + hand_rel);
-    add_cuboid(cuboid_instances, Vec3::new(0.08, 0.25, 0.08), Vec3::ZERO, bow_pivot, entity.yaw, aim_pitch, [9; 6], 9, light_val);
-    add_cuboid(cuboid_instances, Vec3::new(0.06, 0.35, 0.06), Vec3::new(0.0, 0.25, 0.04), bow_pivot, entity.yaw, aim_pitch, [9; 6], 9, light_val);
-    add_cuboid(cuboid_instances, Vec3::new(0.06, 0.35, 0.06), Vec3::new(0.0, -0.25, 0.04), bow_pivot, entity.yaw, aim_pitch, [9; 6], 9, light_val);
+    add_cuboid(
+        cuboid_instances,
+        Vec3::new(0.08, 0.25, 0.08),
+        Vec3::ZERO,
+        bow_pivot,
+        entity.yaw,
+        aim_pitch,
+        [9; 6],
+        9,
+        light_val,
+    );
+    add_cuboid(
+        cuboid_instances,
+        Vec3::new(0.06, 0.35, 0.06),
+        Vec3::new(0.0, 0.25, 0.04),
+        bow_pivot,
+        entity.yaw,
+        aim_pitch,
+        [9; 6],
+        9,
+        light_val,
+    );
+    add_cuboid(
+        cuboid_instances,
+        Vec3::new(0.06, 0.35, 0.06),
+        Vec3::new(0.0, -0.25, 0.04),
+        bow_pivot,
+        entity.yaw,
+        aim_pitch,
+        [9; 6],
+        9,
+        light_val,
+    );
     let string_offset_z = -0.04 - 0.25 * draw_progress;
-    add_cuboid(cuboid_instances, Vec3::new(0.02, 0.85, 0.02), Vec3::new(0.0, 0.0, string_offset_z), bow_pivot, entity.yaw, aim_pitch, [10; 6], 9, light_val);
+    add_cuboid(
+        cuboid_instances,
+        Vec3::new(0.02, 0.85, 0.02),
+        Vec3::new(0.0, 0.0, string_offset_z),
+        bow_pivot,
+        entity.yaw,
+        aim_pitch,
+        [10; 6],
+        9,
+        light_val,
+    );
 }
 
 fn emit_blaze_rods(
@@ -2001,7 +2017,11 @@ fn emit_blaze_rods(
                 cuboid_instances,
                 Vec3::new(0.12, 0.62, 0.12),
                 Vec3::ZERO,
-                to_world(Vec3::new(angle.cos() * radius, y + hover, angle.sin() * radius)),
+                to_world(Vec3::new(
+                    angle.cos() * radius,
+                    y + hover,
+                    angle.sin() * radius,
+                )),
                 angle,
                 0.0,
                 [6; 6],

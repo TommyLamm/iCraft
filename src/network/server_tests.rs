@@ -3,19 +3,21 @@
 use super::*;
 use crate::network::protocol::{
     Action, GameplayOperation, GameplayRequest, GameplayResponse, LightningStrike, Packet,
-    RejectReason, SessionGameplayWire, PROTOCOL_VERSION,
+    PlayerId, RejectReason, SessionGameplayWire, PROTOCOL_VERSION,
+};
+use crate::network::session::{
+    CatchupMailbox, ClientSession, EncodedPacket, GameplaySessionState, PoseMailbox, QueuedPacket,
+    StateMailbox, TrackedPacket, CLIENT_QUEUE_CAPACITY, MAX_CHAT_CHARS,
 };
 use std::collections::HashSet;
 use std::net::TcpListener as StdTcpListener;
+use std::time::Duration;
 use tokio::sync::{mpsc, watch};
-use tokio::time::Instant;
+use tokio::time::{self, Instant};
 
 use crate::network::loopback_test::{connect_loopback_stream, LoopbackTestServer};
 
-async fn recv_matching(
-    connection: &mut Connection,
-    predicate: impl Fn(&Packet) -> bool,
-) -> Packet {
+async fn recv_matching(connection: &mut Connection, predicate: impl Fn(&Packet) -> bool) -> Packet {
     time::timeout(Duration::from_secs(2), async {
         loop {
             let packet = connection.recv().await.unwrap().packet;
@@ -100,12 +102,13 @@ async fn gameplay_request_is_bound_to_authenticated_session() {
         session_id: 999_999,
         dimension: 0,
         client_revision: 0,
-        operation: crate::network::protocol::GameplayOperation::ItemUse { item: crate::inventory::Item::Bread as u32, count: 1 },
+        operation: crate::network::protocol::GameplayOperation::ItemUse {
+            item: crate::inventory::Item::Bread as u32,
+            count: 1,
+        },
     };
     client
-        .send(&Packet::GameplayRequest {
-            request,
-        })
+        .send(&Packet::GameplayRequest { request })
         .await
         .unwrap();
     let event = server
@@ -129,7 +132,10 @@ async fn gameplay_requests_are_idempotent_and_rejections_keep_sequences() {
         session_id: 999_999,
         dimension: 0,
         client_revision: 0,
-        operation: GameplayOperation::ItemUse { item: crate::inventory::Item::Bread as u32, count: 1 },
+        operation: GameplayOperation::ItemUse {
+            item: crate::inventory::Item::Bread as u32,
+            count: 1,
+        },
     };
     client
         .send(&Packet::GameplayRequest {
@@ -322,7 +328,10 @@ async fn request_rate_limit_rejects_without_forwarding_the_second_request() {
         session_id: id,
         dimension: 0,
         client_revision: 0,
-        operation: GameplayOperation::ItemUse { item: crate::inventory::Item::Bread as u32, count: 1 },
+        operation: GameplayOperation::ItemUse {
+            item: crate::inventory::Item::Bread as u32,
+            count: 1,
+        },
     };
     client
         .send(&Packet::GameplayRequest {
@@ -603,14 +612,14 @@ async fn relays_player_position_through_host() {
     server
         .host_tx
         .send(HostToServer::project_broadcast(Packet::PlayerPosition {
-                id: id_a,
-                sequence: 12,
-                sender_time_millis: 600,
-                x: 10.0,
-                y: 65.0,
-                z: -4.0,
-                yaw: 1.5,
-                pitch: -0.25,
+            id: id_a,
+            sequence: 12,
+            sender_time_millis: 600,
+            x: 10.0,
+            y: 65.0,
+            z: -4.0,
+            yaw: 1.5,
+            pitch: -0.25,
         }))
         .await
         .unwrap();
@@ -712,12 +721,10 @@ async fn reliable_join_and_leave_wait_for_bounded_queue_capacity() {
     let (observer_out_tx, mut observer_out_rx) = mpsc::channel(1);
     let metrics = NetworkMetrics::default();
     observer_out_tx
-        .try_send(QueuedPacket::Outbound(
-            TrackedPacket::new(
-                EncodedPacket::new(Packet::Keepalive).expect("keepalive encodes"),
-                &metrics,
-            ),
-        ))
+        .try_send(QueuedPacket::Outbound(TrackedPacket::new(
+            EncodedPacket::new(Packet::Keepalive).expect("keepalive encodes"),
+            &metrics,
+        )))
         .unwrap();
     sessions.lock().await.insert(
         1,
@@ -781,8 +788,8 @@ async fn reliable_join_and_leave_wait_for_bounded_queue_capacity() {
     time::timeout(
         Duration::from_secs(1),
         server.handle_host_command(HostToServer::project_broadcast(Packet::PlayerJoin {
-                id: 3,
-                username: "joining".into(),
+            id: 3,
+            username: "joining".into(),
         })),
     )
     .await
@@ -814,12 +821,10 @@ async fn full_reliable_queue_evicts_slow_client_without_ghost_session() {
     let (out_tx, _out_rx) = mpsc::channel(1);
     let metrics = NetworkMetrics::default();
     out_tx
-        .try_send(QueuedPacket::Outbound(
-            TrackedPacket::new(
-                EncodedPacket::new(Packet::Keepalive).expect("keepalive encodes"),
-                &metrics,
-            ),
-        ))
+        .try_send(QueuedPacket::Outbound(TrackedPacket::new(
+            EncodedPacket::new(Packet::Keepalive).expect("keepalive encodes"),
+            &metrics,
+        )))
         .unwrap();
     let (cancel_tx, mut cancel_rx) = watch::channel(false);
     sessions.lock().await.insert(
@@ -852,8 +857,8 @@ async fn full_reliable_queue_evicts_slow_client_without_ghost_session() {
     time::timeout(
         Duration::from_secs(1),
         server.handle_host_command(HostToServer::project_broadcast(Packet::PlayerJoin {
-                id: 2,
-                username: "joining".into(),
+            id: 2,
+            username: "joining".into(),
         })),
     )
     .await
@@ -1023,7 +1028,10 @@ async fn weather_snapshot_can_target_only_the_joining_client() {
 
     let existing_received_snapshot = time::timeout(Duration::from_millis(150), async {
         loop {
-            if matches!(existing.recv().await.unwrap().packet, Packet::TimeSync { .. }) {
+            if matches!(
+                existing.recv().await.unwrap().packet,
+                Packet::TimeSync { .. }
+            ) {
                 break;
             }
         }
@@ -1051,16 +1059,16 @@ async fn weather_snapshot_and_lightning_broadcast_in_reliable_order() {
     server
         .host_tx
         .send(HostToServer::project_broadcast(Packet::TimeSync {
-                ticks: 22_000,
-                weather: 2,
-                weather_remaining_ticks: 4_500.0,
+            ticks: 22_000,
+            weather: 2,
+            weather_remaining_ticks: 4_500.0,
         }))
         .await
         .unwrap();
     server
         .host_tx
         .send(HostToServer::project_broadcast(Packet::LightningStrike {
-                strike: strike,
+            strike: strike,
         }))
         .await
         .unwrap();
@@ -1146,16 +1154,13 @@ async fn relays_player_action_through_host() {
     server
         .host_tx
         .send(HostToServer::project_broadcast(Packet::PlayerAction {
-                id: id_a,
-                action: Action::Break,
+            id: id_a,
+            action: Action::Break,
         }))
         .await
         .unwrap();
-    let packet =
-        recv_matching(&mut client_b, |p| matches!(p, Packet::PlayerAction { .. })).await;
-    assert!(
-        matches!(packet, Packet::PlayerAction { id, action: Action::Break, .. } if id == id_a)
-    );
+    let packet = recv_matching(&mut client_b, |p| matches!(p, Packet::PlayerAction { .. })).await;
+    assert!(matches!(packet, Packet::PlayerAction { id, action: Action::Break, .. } if id == id_a));
     server.stop().await;
 }
 
@@ -1185,8 +1190,8 @@ async fn relays_chat_through_host_with_canonical_sender() {
     server
         .host_tx
         .send(HostToServer::project_broadcast(Packet::ChatMessage {
-                sender: "steve".into(),
-                message: "hello".into(),
+            sender: "steve".into(),
+            message: "hello".into(),
         }))
         .await
         .unwrap();
@@ -1240,9 +1245,10 @@ async fn relays_block_action_gameplay_request() {
     let (mut client_a, id_a) = server.connect("steve").await;
     let (_client_b, _id_b) = server.connect("alex").await;
 
-    let held = crate::network::protocol::ItemWire::from_stack(
-        &crate::inventory::ItemStack::new(crate::inventory::Item::StonePickaxe, 1),
-    );
+    let held = crate::network::protocol::ItemWire::from_stack(&crate::inventory::ItemStack::new(
+        crate::inventory::Item::StonePickaxe,
+        1,
+    ));
     client_a
         .send(&Packet::GameplayRequest {
             request: GameplayRequest {
@@ -1349,9 +1355,9 @@ async fn player_session_projection_is_private_and_rejects_mismatched_owner() {
                 player_id: id_b,
                 dimension: 0,
                 state: SessionGameplayWire {
-                revision: 2,
-                ..state
-            },
+                    revision: 2,
+                    ..state
+                },
             },
         ))
         .await
@@ -1425,7 +1431,10 @@ fn item_use_request(request_id: u128, client_sequence: u64) -> GameplayRequest {
         session_id: 999_999,
         dimension: 0,
         client_revision: 0,
-        operation: GameplayOperation::ItemUse { item: crate::inventory::Item::Bread as u32, count: 1 },
+        operation: GameplayOperation::ItemUse {
+            item: crate::inventory::Item::Bread as u32,
+            count: 1,
+        },
     }
 }
 
@@ -1505,10 +1514,10 @@ async fn oversized_chat_is_rejected_before_host_enqueue() {
             peer_id,
             Packet::GameplayResponse {
                 response: GameplayResponse {
-                request_id: 42,
-                server_sequence: 1,
-                outcome: crate::network::protocol::GameplayOutcome::Accepted { revision: 1 },
-            },
+                    request_id: 42,
+                    server_sequence: 1,
+                    outcome: crate::network::protocol::GameplayOutcome::Accepted { revision: 1 },
+                },
             },
         ))
         .await
@@ -1694,7 +1703,7 @@ async fn broadcast_container_slot_is_reliable_or_evicts_slow_viewer() {
             .send(HostToServer::project_broadcast(Packet::ChatMessage {
                 sender: "pad".into(),
                 message: format!("pad-{index}"),
-        }))
+            }))
             .await
             .unwrap();
         let _ = time::timeout(
@@ -1708,7 +1717,8 @@ async fn broadcast_container_slot_is_reliable_or_evicts_slow_viewer() {
 
     server
         .host_tx
-        .send(HostToServer::project_broadcast(Packet::ContainerSlotUpdate {
+        .send(HostToServer::project_broadcast(
+            Packet::ContainerSlotUpdate {
                 dimension: 0,
                 revision: 11,
                 x: 8,
@@ -1716,7 +1726,8 @@ async fn broadcast_container_slot_is_reliable_or_evicts_slow_viewer() {
                 z: 8,
                 slot_index: 3,
                 slot: None,
-        }))
+            },
+        ))
         .await
         .unwrap();
 
@@ -1753,7 +1764,10 @@ async fn broadcast_container_slot_is_reliable_or_evicts_slow_viewer() {
         }
         match time::timeout(Duration::from_millis(50), slow.recv()).await {
             Ok(Ok(received))
-                if matches!(received.packet, Packet::ContainerSlotUpdate { revision: 11, .. }) =>
+                if matches!(
+                    received.packet,
+                    Packet::ContainerSlotUpdate { revision: 11, .. }
+                ) =>
             {
                 slow_got_slot = true;
             }

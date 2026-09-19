@@ -1141,9 +1141,8 @@ mod tests {
             .all(|vertex| vertex.local_position()[1] <= 1.0));
         let has_horizontal_quad = |vertices: &[TerrainVertex], indices: &[u32], y: f32| {
             indices.chunks_exact(6).any(|quad| {
-                quad.iter().all(|index| {
-                    (vertices[*index as usize].local_position()[1] - y).abs() < 1e-3
-                })
+                quad.iter()
+                    .all(|index| (vertices[*index as usize].local_position()[1] - y).abs() < 1e-3)
             })
         };
         assert!(!has_horizontal_quad(&trans_vertices, &trans_indices, 0.5));

@@ -105,9 +105,7 @@ impl ServerWorld {
         player_position: [f32; 3],
         consume_durability: bool,
     ) -> Result<FishingDomainContext, RejectReason> {
-        let hook = gameplay
-            .fishing_hook
-            .ok_or(RejectReason::InvalidState)?;
+        let hook = gameplay.fishing_hook.ok_or(RejectReason::InvalidState)?;
         let probe = crate::authority::fishing::water_probe_position(gameplay)?;
         let block_position = [
             probe[0].div_euclid(1_000),
@@ -331,6 +329,4 @@ impl ServerWorld {
         }
         Some(primary)
     }
-
 }
-

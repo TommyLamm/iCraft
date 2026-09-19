@@ -265,7 +265,10 @@ impl ServerWorld {
         false
     }
 
-    pub(super) fn tick_furnaces(&mut self, simulation_chunks: &BTreeSet<(i32, i32)>) -> Vec<WorldMutation> {
+    pub(super) fn tick_furnaces(
+        &mut self,
+        simulation_chunks: &BTreeSet<(i32, i32)>,
+    ) -> Vec<WorldMutation> {
         let mut positions = Vec::new();
         for &(cx, cz) in simulation_chunks {
             let Some(chunk) = self.chunks.chunks.get(&(cx, cz)) else {
@@ -273,7 +276,11 @@ impl ServerWorld {
             };
             for &encoded in chunk.furnace_positions() {
                 let (lx, y, lz) = crate::world::Chunk::decode_torch_position(encoded);
-                positions.push((chunk_origin(cx) + lx as i32, y, chunk_origin(cz) + lz as i32));
+                positions.push((
+                    chunk_origin(cx) + lx as i32,
+                    y,
+                    chunk_origin(cz) + lz as i32,
+                ));
             }
         }
         positions.sort_unstable();
@@ -371,14 +378,18 @@ impl ServerWorld {
             // ticks must not re-assign the same chase vector (keeps EntityState
             // fingerprints and Plan 08 checksum idle reuse honest).
             let mut chasing = false;
-            if entity.entity_type.is_hostile() && !matches!(self.difficulty, Difficulty::Peaceful)
-            {
-                let nearest = player_positions.iter().min_by(|(_, left, _, _), (_, right, _, _)| {
-                    entity
-                        .position
-                        .distance_squared(Vec3::from_array(*left))
-                        .total_cmp(&entity.position.distance_squared(Vec3::from_array(*right)))
-                });
+            if entity.entity_type.is_hostile() && !matches!(self.difficulty, Difficulty::Peaceful) {
+                let nearest =
+                    player_positions
+                        .iter()
+                        .min_by(|(_, left, _, _), (_, right, _, _)| {
+                            entity
+                                .position
+                                .distance_squared(Vec3::from_array(*left))
+                                .total_cmp(
+                                    &entity.position.distance_squared(Vec3::from_array(*right)),
+                                )
+                        });
                 if let Some((_, target, _, _)) = nearest.filter(|(_, target, _, _)| {
                     entity.position.distance_squared(Vec3::from_array(*target)) <= chase_range_sq
                 }) {
@@ -455,7 +466,10 @@ impl ServerWorld {
         let boss_players: Vec<(Vec3, Vec3)> = player_positions
             .iter()
             .map(|(_, position, yaw, pitch)| {
-                (Vec3::from_array(*position), look_from_yaw_pitch(*yaw, *pitch))
+                (
+                    Vec3::from_array(*position),
+                    look_from_yaw_pitch(*yaw, *pitch),
+                )
             })
             .collect();
         let focus = boss_players
@@ -649,7 +663,11 @@ pub(super) fn look_from_yaw_pitch(yaw: f32, pitch: f32) -> Vec3 {
     let yaw = yaw.to_radians();
     let pitch = pitch.to_radians();
     let horizontal = pitch.cos();
-    Vec3::new(-yaw.sin() * horizontal, -pitch.sin(), yaw.cos() * horizontal)
+    Vec3::new(
+        -yaw.sin() * horizontal,
+        -pitch.sin(),
+        yaw.cos() * horizontal,
+    )
 }
 
 pub(super) fn block_revision_fingerprint(position: (i32, i32, i32), revision: u64) -> u64 {
@@ -679,4 +697,3 @@ pub(super) fn operation_position(operation: &GameplayOperation) -> Option<(i32, 
         _ => None,
     }
 }
-

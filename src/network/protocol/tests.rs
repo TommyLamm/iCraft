@@ -77,9 +77,7 @@ fn player_join_roundtrip() {
 
 #[test]
 fn player_leave_roundtrip() {
-    let p = Packet::PlayerLeave {
-        id: 99,
-    };
+    let p = Packet::PlayerLeave { id: 99 };
     let decoded = Packet::decode(&p.encode()).unwrap();
     assert_eq!(p, decoded);
 }
@@ -963,9 +961,7 @@ fn authority_domain_requests_roundtrip_with_rich_slot_refs() {
     for operation in operations {
         let request = domain_request(operation);
         request.validate_bounds().unwrap();
-        let packet = Packet::GameplayRequest {
-            request,
-        };
+        let packet = Packet::GameplayRequest { request };
         assert_eq!(Packet::decode(&packet.encode()).unwrap(), packet);
     }
 }

@@ -1,4 +1,4 @@
-use crate::chunk_manager::{ColumnQuery, WorldColumns};
+use crate::chunk_manager::ColumnQuery;
 use crate::world::BlockType;
 use glam::Vec3;
 
@@ -189,7 +189,7 @@ pub fn raycast(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunk_manager::{ColumnQuery, WorldColumns};
+    use crate::chunk_manager::WorldColumns;
     use crate::world::{BlockType, Chunk};
     use glam::Vec3;
 

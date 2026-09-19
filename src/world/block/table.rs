@@ -7,7 +7,6 @@ use super::{
     BlockProperties, BlockState, BlockSupportStatus, BlockType, RenderType, SoundMaterial,
     BLOCK_STATE_OPEN_BIT,
 };
-use crate::redstone::Direction;
 
 /// Number of BlockType variants (Air..=Observer).
 pub const BLOCK_TYPE_COUNT: usize = BlockType::Observer as usize + 1;
@@ -2347,6 +2346,4 @@ impl BlockType {
     pub fn min_harvest_material(self) -> Option<ToolMaterial> {
         self.def().min_harvest
     }
-
 }
-

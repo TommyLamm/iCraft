@@ -430,7 +430,8 @@ impl SaveManager {
             ));
         }
         let generation = self.next_region_write_generation;
-        self.next_region_write_generation = self.next_region_write_generation.wrapping_add(1).max(1);
+        self.next_region_write_generation =
+            self.next_region_write_generation.wrapping_add(1).max(1);
         self.region_cache.insert(key, region);
         self.region_write_generation.insert(key, generation);
         self.touch_region(key);

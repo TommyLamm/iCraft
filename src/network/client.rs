@@ -8,8 +8,7 @@ use tokio::net::TcpStream;
 use tokio::time::{self, Instant};
 
 use super::protocol::{
-    Action, EntityStateWire, GameplayRequest, GameplayResponse, LightningStrike, Packet,
-    PlayerEffectWire, PlayerId, SessionGameplayWire, PROTOCOL_VERSION,
+    Action, GameplayRequest, GameplayResponse, Packet, PlayerEffectWire, PlayerId, PROTOCOL_VERSION,
 };
 use super::transport::{Connection, ConnectionWriter};
 use crate::world::chunk_xz;
@@ -115,9 +114,7 @@ impl ClientEventSender {
 /// [`Self::StatusUpdate`] text (never encoded on the wire).
 #[derive(Debug)]
 pub enum ClientToGame {
-    StatusUpdate {
-        message: String,
-    },
+    StatusUpdate { message: String },
     Packet(Packet),
 }
 
@@ -148,9 +145,9 @@ impl ClientToGame {
                 Packet::PlayerEffect { effects, .. } => {
                     effects.len() * std::mem::size_of::<PlayerEffectWire>()
                 }
-                Packet::ChatMessage { sender, message, .. } => {
-                    sender.len().saturating_add(message.len())
-                }
+                Packet::ChatMessage {
+                    sender, message, ..
+                } => sender.len().saturating_add(message.len()),
                 Packet::ContainerOpenResult { slots, .. } => {
                     slots.len() * std::mem::size_of::<Option<crate::network::protocol::ItemWire>>()
                 }
@@ -341,7 +338,10 @@ impl RevisionGate {
         state: u8,
         raw_fluid: u8,
     ) -> Vec<Packet> {
-        let key = { let (cx, cz) = chunk_xz(x, z); (dimension, cx, cz) };
+        let key = {
+            let (cx, cz) = chunk_xz(x, z);
+            (dimension, cx, cz)
+        };
         if let Some(current) = self.applied.get_mut(&key) {
             if revision <= *current {
                 return Vec::new();
@@ -640,13 +640,8 @@ async fn run_client(
                     | Ok(packet @ Packet::LightningStrike { .. }) => {
                         // Protocol version is negotiated at handshake; post-auth
                         // packets no longer carry protocol_version.
-                        if matches!(
-                            &packet,
-                            Packet::PlayerRespawnResult { dimension, .. }
-                        ) {
-                            if let Packet::PlayerRespawnResult { dimension, .. } = &packet {
-                                current_dimension = *dimension;
-                            }
+                        if let Packet::PlayerRespawnResult { dimension, .. } = &packet {
+                            current_dimension = *dimension;
                         }
                         let _ = client_to_game.send(ClientToGame::packet(packet));
                     }
@@ -1033,4 +1028,3 @@ async fn run_client(
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;
-

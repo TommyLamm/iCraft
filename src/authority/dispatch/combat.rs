@@ -11,7 +11,7 @@ impl AuthorityCore {
         action: u8,
     ) -> Result<Option<WorldMutation>, RejectReason> {
         use crate::authority::combat::{
-            self, AuthorityDamageInput, CombatantId, DamageEvent, EntityCombatSnapshot,
+            AuthorityDamageInput, CombatantId, DamageEvent, EntityCombatSnapshot,
             PlayerCombatSnapshot,
         };
         use crate::inventory::GameMode;
@@ -154,8 +154,7 @@ impl AuthorityCore {
             fire_ticks: profile.fire_ticks,
             looting_level: profile.looting_level,
         })?;
-        let outcome =
-            combat_logic::resolve_entity_hit(&event, &mut target_snapshot)?;
+        let outcome = combat_logic::resolve_entity_hit(&event, &mut target_snapshot)?;
 
         let mut attacker_gameplay = attacker.gameplay;
         attacker_gameplay.attack_cooldown_ticks = 0;
@@ -164,11 +163,18 @@ impl AuthorityCore {
             .ok_or(RejectReason::Unauthorized)?
             .gameplay = attacker_gameplay;
         if target_snapshot.health_milli == 0 {
-            let _ = self.world_mut_expect(dimension).entities.remove_by_id(target);
+            let _ = self
+                .world_mut_expect(dimension)
+                .entities
+                .remove_by_id(target);
             if target_entity_type == crate::entity::EntityType::EnderDragon {
                 self.world_mut_expect(dimension).handle_dragon_completion();
             }
-        } else if let Some(entity) = self.world_mut_expect(dimension).entities.get_by_id_mut(target) {
+        } else if let Some(entity) = self
+            .world_mut_expect(dimension)
+            .entities
+            .get_by_id_mut(target)
+        {
             entity.health = target_snapshot.health_milli as f32 / 1_000.0;
             entity.velocity = glam::Vec3::new(
                 target_snapshot.velocity_milli[0] as f32 / 1_000.0,
@@ -201,9 +207,11 @@ impl AuthorityCore {
         if death.experience > 0 {
             let id = self.next_unique_entity_id(dimension, None);
             self.claim_entity_id(id);
-            let _ =
-                self.world_mut_expect(dimension)
-                    .spawn_authority_experience(id, death.experience, position);
+            let _ = self.world_mut_expect(dimension).spawn_authority_experience(
+                id,
+                death.experience,
+                position,
+            );
         }
     }
 }
@@ -259,4 +267,3 @@ fn look_from_angles(yaw: f32, pitch: f32) -> Result<[i16; 3], RejectReason> {
     ];
     Ok(look)
 }
-

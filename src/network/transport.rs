@@ -18,7 +18,10 @@ pub struct ReceivedPacket {
 
 impl ReceivedPacket {
     pub const fn new(packet: Packet, frame_bytes: u64) -> Self {
-        Self { packet, frame_bytes }
+        Self {
+            packet,
+            frame_bytes,
+        }
     }
 
     pub fn packet(&self) -> &Packet {
@@ -130,9 +133,13 @@ impl ConnectionReader {
 
         let body: Vec<u8> = self.buf.drain(0..need).collect();
         self.frame_len = None;
-        let packet = Packet::decode(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let packet =
+            Packet::decode(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let frame_bytes = (LEN_HEADER + need) as u64;
-        Ok(ReceivedPacket { packet, frame_bytes })
+        Ok(ReceivedPacket {
+            packet,
+            frame_bytes,
+        })
     }
 }
 

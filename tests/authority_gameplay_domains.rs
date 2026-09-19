@@ -61,7 +61,8 @@ fn rejected(response: &GameplayResponse, reason: RejectReason) {
 }
 
 fn put_block(core: &mut AuthorityCore, position: [i32; 3], block: BlockType) {
-    core.world_mut(Dimension::Overworld).unwrap()
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(position[0], position[1], position[2], block, 0)
         .unwrap();
 }
@@ -145,7 +146,11 @@ fn fishing_fixed_tick_reel_is_atomic_and_idempotent() {
             probe[1].div_euclid(1_000),
             probe[2].div_euclid(1_000),
         ];
-        if core.world(Dimension::Overworld).get_block(block[0], block[1], block[2]) != BlockType::Water {
+        if core
+            .world(Dimension::Overworld)
+            .get_block(block[0], block[1], block[2])
+            != BlockType::Water
+        {
             put_block(&mut core, block, BlockType::Water);
         }
         core.tick();
@@ -181,7 +186,8 @@ fn fishing_fixed_tick_reel_is_atomic_and_idempotent() {
     assert!(after_reel.inventory[0].unwrap().item.durability < before_rod);
     assert!(after_reel.experience > before_experience);
     assert!(core
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .entities
         .get_by_id(hook_id)
         .is_none());
@@ -235,12 +241,15 @@ fn workstation_transactions_cover_brew_ready_take_and_exact_sources() {
     let mut furnace = FurnaceBlockEntity::new();
     furnace.slots[2] = Some(ItemStack::new(Item::IronIngot, 2));
     furnace.accumulated_xp = 4.0;
-    core.world_mut(Dimension::Overworld).unwrap().chunks.set_block_entity(
-        furnace_position[0],
-        furnace_position[1],
-        furnace_position[2],
-        Some(BlockEntity::Furnace(furnace)),
-    );
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
+        .chunks
+        .set_block_entity(
+            furnace_position[0],
+            furnace_position[1],
+            furnace_position[2],
+            Some(BlockEntity::Furnace(furnace)),
+        );
 
     let mut gameplay = core.session(SESSION_ID).unwrap().gameplay;
     gameplay.inventory[0] = Some(session_slot(ItemStack::new(Item::OakPlanks, 2)));
@@ -493,11 +502,13 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
     assert!(core.set_session_gameplay(SESSION_ID, attacker));
 
     let target = core
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .entities
         .spawn(EntityType::Zombie, Vec3::new(8.0, 80.0, 9.0));
     let before = core
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .entities
         .get_by_id(target)
         .unwrap()
@@ -509,7 +520,12 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
         GameplayOperation::Combat { target, action: 0 },
     );
     accepted(&hit);
-    let entity = core.world_mut(Dimension::Overworld).unwrap().entities.get_by_id(target).unwrap();
+    let entity = core
+        .world_mut(Dimension::Overworld)
+        .unwrap()
+        .entities
+        .get_by_id(target)
+        .unwrap();
     assert!(entity.health < before);
     assert!(entity.velocity.length_squared() > 0.0);
     assert_eq!(
@@ -525,10 +541,12 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
     // A lethal entity hit removes the target and emits exactly one drop/xp
     // vector.  The cached duplicate cannot emit another pair.
     let lethal_target = core
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .entities
         .spawn(EntityType::Zombie, Vec3::new(8.0, 80.0, 9.0));
-    core.world_mut(Dimension::Overworld).unwrap()
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
         .entities
         .get_by_id_mut(lethal_target)
         .unwrap()
@@ -548,7 +566,8 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
     );
     accepted(&lethal);
     assert!(core
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .entities
         .get_by_id(lethal_target)
         .is_none());
@@ -667,7 +686,8 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
     assert!(alive.last_revision > before_victim_revision);
 
     let far_target = core
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .entities
         .spawn(EntityType::Zombie, Vec3::new(20.0, 80.0, 8.0));
     core.session_mut(SESSION_ID)
@@ -675,7 +695,8 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
         .gameplay
         .attack_cooldown_ticks = 5;
     let far_before = core
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .entities
         .get_by_id(far_target)
         .unwrap()
@@ -691,7 +712,8 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
     );
     rejected(&far_response, RejectReason::TooFar);
     assert_eq!(
-        core.world_mut(Dimension::Overworld).unwrap()
+        core.world_mut(Dimension::Overworld)
+            .unwrap()
             .entities
             .get_by_id(far_target)
             .unwrap()
@@ -785,7 +807,8 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
     assert!(kept_dead.is_dead);
     assert_eq!(kept_dead.count_item(Item::Diamond.to_u32()), 1);
     assert!(keep_core
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .entities
         .entities
         .iter()
@@ -820,22 +843,14 @@ fn consecutive_sleep_requests_are_not_invalid_state() {
         &mut core,
         1,
         1,
-        GameplayOperation::Sleep {
-            x: 8,
-            y: 80,
-            z: 8,
-        },
+        GameplayOperation::Sleep { x: 8, y: 80, z: 8 },
     );
     accepted(&first);
     let second = submit(
         &mut core,
         2,
         2,
-        GameplayOperation::Sleep {
-            x: 8,
-            y: 80,
-            z: 8,
-        },
+        GameplayOperation::Sleep { x: 8, y: 80, z: 8 },
     );
     accepted(&second);
 }

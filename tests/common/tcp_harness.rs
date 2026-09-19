@@ -443,4 +443,3 @@ pub fn seeded_properties(prefix: &str, seed: u64) -> ServerProperties {
     properties.seed = seed;
     properties
 }
-

@@ -145,8 +145,7 @@ impl App {
                     return;
                 };
                 let gpu = menu.into_gpu_context();
-                let mut state =
-                    pollster::block_on(State::new(window, launch, settings, gpu));
+                let mut state = pollster::block_on(State::new(window, launch, settings, gpu));
                 state.set_paused(false);
                 self.runtime = Some(Runtime::Game(state));
                 self.last_render_time = Instant::now();

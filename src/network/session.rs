@@ -351,7 +351,7 @@ pub(crate) async fn send_encoded_connection_packet(
     .await
 }
 
-pub(crate) async fn send_writer_packet(
+pub(super) async fn send_writer_packet(
     writer: &mut super::transport::ConnectionWriter,
     packet: &Packet,
     metrics: &NetworkMetrics,
@@ -365,7 +365,7 @@ pub(crate) async fn send_writer_packet(
     .await
 }
 
-pub(crate) async fn send_encoded_packet(
+pub(super) async fn send_encoded_packet(
     writer: &mut super::transport::ConnectionWriter,
     encoded: &EncodedPacket,
     metrics: &NetworkMetrics,
@@ -717,7 +717,9 @@ impl Default for GameplaySessionState {
             last_client_revision: 0,
             last_server_sequence: 0,
             in_flight: HashSet::new(),
-            completed_request_ids: VecDeque::with_capacity(crate::authority::RESPONSE_CACHE_CAPACITY),
+            completed_request_ids: VecDeque::with_capacity(
+                crate::authority::RESPONSE_CACHE_CAPACITY,
+            ),
             current_dimension: 0,
         }
     }
@@ -741,7 +743,11 @@ impl GameplaySessionState {
 
     pub(crate) fn mark_completed(&mut self, request_id: RequestId) {
         self.clear_in_flight(request_id);
-        if self.completed_request_ids.iter().any(|id| *id == request_id) {
+        if self
+            .completed_request_ids
+            .iter()
+            .any(|id| *id == request_id)
+        {
             return;
         }
         if self.completed_request_ids.len() >= crate::authority::RESPONSE_CACHE_CAPACITY {
@@ -751,7 +757,9 @@ impl GameplaySessionState {
     }
 
     pub(crate) fn is_completed(&self, request_id: RequestId) -> bool {
-        self.completed_request_ids.iter().any(|id| *id == request_id)
+        self.completed_request_ids
+            .iter()
+            .any(|id| *id == request_id)
     }
 
     pub(crate) fn rejection(
@@ -850,9 +858,8 @@ mod tests {
     async fn inbound_frame_metrics_include_trailing_bytes_and_avoid_duplicate_counting() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let client_task = tokio::spawn(async move {
-            tokio::net::TcpStream::connect(addr).await.unwrap()
-        });
+        let client_task =
+            tokio::spawn(async move { tokio::net::TcpStream::connect(addr).await.unwrap() });
         let (server_stream, _) = listener.accept().await.unwrap();
         let mut server_conn = Connection::new(server_stream);
         let mut client_stream = client_task.await.unwrap();
@@ -868,7 +875,10 @@ mod tests {
         let expected_frame_bytes = 4 + frame_len as u64;
 
         use tokio::io::AsyncWriteExt;
-        client_stream.write_all(&frame_len.to_be_bytes()).await.unwrap();
+        client_stream
+            .write_all(&frame_len.to_be_bytes())
+            .await
+            .unwrap();
         client_stream.write_all(&body).await.unwrap();
         client_stream.flush().await.unwrap();
 
@@ -885,7 +895,8 @@ mod tests {
         // 2. Cancellation: write partial frame (only 2 bytes of header), then cancel recv
         client_stream.write_all(&[0x00, 0x00]).await.unwrap();
         client_stream.flush().await.unwrap();
-        let cancel_result = tokio::time::timeout(Duration::from_millis(50), server_conn.recv()).await;
+        let cancel_result =
+            tokio::time::timeout(Duration::from_millis(50), server_conn.recv()).await;
         assert!(cancel_result.is_err(), "recv should time out / cancel");
         // No inbound metrics should have been recorded for cancelled attempt
         let snap_cancel = metrics.snapshot();
@@ -1091,7 +1102,10 @@ mod tests {
         };
         mailbox.replace(near.clone()).await.unwrap();
         mailbox.replace(farther.clone()).await.unwrap();
-        assert_eq!(mailbox.pop().await.as_ref().map(|p| p.packet()), Some(&near));
+        assert_eq!(
+            mailbox.pop().await.as_ref().map(|p| p.packet()),
+            Some(&near)
+        );
         assert_eq!(
             mailbox.pop().await.as_ref().map(|p| p.packet()),
             Some(&farther)
@@ -1122,7 +1136,10 @@ mod tests {
         assert_eq!(metrics.snapshot().queue_full, 1);
         fast.replace(packet(2, 3)).await.unwrap();
         assert_eq!(metrics.snapshot().queue_depth, 2);
-        assert_eq!(fast.pop().await.as_ref().map(|p| p.packet()), Some(&packet(2, 3)));
+        assert_eq!(
+            fast.pop().await.as_ref().map(|p| p.packet()),
+            Some(&packet(2, 3))
+        );
         assert_eq!(slow.len().await, 1);
         assert_eq!(metrics.snapshot().queue_depth, 1);
         drop(slow);

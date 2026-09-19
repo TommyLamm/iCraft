@@ -772,7 +772,10 @@ impl AdvancementManager {
             .tree
             .list
             .iter()
-            .filter(|a| a.parent.is_none() && matches!(a.trigger, AdvancementTrigger::MineBlock(BlockType::Air)))
+            .filter(|a| {
+                a.parent.is_none()
+                    && matches!(a.trigger, AdvancementTrigger::MineBlock(BlockType::Air))
+            })
             .map(|a| a.id)
             .collect();
         for id in root_ids {

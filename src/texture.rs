@@ -31,17 +31,6 @@ fn paint_debug_tile(img: &mut RgbaImage, col: u32, row: u32) {
     }
 }
 
-
-
-
-
-
-
-
-
-
-
-
 fn draw_crack_pattern(img: &mut RgbaImage, tx: u32, ty: u32, stage: u32) {
     // Determine crack pattern density based on stage (0..10)
     // We draw random dark gray lines.
@@ -73,29 +62,6 @@ fn draw_crack_pattern(img: &mut RgbaImage, tx: u32, ty: u32, stage: u32) {
         }
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 /// A single 16x16 atlas tile replacement sourced from an iCraft resource pack
 /// with the built-in assets as the final fallback.
@@ -511,12 +477,10 @@ where
 }
 
 fn apply_resource_pack_with_manager(img: &mut RgbaImage, manager: &mut ResourcePackManager) {
-    let (pack_hits, misses) = apply_resource_pack_tiles_with_decode(
-        img,
-        manager,
-        PACK_TILES,
-        |bytes| image::load_from_memory(bytes).ok(),
-    );
+    let (pack_hits, misses) =
+        apply_resource_pack_tiles_with_decode(img, manager, PACK_TILES, |bytes| {
+            image::load_from_memory(bytes).ok()
+        });
     eprintln!(
         "[texture] resource-pack atlas: {} resolved, {} paint-on-miss fallback",
         pack_hits, misses
@@ -547,11 +511,11 @@ fn compose_player_head_tiles_with_manager(img: &mut RgbaImage, manager: &mut Res
 }
 
 fn compose_enderman_eyes_with_manager(img: &mut RgbaImage, manager: &mut ResourcePackManager) {
-    let Some(source) = manager.resolve_decoded(
-        "entity/enderman/enderman_eyes.png",
-        "texture",
-        |bytes| image::load_from_memory(bytes).ok(),
-    ) else {
+    let Some(source) =
+        manager.resolve_decoded("entity/enderman/enderman_eyes.png", "texture", |bytes| {
+            image::load_from_memory(bytes).ok()
+        })
+    else {
         return;
     };
     let crop = image::imageops::crop_imm(&source, 8, 8, 8, 8).to_image();
@@ -948,7 +912,10 @@ mod tests {
             elapsed,
             PACK_TILES.len()
         );
-        assert!(elapsed.as_secs() < 5, "atlas apply unexpectedly slow: {elapsed:?}");
+        assert!(
+            elapsed.as_secs() < 5,
+            "atlas apply unexpectedly slow: {elapsed:?}"
+        );
         assert_eq!(img.get_pixel(3 * 16 + 8, 0).0[3], 255);
     }
 
@@ -980,15 +947,11 @@ mod tests {
         ];
 
         let mut decode_calls = 0usize;
-        let (hits, misses) = apply_resource_pack_tiles_with_decode(
-            &mut img,
-            &mut manager,
-            &tiles,
-            |_bytes| {
+        let (hits, misses) =
+            apply_resource_pack_tiles_with_decode(&mut img, &mut manager, &tiles, |_bytes| {
                 decode_calls += 1;
                 Some(image::DynamicImage::ImageRgba8(RgbaImage::new(16, 16)))
-            },
-        );
+            });
 
         assert_eq!(hits, 3);
         assert_eq!(misses, 0);

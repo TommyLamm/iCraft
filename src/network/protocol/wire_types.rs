@@ -38,7 +38,6 @@ pub enum RejectReason {
     InvalidState,
 }
 
-
 /// Stable wire mapping for container open/close. Click uses
 /// `GameplayOperation::ContainerClick`. Unknown discriminants fail decode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

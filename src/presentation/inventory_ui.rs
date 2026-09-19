@@ -151,7 +151,10 @@ impl State {
         self.inventory_slots_scratch = slots;
     }
 
-    pub(super) fn write_inventory_slot_rects(&self, slots: &mut Vec<(SlotType, f32, f32, f32, f32)>) {
+    pub(super) fn write_inventory_slot_rects(
+        &self,
+        slots: &mut Vec<(SlotType, f32, f32, f32, f32)>,
+    ) {
         slots.clear();
         let aspect = self.size.width as f32 / self.size.height as f32;
         if inventory_layout_kind(
@@ -361,7 +364,6 @@ impl State {
             }
             None | Some(StationKind::Merchant) => {}
         }
-
     }
 
     pub fn get_inventory_slots(&self) -> Vec<(SlotType, f32, f32, f32, f32)> {
@@ -450,7 +452,9 @@ impl State {
         presentation_target_for_authority_hit(hit).map(|target| (target, hit))
     }
 
-    pub(super) fn presentation_inventory_click_target(&self) -> Option<PresentationInventoryTarget> {
+    pub(super) fn presentation_inventory_click_target(
+        &self,
+    ) -> Option<PresentationInventoryTarget> {
         // Writeback has no mouse-button; overlay geometry matches the historical
         // always-on hit test (`collect_inventory_ui_hits` with `is_left = true`).
         self.resolve_inventory_hit(true).map(|(target, _)| target)
@@ -496,4 +500,3 @@ impl State {
         }
     }
 }
-

@@ -15,13 +15,11 @@ mod dragon;
 mod nether;
 mod wither;
 
-use dragon::{
-    complete_dragon, ensure_end_encounters, ensure_enderman, repair_legacy_end_crystal_towers,
-    update_dragon,
-};
+use dragon::{ensure_end_encounters, repair_legacy_end_crystal_towers, update_dragon};
 use nether::ensure_nether_mob;
-use wither::{collect_deaths, detect_wither_pattern, projectile_hit, update_wither};
-
+#[cfg(test)]
+use wither::detect_wither_pattern;
+use wither::{collect_deaths, projectile_hit, update_wither};
 
 pub type BlockPos = (i32, i32, i32);
 
@@ -38,7 +36,11 @@ const PROJECTILE_LIFETIME: f32 = 12.0;
 const LEGACY_TOWER_REPAIR_INTERVAL: f32 = 1.0;
 const DRAGON_EGG_POSITION: BlockPos = (0, 78, 0);
 
-pub(super) fn player_is_gazing_at_enderman_head(player_eye: Vec3, player_look: Vec3, head: Vec3) -> bool {
+pub(super) fn player_is_gazing_at_enderman_head(
+    player_eye: Vec3,
+    player_look: Vec3,
+    head: Vec3,
+) -> bool {
     let to_head = head - player_eye;
     let distance_squared = to_head.length_squared();
     if distance_squared <= f32::EPSILON
@@ -201,9 +203,7 @@ pub fn update_dimension_entities(
                 .distance_squared(*left)
                 .total_cmp(&entity.position.distance_squared(*right))
         });
-        let (player_pos, player_look) = nearest
-            .copied()
-            .unwrap_or((Vec3::ZERO, Vec3::NEG_Z));
+        let (player_pos, player_look) = nearest.copied().unwrap_or((Vec3::ZERO, Vec3::NEG_Z));
 
         match entity.entity_type {
             EntityType::Blaze => {

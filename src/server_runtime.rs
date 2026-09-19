@@ -19,9 +19,7 @@ use crate::dimension::Dimension;
 use crate::game_rules::{Difficulty, WorldRules};
 use crate::inventory::{GameMode, Inventory};
 use crate::network::protocol::{
-    ContainerAction, EntityStateWire, GameplayOperation, GameplayOutcome, GameplayRequest,
-    GameplayResponse, ItemWire, PlayerEffectWire, RejectReason, SessionGameplayWire,
-    PROTOCOL_VERSION,
+    GameplayOperation, GameplayOutcome, GameplayRequest, PlayerEffectWire, RejectReason,
 };
 use crate::network::server::{
     HostToServer, MeteredHostEventSender, NetworkMetrics, NetworkServer, ServerConfig, ServerToHost,
@@ -168,7 +166,11 @@ struct CachedSimulationUnion {
 }
 
 struct CachedResidencyKeep {
-    fingerprint: Vec<(u64, Option<crate::authority::interest::InterestChunkAnchor>, u8)>,
+    fingerprint: Vec<(
+        u64,
+        Option<crate::authority::interest::InterestChunkAnchor>,
+        u8,
+    )>,
     keep: BTreeSet<(i32, i32)>,
     /// `WorldColumns::load_generation` when every resident was inside `keep`.
     covered_generation: Option<u64>,
@@ -266,9 +268,7 @@ impl ServerRuntime {
             difficulty,
             simulation_distance: properties.simulation_distance as i32,
         });
-        authority
-            .world_mut_expect(level.spawn_dimension)
-            .time = level.time;
+        authority.world_mut_expect(level.spawn_dimension).time = level.time;
         let mut runtime = Self {
             properties,
             level,
@@ -365,7 +365,9 @@ impl ServerRuntime {
             self.handle_event(event)?;
         }
         let simulation_unions = self.cached_simulation_unions();
-        let snapshot = self.authority.tick_with_simulation_unions(&simulation_unions);
+        let snapshot = self
+            .authority
+            .tick_with_simulation_unions(&simulation_unions);
         for transfer in self.authority.take_pending_dimension_transfers() {
             self.apply_authority_dimension_transfer(transfer);
         }
@@ -614,9 +616,8 @@ impl ServerRuntime {
                 properties_text.into_bytes(),
             ),
         ];
-        if !self.enqueue_save_payload(save_worker::SavePayload::SidecarGroup {
-            entries: sidecars,
-        }) {
+        if !self.enqueue_save_payload(save_worker::SavePayload::SidecarGroup { entries: sidecars })
+        {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "save queue full while enqueueing sidecars",
@@ -960,7 +961,11 @@ impl ServerRuntime {
     fn residency_keep_fingerprint(
         &self,
         dimension: Dimension,
-    ) -> Vec<(u64, Option<crate::authority::interest::InterestChunkAnchor>, u8)> {
+    ) -> Vec<(
+        u64,
+        Option<crate::authority::interest::InterestChunkAnchor>,
+        u8,
+    )> {
         let mut fingerprint: Vec<_> = self
             .players
             .iter()
@@ -1055,10 +1060,9 @@ impl ServerRuntime {
             self.authority.with_world(dimension, |world| {
                 // Multiplayer dense grid covers the session-center union.
                 if centers.is_empty() {
-                    world.chunks.cover_session_centers(&[chunk_xz(
-                        self.level.spawn_x,
-                        self.level.spawn_z,
-                    )]);
+                    world
+                        .chunks
+                        .cover_session_centers(&[chunk_xz(self.level.spawn_x, self.level.spawn_z)]);
                 } else {
                     world.chunks.cover_session_centers(&centers);
                 }
@@ -1181,12 +1185,19 @@ impl ServerRuntime {
 
     #[cfg(test)]
     pub fn is_worldgen_in_flight(&self, dimension: Dimension, chunk_x: i32, chunk_z: i32) -> bool {
-        self.worldgen_worker.is_in_flight(dimension, chunk_x, chunk_z)
+        self.worldgen_worker
+            .is_in_flight(dimension, chunk_x, chunk_z)
     }
 
     #[cfg(test)]
-    pub fn is_worldgen_pending_in_backlog(&self, dimension: Dimension, chunk_x: i32, chunk_z: i32) -> bool {
-        self.authority.is_worldgen_pending(dimension, chunk_x, chunk_z)
+    pub fn is_worldgen_pending_in_backlog(
+        &self,
+        dimension: Dimension,
+        chunk_x: i32,
+        chunk_z: i32,
+    ) -> bool {
+        self.authority
+            .is_worldgen_pending(dimension, chunk_x, chunk_z)
     }
 
     #[cfg(test)]
@@ -1315,4 +1326,3 @@ impl Drop for ServerRuntime {
 #[cfg(test)]
 #[path = "server_runtime/tests.rs"]
 mod tests;
-

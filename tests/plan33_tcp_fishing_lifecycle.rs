@@ -1,28 +1,26 @@
 mod common;
 
-use icraft::dimension::Dimension;
 use common::tcp_harness::{
     drive_until, gameplay_request as request, seeded_properties, session_slot,
     wait_for_cached_response, HeldLoopback, TcpClient, EVENT_TIMEOUT, STEP_SLEEP,
 };
-use std::thread;
-use std::time::Instant;
 use icraft::authority::contract::SessionGameplayState;
 use icraft::authority::fishing::water_probe_position;
-use icraft::fishing::{
-    FishingHookStage, FISHING_INITIAL_WAIT_TICKS, FISHING_REPEAT_WAIT_TICKS,
-};
+use icraft::dimension::Dimension;
+use icraft::fishing::{FishingHookStage, FISHING_INITIAL_WAIT_TICKS, FISHING_REPEAT_WAIT_TICKS};
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::client::ClientToGame;
-use icraft::network::protocol::{Packet, 
-    GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse, RejectReason,
+use icraft::network::protocol::{
+    GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse, Packet, RejectReason,
 };
 use icraft::server_runtime::{
-    EmbeddedRuntimeOptions, LocalSessionProfile, ProjectionDest, ProjectionEvent, RuntimeTickOutput,
-    ServerProperties, ServerRuntime, TransportMode,
+    EmbeddedRuntimeOptions, LocalSessionProfile, ProjectionDest, ProjectionEvent,
+    RuntimeTickOutput, ServerProperties, ServerRuntime, TransportMode,
 };
 use icraft::world::BlockType;
 use std::fs;
+use std::thread;
+use std::time::Instant;
 
 const EMBEDDED_OWNER: u64 = 0x33_0000;
 const EMBEDDED_OBSERVER: u64 = EMBEDDED_OWNER + 1;
@@ -57,7 +55,11 @@ fn fresh_tcp_request(
 }
 
 fn prepare(runtime: &mut ServerRuntime, owner: u64, observer: u64) {
-    runtime.authority.world_mut(Dimension::Overworld).unwrap().ensure_chunk(0, 0);
+    runtime
+        .authority
+        .world_mut(Dimension::Overworld)
+        .unwrap()
+        .ensure_chunk(0, 0);
     let mut owner_gameplay = SessionGameplayState::default();
     owner_gameplay.inventory[0] = Some(session_slot(ItemStack::new(Item::FishingRod, 1)));
     owner_gameplay.selected_hotbar_slot = 0;
@@ -100,7 +102,8 @@ fn seed_water_under_hook(runtime: &mut ServerRuntime, owner: u64) {
     );
     runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .ensure_chunk(position.0.div_euclid(16), position.2.div_euclid(16));
     if runtime
         .authority
@@ -110,7 +113,8 @@ fn seed_water_under_hook(runtime: &mut ServerRuntime, owner: u64) {
     {
         runtime
             .authority
-            .world_mut(Dimension::Overworld).unwrap()
+            .world_mut(Dimension::Overworld)
+            .unwrap()
             .set_block(position.0, position.1, position.2, BlockType::Water, 0)
             .expect("seed deterministic Plan33 open water");
     }
@@ -259,7 +263,8 @@ fn run_embedded() {
     );
     assert!(runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .entities
         .get_by_id(hook_id)
         .is_none());
@@ -501,7 +506,8 @@ fn run_tcp(label: &str, listen: bool) {
     );
     assert!(runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .entities
         .get_by_id(hook_id)
         .is_none());

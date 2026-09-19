@@ -1,5 +1,8 @@
 use super::decode::PlayerId;
-use super::decode::{deserialize_bounded_bytes, deserialize_bounded_vec, set_decode_frame_len, DecodeFrameGuard, MAX_PACKET_SIZE};
+use super::decode::{
+    deserialize_bounded_bytes, deserialize_bounded_vec, set_decode_frame_len, DecodeFrameGuard,
+    MAX_PACKET_SIZE,
+};
 use super::gameplay::GameplayRequest;
 use super::wire_types::*;
 use bincode::Options;
@@ -241,7 +244,6 @@ pub enum Packet {
 }
 
 impl Packet {
-
     pub fn encode(&self) -> Vec<u8> {
         bincode::serialize(self).expect("packet serialization is infallible")
     }

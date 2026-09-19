@@ -15,7 +15,9 @@ fn block_mutation_changes_real_chunk_and_revision() {
         WorldType::Superflat,
         false,
         WorldRules::default(),
-        2, Difficulty::default());
+        2,
+        Difficulty::default(),
+    );
     let old = world.get_block(8, 80, 8);
     let mutation = world
         .set_block(8, 80, 8, BlockType::Chest, 0)
@@ -35,7 +37,9 @@ fn authoritative_dispenser_matrix_preserves_payload_and_revisions() {
         WorldType::Superflat,
         false,
         WorldRules::default(),
-        2, Difficulty::default());
+        2,
+        Difficulty::default(),
+    );
     let source = (8, 80, 8);
     let front = (8, 80, 9);
     world
@@ -93,7 +97,9 @@ fn authoritative_dropper_insert_is_merge_first_and_fallback_is_one_item() {
         WorldType::Superflat,
         false,
         WorldRules::default(),
-        2, Difficulty::default());
+        2,
+        Difficulty::default(),
+    );
     let source = (8, 80, 8);
     let target = (8, 80, 9);
     world
@@ -185,7 +191,9 @@ fn authoritative_dispense_skips_unloaded_front_without_consumption() {
         WorldType::Superflat,
         false,
         WorldRules::default(),
-        2, Difficulty::default());
+        2,
+        Difficulty::default(),
+    );
     let source = (15, 80, 8);
     world
         .set_block(source.0, source.1, source.2, BlockType::Dispenser, 0)
@@ -228,7 +236,9 @@ fn dispenser_invalid_entity_id_is_atomic_and_bucket_consumes_one_with_rollback()
         WorldType::Superflat,
         false,
         WorldRules::default(),
-        2, Difficulty::default());
+        2,
+        Difficulty::default(),
+    );
     let source = (8, 80, 8);
     let front = (8, 80, 9);
     world
@@ -348,7 +358,9 @@ fn bucket_rejects_flowing_or_falling_source_without_consumption() {
         WorldType::Superflat,
         false,
         WorldRules::default(),
-        2, Difficulty::default());
+        2,
+        Difficulty::default(),
+    );
     let source = (8, 80, 8);
     let front = (8, 80, 9);
     world
@@ -418,7 +430,9 @@ fn chest_first_and_last_viewer_toggle_authoritative_state() {
         WorldType::Superflat,
         false,
         WorldRules::default(),
-        2, Difficulty::default());
+        2,
+        Difficulty::default(),
+    );
     let position = (8, 80, 8);
     world
         .set_block(position.0, position.1, position.2, BlockType::Chest, 0)
@@ -457,7 +471,9 @@ fn forced_last_viewer_closes_chest_once_and_other_viewer_keeps_it_open() {
         WorldType::Superflat,
         false,
         WorldRules::default(),
-        2, Difficulty::default());
+        2,
+        Difficulty::default(),
+    );
     let position = (8, 80, 8);
     world
         .set_block(position.0, position.1, position.2, BlockType::Chest, 0)
@@ -490,7 +506,9 @@ fn chest_block_break_emits_dimension_scoped_closures() {
         WorldType::Superflat,
         false,
         WorldRules::default(),
-        2, Difficulty::default());
+        2,
+        Difficulty::default(),
+    );
     let position = (8, 80, 8);
     world
         .set_block(position.0, position.1, position.2, BlockType::Chest, 0)
@@ -523,7 +541,9 @@ fn double_chest_open_publishes_partner_state_mutation() {
         WorldType::Superflat,
         false,
         WorldRules::default(),
-        2, Difficulty::default());
+        2,
+        Difficulty::default(),
+    );
     let left = (8, 80, 8);
     let right = (9, 80, 8);
     let left_state = crate::world::BlockState {
@@ -557,8 +577,7 @@ fn double_chest_open_publishes_partner_state_mutation() {
         crate::world::BlockState::decode(world.get_block_state(left.0, left.1, left.2)).is_open
     );
     assert!(
-        crate::world::BlockState::decode(world.get_block_state(right.0, right.1, right.2))
-            .is_open
+        crate::world::BlockState::decode(world.get_block_state(right.0, right.1, right.2)).is_open
     );
 }
 
@@ -571,7 +590,9 @@ fn fixed_tick_checksum_is_deterministic() {
             WorldType::Superflat,
             false,
             WorldRules::default(),
-            2, Difficulty::default());
+            2,
+            Difficulty::default(),
+        );
         world
             .entities
             .spawn(EntityType::Zombie, Vec3::new(10.0, 80.0, 10.0));
@@ -589,7 +610,9 @@ fn checksum_distinguishes_raw_fluid_mutations() {
             WorldType::Superflat,
             false,
             WorldRules::default(),
-            2, Difficulty::default())
+            2,
+            Difficulty::default(),
+        )
     };
     let mut plain = make();
     let mut waterlogged = make();
@@ -633,7 +656,9 @@ fn superflat_world(seed: u32) -> ServerWorld {
         WorldType::Superflat,
         false,
         WorldRules::default(),
-        2, Difficulty::default())
+        2,
+        Difficulty::default(),
+    )
 }
 
 #[test]
@@ -719,15 +744,24 @@ fn idle_entity_fingerprint_skips_sort_and_hash_rebuild() {
     let builds_after_first = world.entities.entity_fingerprint_builds();
     assert_eq!(builds_after_first, 1);
     let first = world.checksum(&[]);
-    assert_eq!(world.entities.entity_fingerprint_builds(), builds_after_first);
+    assert_eq!(
+        world.entities.entity_fingerprint_builds(),
+        builds_after_first
+    );
     let second = world.checksum(&[]);
     assert_eq!(first, second);
-    assert_eq!(world.entities.entity_fingerprint_builds(), builds_after_first);
+    assert_eq!(
+        world.entities.entity_fingerprint_builds(),
+        builds_after_first
+    );
 
     // Pose / ai_phase change must invalidate the cache.
     world.entities.mark_checksum_inputs_changed();
     let third = world.checksum(&[]);
-    assert_eq!(world.entities.entity_fingerprint_builds(), builds_after_first + 1);
+    assert_eq!(
+        world.entities.entity_fingerprint_builds(),
+        builds_after_first + 1
+    );
     assert_eq!(third, first);
 
     // Membership change must invalidate and change the value.
@@ -735,7 +769,10 @@ fn idle_entity_fingerprint_skips_sort_and_hash_rebuild() {
         .entities
         .spawn(EntityType::Arrow, Vec3::new(5.0, 80.0, 5.0));
     let fourth = world.checksum(&[]);
-    assert_eq!(world.entities.entity_fingerprint_builds(), builds_after_first + 2);
+    assert_eq!(
+        world.entities.entity_fingerprint_builds(),
+        builds_after_first + 2
+    );
     assert_ne!(fourth, first);
 }
 
@@ -1000,7 +1037,9 @@ fn mount_requires_range_and_updates_authoritative_passengers() {
         WorldType::Superflat,
         false,
         WorldRules::default(),
-        2, Difficulty::default());
+        2,
+        Difficulty::default(),
+    );
     world.entities.entities.push(crate::entity::Entity::new(
         11,
         EntityType::Boat,
@@ -1040,20 +1079,19 @@ fn trade_second_cost_failure_rolls_back_first_cost() {
         WorldType::Superflat,
         false,
         WorldRules::default(),
-        2, Difficulty::default());
+        2,
+        Difficulty::default(),
+    );
     {
-        let mut entity = crate::entity::Entity::new(
-            21,
-            EntityType::Villager,
-            glam::Vec3::new(9.0, 80.0, 8.0),
-        );
+        let mut entity =
+            crate::entity::Entity::new(21, EntityType::Villager, glam::Vec3::new(9.0, 80.0, 8.0));
         entity.profession = crate::village::poi::VillagerProfession::Farmer;
         entity.villager_level = crate::village::trade::VillagerLevel::Novice;
         entity.offers = vec![crate::village::trade::TradeOffer::new(
             crate::inventory::ItemStack::new(crate::inventory::Item::Wheat, 2),
             Some(crate::inventory::ItemStack::new(
                 crate::inventory::Item::Carrot,
-                1
+                1,
             )),
             crate::inventory::ItemStack::new(crate::inventory::Item::Emerald, 1),
             4,
@@ -1084,7 +1122,9 @@ fn tick_automation_walks_simulation_columns_not_residency() {
         WorldType::Superflat,
         false,
         WorldRules::default(),
-        2, Difficulty::default());
+        2,
+        Difficulty::default(),
+    );
     world.set_block(8, 80, 8, BlockType::Hopper, 0).unwrap();
     world.set_block(128, 80, 8, BlockType::Hopper, 0).unwrap();
     if let Some(BlockEntity::Hopper(hopper)) = world.chunks.get_block_entity_mut(8, 80, 8) {
@@ -1115,7 +1155,9 @@ fn evict_flushes_dirty_then_removes_unkept_columns() {
         WorldType::Superflat,
         false,
         WorldRules::default(),
-        2, Difficulty::default());
+        2,
+        Difficulty::default(),
+    );
     world
         .set_block(128, 80, 8, BlockType::DiamondOre, 0)
         .unwrap();
@@ -1143,7 +1185,9 @@ fn do_fire_tick_false_filters_fire_random_ticks() {
         WorldType::Superflat,
         false,
         rules,
-        2, Difficulty::default());
+        2,
+        Difficulty::default(),
+    );
     world.set_block(4, 65, 4, BlockType::Fire, 0).unwrap();
     let players = [(1u64, [4.0_f32, 65.0, 4.0], 0.0_f32, 0.0_f32)];
     for _ in 0..400 {
@@ -1167,7 +1211,9 @@ fn materialized_mutated_column_rejects_late_worldgen_result() {
     let wx = 5 * 16 + 2;
     let wy = 80;
     let wz = 5 * 16 + 2;
-    world.set_block(wx, wy, wz, BlockType::DiamondOre, 0).unwrap();
+    world
+        .set_block(wx, wy, wz, BlockType::DiamondOre, 0)
+        .unwrap();
     assert_eq!(world.get_block(wx, wy, wz), BlockType::DiamondOre);
 
     // Apply late generated empty chunk
@@ -1205,4 +1251,3 @@ fn failed_restore_column_rejects_worldgen_result() {
     assert!(!world.chunk_is_resident(7, 7));
     assert!(world.failed_restore_chunks().contains(&(7, 7)));
 }
-

@@ -63,6 +63,7 @@ impl OreGenerator {
         }
     }
 
+    #[cfg(test)]
     pub fn configs(&self) -> &[OreConfig] {
         &self.configs
     }

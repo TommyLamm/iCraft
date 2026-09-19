@@ -1,6 +1,5 @@
 use super::*;
 
-
 pub type BlockPos = (i32, i32, i32);
 
 pub(crate) const MAX_PROPAGATION_PASSES: usize = 64;
@@ -974,7 +973,11 @@ impl RedstoneSystem {
         self.known_load_generation = manager.load_generation();
     }
 
-    pub(crate) fn reconcile_mutations(&mut self, manager: &WorldColumns, mutations: &[BlockMutation]) {
+    pub(crate) fn reconcile_mutations(
+        &mut self,
+        manager: &WorldColumns,
+        mutations: &[BlockMutation],
+    ) {
         for mutation in mutations {
             if is_component(mutation.new_block) {
                 self.components
@@ -1002,7 +1005,11 @@ impl RedstoneSystem {
         }
     }
 
-    pub(crate) fn process_scheduled(&mut self, manager: &mut WorldColumns, update: &mut RedstoneUpdate) {
+    pub(crate) fn process_scheduled(
+        &mut self,
+        manager: &mut WorldColumns,
+        update: &mut RedstoneUpdate,
+    ) {
         let (due, future): (Vec<_>, Vec<_>) = std::mem::take(&mut self.scheduled)
             .into_iter()
             .partition(|s| s.due <= self.tick);
@@ -1132,11 +1139,7 @@ impl RedstoneSystem {
             .components
             .iter()
             .filter_map(|(&pos, _)| {
-                matches!(
-                    get_block(manager, pos),
-                    BlockType::PressurePlate
-                )
-                .then_some(pos)
+                matches!(get_block(manager, pos), BlockType::PressurePlate).then_some(pos)
             })
             .collect();
         for pos in plates {
@@ -1144,8 +1147,7 @@ impl RedstoneSystem {
                 occupant.0 == pos.0 && occupant.2 == pos.2 && occupant.1 == pos.1 + 1
             });
             let current_block = get_block(manager, pos);
-            if current_block == BlockType::PressurePlate
-                && block_open_at(manager, pos) != occupied
+            if current_block == BlockType::PressurePlate && block_open_at(manager, pos) != occupied
             {
                 set_open_flag(manager, pos, BlockType::PressurePlate, occupied, mutations);
                 self.mark_neighbors_dirty(manager, pos);
@@ -1252,9 +1254,7 @@ impl RedstoneSystem {
             };
 
             match block {
-                BlockType::RedstoneTorch
-                | BlockType::Comparator
-                | BlockType::RedstoneLamp => {
+                BlockType::RedstoneTorch | BlockType::Comparator | BlockType::RedstoneLamp => {
                     apply_powered_open_state(
                         manager,
                         pos,
@@ -1336,5 +1336,4 @@ impl RedstoneSystem {
             }
         }
     }
-
 }

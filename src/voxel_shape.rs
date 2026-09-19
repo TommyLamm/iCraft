@@ -390,7 +390,7 @@ fn is_connectable(neighbor: BlockType, self_type: BlockType) -> bool {
 }
 
 /// Computes local connection flags `(north, south, west, east)` for fences/walls/panes.
-pub fn get_connections_sampled(
+fn get_connections_sampled(
     self_type: BlockType,
     (x, y, z): (i32, i32, i32),
     sample: Option<&dyn Fn(i32, i32, i32) -> BlockType>,
@@ -404,15 +404,6 @@ pub fn get_connections_sampled(
     } else {
         (true, true, true, true)
     }
-}
-
-/// Computes local connection flags `(north, south, west, east)` for fences/walls/panes.
-pub fn get_connections(
-    self_type: BlockType,
-    pos: (i32, i32, i32),
-    sample: Option<&dyn Fn(i32, i32, i32) -> BlockType>,
-) -> (bool, bool, bool, bool) {
-    get_connections_sampled(self_type, pos, sample)
 }
 
 // ---------------------------------------------------------------------------
@@ -618,19 +609,16 @@ pub fn block_selection_shape(
             }
         }
 
-        BlockType::OakDoor
-        | BlockType::OakTrapdoor => VoxelShape::FULL_CUBE,
+        BlockType::OakDoor | BlockType::OakTrapdoor => VoxelShape::FULL_CUBE,
 
-        BlockType::Torch | BlockType::RedstoneTorch => {
-            VoxelShape::from_box(aabb(
-                6.0 * SIXTEENTH,
-                0.0,
-                6.0 * SIXTEENTH,
-                10.0 * SIXTEENTH,
-                10.0 * SIXTEENTH,
-                10.0 * SIXTEENTH,
-            ))
-        }
+        BlockType::Torch | BlockType::RedstoneTorch => VoxelShape::from_box(aabb(
+            6.0 * SIXTEENTH,
+            0.0,
+            6.0 * SIXTEENTH,
+            10.0 * SIXTEENTH,
+            10.0 * SIXTEENTH,
+            10.0 * SIXTEENTH,
+        )),
 
         BlockType::TallGrass
         | BlockType::Dandelion
@@ -659,7 +647,6 @@ pub fn block_selection_shape(
 
     shape.translate(Vec3::new(fx, fy, fz))
 }
-
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -767,5 +754,4 @@ mod tests {
         let (t_step, _) = step_hit.unwrap();
         assert!((t_step - 1.0).abs() < 1e-4); // hits top step at y = 1.0
     }
-
 }

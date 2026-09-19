@@ -100,30 +100,16 @@ impl FeaturePlacer {
             let local_z = n_world_z - chunk_z * CHUNK_DEPTH as i32;
 
             match biome {
-                Biome::Taiga => self.place_spruce(chunk,
-                    local_x,
-                    local_z,
-                    surface_h + 1,
-                    tree_height + 2,
-                ),
-                Biome::BirchForest => self.place_birch(chunk,
-                    local_x,
-                    local_z,
-                    surface_h + 1,
-                    tree_height + 1,
-                ),
-                Biome::Jungle => self.place_jungle(chunk,
-                    local_x,
-                    local_z,
-                    surface_h + 1,
-                    tree_height + 3,
-                ),
-                _ => self.place_oak(chunk,
-                    local_x,
-                    local_z,
-                    surface_h + 1,
-                    tree_height,
-                ),
+                Biome::Taiga => {
+                    self.place_spruce(chunk, local_x, local_z, surface_h + 1, tree_height + 2)
+                }
+                Biome::BirchForest => {
+                    self.place_birch(chunk, local_x, local_z, surface_h + 1, tree_height + 1)
+                }
+                Biome::Jungle => {
+                    self.place_jungle(chunk, local_x, local_z, surface_h + 1, tree_height + 3)
+                }
+                _ => self.place_oak(chunk, local_x, local_z, surface_h + 1, tree_height),
             }
         }
     }
@@ -146,8 +132,7 @@ impl FeaturePlacer {
         let roll = vegetation_hash % 100;
 
         // Find the surface block.
-        let Some(surface_block) =
-            self.block_at_local(chunk, lx as i32, surface_y, lz as i32)
+        let Some(surface_block) = self.block_at_local(chunk, lx as i32, surface_y, lz as i32)
         else {
             return;
         };
@@ -155,38 +140,30 @@ impl FeaturePlacer {
         // Plants on grass.
         if surface_block == BlockType::Grass {
             if roll < 10 {
-                self.set_block_local(chunk,
+                self.set_block_local(
+                    chunk,
                     lx as i32,
                     surface_y + 1,
                     lz as i32,
                     BlockType::TallGrass,
                 );
             } else if roll < 12 {
-                self.set_block_local(chunk,
+                self.set_block_local(
+                    chunk,
                     lx as i32,
                     surface_y + 1,
                     lz as i32,
                     BlockType::Dandelion,
                 );
             } else if roll < 13 {
-                self.set_block_local(chunk,
-                    lx as i32,
-                    surface_y + 1,
-                    lz as i32,
-                    BlockType::Poppy,
-                );
+                self.set_block_local(chunk, lx as i32, surface_y + 1, lz as i32, BlockType::Poppy);
             } else if roll < 14 && (biome == Biome::Plains || biome == Biome::Forest) {
                 let veg = if (h >> 8) & 1 == 0 {
                     BlockType::Pumpkin
                 } else {
                     BlockType::Melon
                 };
-                self.set_block_local(chunk,
-                    lx as i32,
-                    surface_y + 1,
-                    lz as i32,
-                    veg,
-                );
+                self.set_block_local(chunk, lx as i32, surface_y + 1, lz as i32, veg);
             }
         }
 
@@ -196,7 +173,8 @@ impl FeaturePlacer {
             if roll < 2 {
                 let height = 1 + ((h >> 8) % 3) as i32;
                 for dy in 1..=height {
-                    self.set_block_local(chunk,
+                    self.set_block_local(
+                        chunk,
                         lx as i32,
                         surface_y + dy,
                         lz as i32,
@@ -218,7 +196,8 @@ impl FeaturePlacer {
                 if cane_roll % 100 < 10 {
                     let height = (2 + (cane_roll >> 8) % 3) as i32;
                     for dy in 1..=height {
-                        self.set_block_local(chunk,
+                        self.set_block_local(
+                            chunk,
                             lx as i32,
                             surface_y + dy,
                             lz as i32,
@@ -230,20 +209,12 @@ impl FeaturePlacer {
         }
     }
 
-    fn is_near_water(
-        &self,
-        chunk: &Chunk,
-        lx: usize,
-        ly: i32,
-        lz: usize,
-    ) -> bool {
+    fn is_near_water(&self, chunk: &Chunk, lx: usize, ly: i32, lz: usize) -> bool {
         for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
             let nx = lx as i32 + dx;
             let nz = lz as i32 + dz;
             if nx >= 0 && nx < CHUNK_WIDTH as i32 && nz >= 0 && nz < CHUNK_DEPTH as i32 {
-                if let Some(BlockType::Water) =
-                    self.block_at_local(chunk, nx, ly, nz)
-                {
+                if let Some(BlockType::Water) = self.block_at_local(chunk, nx, ly, nz) {
                     return true;
                 }
             }
@@ -271,21 +242,9 @@ impl FeaturePlacer {
         chunk.set_block_local(x as usize, wy, z as usize, block);
     }
 
-    fn place_oak(
-        &self,
-        chunk: &mut Chunk,
-        lx: i32,
-        lz: i32,
-        start_y: i32,
-        height: i32,
-    ) {
+    fn place_oak(&self, chunk: &mut Chunk, lx: i32, lz: i32, start_y: i32, height: i32) {
         for dy in 0..height {
-            self.set_block_local(chunk,
-                lx,
-                start_y + dy,
-                lz,
-                BlockType::OakLog,
-            );
+            self.set_block_local(chunk, lx, start_y + dy, lz, BlockType::OakLog);
         }
         for ly in (height - 3)..=height {
             let radius: i32 = if ly == height { 1 } else { 2 };
@@ -301,33 +260,16 @@ impl FeaturePlacer {
                         current,
                         None | Some(BlockType::Air) | Some(BlockType::OakLeaves)
                     ) {
-                        self.set_block_local(chunk,
-                            bx,
-                            start_y + ly,
-                            bz,
-                            BlockType::OakLeaves,
-                        );
+                        self.set_block_local(chunk, bx, start_y + ly, bz, BlockType::OakLeaves);
                     }
                 }
             }
         }
     }
 
-    fn place_birch(
-        &self,
-        chunk: &mut Chunk,
-        lx: i32,
-        lz: i32,
-        start_y: i32,
-        height: i32,
-    ) {
+    fn place_birch(&self, chunk: &mut Chunk, lx: i32, lz: i32, start_y: i32, height: i32) {
         for dy in 0..height {
-            self.set_block_local(chunk,
-                lx,
-                start_y + dy,
-                lz,
-                BlockType::BirchLog,
-            );
+            self.set_block_local(chunk, lx, start_y + dy, lz, BlockType::BirchLog);
         }
         for ly in (height - 3)..=height {
             for dx in -1..=1 {
@@ -336,33 +278,16 @@ impl FeaturePlacer {
                     let bz = lz + dz;
                     let current = self.block_at_local(chunk, bx, start_y + ly, bz);
                     if matches!(current, None | Some(BlockType::Air)) {
-                        self.set_block_local(chunk,
-                            bx,
-                            start_y + ly,
-                            bz,
-                            BlockType::BirchLeaves,
-                        );
+                        self.set_block_local(chunk, bx, start_y + ly, bz, BlockType::BirchLeaves);
                     }
                 }
             }
         }
     }
 
-    fn place_spruce(
-        &self,
-        chunk: &mut Chunk,
-        lx: i32,
-        lz: i32,
-        start_y: i32,
-        height: i32,
-    ) {
+    fn place_spruce(&self, chunk: &mut Chunk, lx: i32, lz: i32, start_y: i32, height: i32) {
         for dy in 0..height {
-            self.set_block_local(chunk,
-                lx,
-                start_y + dy,
-                lz,
-                BlockType::SpruceLog,
-            );
+            self.set_block_local(chunk, lx, start_y + dy, lz, BlockType::SpruceLog);
         }
         for ly in (height - 6)..=height {
             let radius: i32 = if ly >= height - 1 { 1 } else { 2 };
@@ -375,33 +300,16 @@ impl FeaturePlacer {
                     let bz = lz + dz;
                     let current = self.block_at_local(chunk, bx, start_y + ly, bz);
                     if matches!(current, None | Some(BlockType::Air)) {
-                        self.set_block_local(chunk,
-                            bx,
-                            start_y + ly,
-                            bz,
-                            BlockType::SpruceLeaves,
-                        );
+                        self.set_block_local(chunk, bx, start_y + ly, bz, BlockType::SpruceLeaves);
                     }
                 }
             }
         }
     }
 
-    fn place_jungle(
-        &self,
-        chunk: &mut Chunk,
-        lx: i32,
-        lz: i32,
-        start_y: i32,
-        height: i32,
-    ) {
+    fn place_jungle(&self, chunk: &mut Chunk, lx: i32, lz: i32, start_y: i32, height: i32) {
         for dy in 0..height {
-            self.set_block_local(chunk,
-                lx,
-                start_y + dy,
-                lz,
-                BlockType::OakLog,
-            );
+            self.set_block_local(chunk, lx, start_y + dy, lz, BlockType::OakLog);
         }
         for ly in (height - 4)..=height {
             let radius: i32 = if ly == height { 1 } else { 2 };
@@ -414,12 +322,7 @@ impl FeaturePlacer {
                     let bz = lz + dz;
                     let current = self.block_at_local(chunk, bx, start_y + ly, bz);
                     if matches!(current, None | Some(BlockType::Air)) {
-                        self.set_block_local(chunk,
-                            bx,
-                            start_y + ly,
-                            bz,
-                            BlockType::OakLeaves,
-                        );
+                        self.set_block_local(chunk, bx, start_y + ly, bz, BlockType::OakLeaves);
                     }
                 }
             }

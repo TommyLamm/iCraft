@@ -4,7 +4,6 @@
 use super::*;
 
 impl State {
-
     /// Advance the in-process authority by one fixed 20 Hz tick.  Dedicated
     /// mode has no `State`, while a network client correctly returns `None`.
     pub fn tick_authority_boundary(
@@ -134,9 +133,7 @@ impl State {
                 .insert((cx, cz), ChunkMesh::pending_for_dimension(dimension));
         } else {
             let lifetime = self.next_chunk_lifetime();
-            self.chunk_lifetimes
-                .entry((cx, cz))
-                .or_insert(lifetime);
+            self.chunk_lifetimes.entry((cx, cz)).or_insert(lifetime);
             self.chunk_meshes
                 .entry((cx, cz))
                 .or_insert_with(|| ChunkMesh::pending_for_dimension(dimension));
@@ -272,7 +269,12 @@ impl State {
     /// updates. Ordering is checked before any renderer-owned cache is touched:
     /// sequence orders dimension transfers, while revision orders snapshots in
     /// one dimension. The authority remains the sole writer of gameplay state.
-    pub(super) fn accept_session_projection(&mut self, dimension: u8, sequence: u64, revision: u64) -> bool {
+    pub(super) fn accept_session_projection(
+        &mut self,
+        dimension: u8,
+        sequence: u64,
+        revision: u64,
+    ) -> bool {
         if let Some((latest_dimension, latest_sequence, latest_revision)) =
             self.client_session_projection
         {
@@ -365,9 +367,7 @@ impl State {
         }
 
         self.presented_fishing_hook_entity = match gameplay.fishing_hook {
-            Some(hook)
-                if crate::fishing::FishingHookStage::from_wire(hook.stage).is_some() =>
-            {
+            Some(hook) if crate::fishing::FishingHookStage::from_wire(hook.stage).is_some() => {
                 Some(hook.entity_id)
             }
             _ => None,
@@ -906,4 +906,3 @@ impl State {
         self.entity_manager.sync_entity_positions(&moved_ids);
     }
 }
-

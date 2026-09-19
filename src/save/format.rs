@@ -1012,8 +1012,7 @@ fn apply_decoded_column(
                         } else {
                             0
                         };
-                        let (block, state) =
-                            BlockType::migrate_saved(blocks[flat_idx], raw_state);
+                        let (block, state) = BlockType::migrate_saved(blocks[flat_idx], raw_state);
                         sec_b[sec_idx] = block;
                         sec_st[sec_idx] = state;
                     } else if flat_idx < block_states.len() {

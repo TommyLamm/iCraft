@@ -1,5 +1,5 @@
-use super::*;
 use super::dragon::complete_dragon;
+use super::*;
 
 pub(super) fn update_wither(
     wither: &mut crate::entity::Entity,
@@ -176,6 +176,7 @@ pub(super) fn collect_deaths(entities: &mut EntityManager, events: &mut BossEven
 /// Recognizes either horizontal orientation of the seven-block Wither summon.
 /// The returned positions contain all three skulls followed by all four soul
 /// sand blocks and are suitable for atomic validation/consumption by the caller.
+#[cfg(test)]
 pub fn detect_wither_pattern<F>(changed: BlockPos, getter: F) -> Option<Vec<BlockPos>>
 where
     F: Fn(BlockPos) -> BlockType,

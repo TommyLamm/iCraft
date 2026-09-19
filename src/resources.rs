@@ -487,12 +487,7 @@ impl ResourcePackManager {
     /// raw bytes directly into the target typed representation.  Invalid
     /// candidates are diagnosed and skipped so a valid fallback candidate
     /// (such as built-in assets) still succeeds.
-    pub fn resolve_decoded<T, F>(
-        &mut self,
-        relative: &str,
-        kind: &str,
-        mut decode: F,
-    ) -> Option<T>
+    pub fn resolve_decoded<T, F>(&mut self, relative: &str, kind: &str, mut decode: F) -> Option<T>
     where
         F: FnMut(&Arc<[u8]>) -> Option<T>,
     {
@@ -764,9 +759,8 @@ fn load_zip_pack(path: &Path) -> Result<LoadedPack, PackError> {
 /// Reject ZIP64 before handing bytes to the zip crate so oversized archives
 /// cannot expand through the ZIP64 pathway.
 fn reject_zip64_markers(bytes: &[u8]) -> Result<(), PackError> {
-    let eocd = find_zip_end_marker(bytes).ok_or_else(|| {
-        PackError::Archive("ZIP end record is missing".into())
-    })?;
+    let eocd = find_zip_end_marker(bytes)
+        .ok_or_else(|| PackError::Archive("ZIP end record is missing".into()))?;
     if eocd >= 20 {
         let locator = &bytes[eocd - 20..eocd];
         if locator.starts_with(&0x0706_4b50u32.to_le_bytes()) {
@@ -1289,7 +1283,11 @@ mod tests {
         write_pack(&override_pack, "test.override", &[]);
         fs::create_dir_all(override_pack.join("textures")).unwrap();
         fs::create_dir_all(root.join("textures")).unwrap();
-        fs::write(override_pack.join("textures/stone.png"), b"corrupt_override").unwrap();
+        fs::write(
+            override_pack.join("textures/stone.png"),
+            b"corrupt_override",
+        )
+        .unwrap();
         fs::write(root.join("textures/stone.png"), b"valid_fallback").unwrap();
 
         let mut manager = ResourcePackManager::discover(&root, &user);
@@ -1315,7 +1313,10 @@ mod tests {
         assert_eq!(result, Some("parsed_texture"));
         assert_eq!(decode_calls, 2);
         assert_eq!(corrupt_attempts, 1);
-        assert_eq!(valid_attempts, 1, "successful candidate must be decoded exactly once");
+        assert_eq!(
+            valid_attempts, 1,
+            "successful candidate must be decoded exactly once"
+        );
         assert_eq!(manager.diagnostics().len(), 1);
 
         let _ = fs::remove_dir_all(root);

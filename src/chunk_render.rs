@@ -252,7 +252,6 @@ impl ChunkLodMeshData {
     }
 }
 
-
 /// CPU result for exactly one 16^3 section. `identity` is checked when a
 /// worker result is integrated; the three levels intentionally mirror the
 /// legacy chunk bundle until renderer cutover is complete.
@@ -276,7 +275,6 @@ impl SectionMeshBundle {
             && self.identity.revision == current.revision
     }
 }
-
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 struct Plane {

@@ -58,7 +58,9 @@ fn container_revision_order_rejects_duplicates_and_accepts_wraparound() {
 fn network_burst_budget_leaves_persistent_backlog() {
     let mut staging = NetworkStaging::default();
     for _ in 0..(NETWORK_MAX_EVENTS_PER_PASS + 17) {
-        staging.stage(NetworkInbound::StatusUpdate { message: "burst".into() });
+        staging.stage(NetworkInbound::StatusUpdate {
+            message: "burst".into(),
+        });
     }
     for _ in 0..NETWORK_MAX_EVENTS_PER_PASS {
         assert!(staging.pop_next_if_fits(usize::MAX).is_some());
@@ -70,9 +72,15 @@ fn network_burst_budget_leaves_persistent_backlog() {
 fn reliable_events_remain_strict_fifo_until_eventual_delivery() {
     let mut staging = NetworkStaging::default();
     for event in [
-        NetworkInbound::StatusUpdate { message: "one".into() },
-        NetworkInbound::StatusUpdate { message: "two".into() },
-        NetworkInbound::StatusUpdate { message: "three".into() },
+        NetworkInbound::StatusUpdate {
+            message: "one".into(),
+        },
+        NetworkInbound::StatusUpdate {
+            message: "two".into(),
+        },
+        NetworkInbound::StatusUpdate {
+            message: "three".into(),
+        },
     ] {
         staging.stage(event);
     }
@@ -153,19 +161,31 @@ fn latest_wins_state_is_sequence_aware_per_key() {
     assert_eq!(staging.latest_positions.len(), 2);
     assert!(matches!(
         staging.latest_positions.get(&7),
-        Some(NetworkInbound::Packet(Packet::PlayerPosition { sequence: 2, .. }))
+        Some(NetworkInbound::Packet(Packet::PlayerPosition {
+            sequence: 2,
+            ..
+        }))
     ));
     assert!(matches!(
         staging.latest_health.get(&3),
-        Some(NetworkInbound::Packet(Packet::PlayerHealth { sequence: 10, .. }))
+        Some(NetworkInbound::Packet(Packet::PlayerHealth {
+            sequence: 10,
+            ..
+        }))
     ));
     assert!(matches!(
         staging.latest_effects.get(&3),
-        Some(NetworkInbound::Packet(Packet::PlayerEffect { sequence: 10, .. }))
+        Some(NetworkInbound::Packet(Packet::PlayerEffect {
+            sequence: 10,
+            ..
+        }))
     ));
     assert!(matches!(
         staging.latest_entities.get(&(0, 99)),
-        Some(NetworkInbound::Packet(Packet::EntityState { sequence: 5, .. }))
+        Some(NetworkInbound::Packet(Packet::EntityState {
+            sequence: 5,
+            ..
+        }))
     ));
     assert!(matches!(
         staging.latest_time_sync,
@@ -175,13 +195,21 @@ fn latest_wins_state_is_sequence_aware_per_key() {
 
 #[test]
 fn network_event_and_byte_caps_are_explicit_and_measurable() {
-    let event = NetworkInbound::StatusUpdate { message: "bounded".into() };
+    let event = NetworkInbound::StatusUpdate {
+        message: "bounded".into(),
+    };
     assert!(event.estimated_bytes() > 0);
     assert!(NETWORK_MAX_EVENTS_PER_PASS <= 256);
     assert!(NETWORK_MAX_BYTES_PER_PASS >= event.estimated_bytes());
     assert!(NETWORK_MAX_TIME_PER_PASS > Duration::ZERO);
-    let small = NetworkInbound::StatusUpdate { message: "x".into() }.estimated_bytes();
-    let large = NetworkInbound::StatusUpdate { message: "x".repeat(4096) }.estimated_bytes();
+    let small = NetworkInbound::StatusUpdate {
+        message: "x".into(),
+    }
+    .estimated_bytes();
+    let large = NetworkInbound::StatusUpdate {
+        message: "x".repeat(4096),
+    }
+    .estimated_bytes();
     assert!(large >= small + 4095);
 }
 
@@ -274,8 +302,7 @@ fn remote_block_entity_delta_applies_and_respects_monotonic_revisions() {
 #[test]
 fn batched_pose_arrivals_keep_sender_cadence() {
     let mut remote = RemotePlayerState::new(1, "Alex".into());
-    for (sequence, sender_time_millis, x) in [(1, 1_000, 0.0), (2, 1_050, 1.0), (3, 1_100, 2.0)]
-    {
+    for (sequence, sender_time_millis, x) in [(1, 1_000, 0.0), (2, 1_050, 1.0), (3, 1_100, 2.0)] {
         assert_ne!(
             remote.push_snapshot(
                 Vec3::new(x, 0.0, 0.0),
@@ -607,9 +634,8 @@ fn mutation_scheduler_worker_chain_commits_only_the_latest_visible_revision() {
         Some(current),
     ));
     let section = meshes.get_mut(&coord).unwrap().section_mut(4).unwrap();
-    section.connectivity = crate::culling::SectionConnectivityState::Valid(
-        crate::culling::SectionConnectivity::FULL,
-    );
+    section.connectivity =
+        crate::culling::SectionConnectivityState::Valid(crate::culling::SectionConnectivity::FULL);
     section.meshed_revision = latest_work.identity.revision;
     assert_eq!(section.meshed_revision, section.revision);
 }
@@ -619,10 +645,12 @@ fn boundary_and_diagonal_ao_dependencies_queue_once() {
     let coords = [(0, 0), (1, 0), (0, 1), (1, 1)];
     let mut meshes = coords
         .into_iter()
-        .map(|coord| (
-            coord,
-            ChunkMesh::pending_for_dimension(crate::dimension::Dimension::Overworld),
-        ))
+        .map(|coord| {
+            (
+                coord,
+                ChunkMesh::pending_for_dimension(crate::dimension::Dimension::Overworld),
+            )
+        })
         .collect::<std::collections::HashMap<_, _>>();
     let mut scheduler = crate::chunk_schedule::SectionMeshScheduler::new();
     let mut dependencies = std::collections::HashSet::new();
@@ -896,7 +924,10 @@ fn state_only_lamp_and_torch_light_emission_triggers_lighting() {
     )
     .expect("lamp state change should succeed");
 
-    assert_eq!(manager.get_block_light(lamp_pos.0, lamp_pos.1, lamp_pos.2), 15);
+    assert_eq!(
+        manager.get_block_light(lamp_pos.0, lamp_pos.1, lamp_pos.2),
+        15
+    );
     assert_eq!(
         manager.get_block_light(lamp_pos.0, lamp_pos.1 + 1, lamp_pos.2),
         14
@@ -915,7 +946,10 @@ fn state_only_lamp_and_torch_light_emission_triggers_lighting() {
     )
     .expect("lamp turn-off should succeed");
 
-    assert_eq!(manager.get_block_light(lamp_pos.0, lamp_pos.1, lamp_pos.2), 0);
+    assert_eq!(
+        manager.get_block_light(lamp_pos.0, lamp_pos.1, lamp_pos.2),
+        0
+    );
     assert_eq!(
         manager.get_block_light(lamp_pos.0, lamp_pos.1 + 1, lamp_pos.2),
         0
@@ -985,4 +1019,3 @@ fn multiple_mutations_on_same_section_collapse_to_latest_revision_identity() {
     assert_eq!(work.identity.revision, final_revision);
     assert_eq!(work.identity.key, key);
 }
-

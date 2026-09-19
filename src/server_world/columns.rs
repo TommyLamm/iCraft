@@ -1,5 +1,5 @@
-use super::*;
 use super::entities::block_revision_fingerprint;
+use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorldgenApplyOutcome {
@@ -85,7 +85,8 @@ impl ServerWorld {
     }
 
     pub fn prune_unkept_demands(&mut self, keep: &BTreeSet<(i32, i32)>) {
-        self.pending_chunk_generation.retain(|key| keep.contains(key));
+        self.pending_chunk_generation
+            .retain(|key| keep.contains(key));
     }
 
     pub fn entities_dirty_for_save(&self) -> bool {
@@ -107,7 +108,10 @@ impl ServerWorld {
     ) -> WorldgenApplyOutcome {
         let key = (chunk_x, chunk_z);
         let demanded = self.pending_chunk_generation.remove(&key);
-        if !demanded || self.chunks.chunks.contains_key(&key) || self.failed_restore_chunks.contains(&key) {
+        if !demanded
+            || self.chunks.chunks.contains_key(&key)
+            || self.failed_restore_chunks.contains(&key)
+        {
             return WorldgenApplyOutcome::Discarded;
         }
         self.chunks.insert_resident_chunk(key, chunk);
@@ -137,8 +141,7 @@ impl ServerWorld {
         };
         let chunk =
             generate_chunk_with_options(self.dimension, chunk_x, chunk_z, self.seed, options);
-        self.chunks
-            .insert_resident_chunk((chunk_x, chunk_z), chunk);
+        self.chunks.insert_resident_chunk((chunk_x, chunk_z), chunk);
     }
 
     pub fn ensure_chunk(&mut self, chunk_x: i32, chunk_z: i32) {
@@ -207,13 +210,10 @@ impl ServerWorld {
             chest.ensure_loot_generated(self.seed, position);
             chest.revision = revision;
         }
-        self.chunks
-            .mark_block_entity_dirty(position.0, position.2);
+        self.chunks.mark_block_entity_dirty(position.0, position.2);
         self.set_block_revision(position, revision);
-        self.chunk_revisions.insert(
-            chunk_xz(position.0, position.2),
-            revision,
-        );
+        self.chunk_revisions
+            .insert(chunk_xz(position.0, position.2), revision);
         self.pending_mutations.push(WorldMutation {
             dimension: self.dimension as u8,
             position,
@@ -395,7 +395,6 @@ impl ServerWorld {
         self.block_revision_checksum ^= block_revision_fingerprint(position, revision);
     }
 
-
     /// Restore a persisted chunk into the authoritative map. The payload is
     /// decoded before any insert so a corrupt inner zlib cannot be replaced
     /// by generated terrain and then saved back over player builds.
@@ -432,6 +431,4 @@ impl ServerWorld {
         }
         self.acknowledge_entities_persisted();
     }
-
 }
-

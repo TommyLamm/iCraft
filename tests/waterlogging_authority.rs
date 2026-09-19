@@ -7,7 +7,7 @@ use icraft::dimension::Dimension;
 use icraft::inventory::Item;
 use icraft::network::protocol::{
     GameplayOperation, GameplayOutcome, GameplayRequest, ItemWire, Packet, SessionSlotWire,
-    SlotRefWire, PROTOCOL_VERSION,
+    SlotRefWire,
 };
 use icraft::save::ChunkSaveData;
 use icraft::world::{BlockType, Chunk, FLUID_WATERLOGGED_BIT};

@@ -5,8 +5,6 @@ pub mod feature;
 pub mod ore;
 pub mod surface;
 
-use crate::dimension::Dimension;
-
 /// Overworld sea level (matching vanilla 1.21.5).
 pub const SEA_LEVEL: i32 = 63;
 
@@ -61,6 +59,7 @@ pub fn hash_coord(seed: u32, x: i32, y: i32, z: i32, salt: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dimension::Dimension;
 
     #[test]
     fn adjacent_chunk_surface_height_continuity() {

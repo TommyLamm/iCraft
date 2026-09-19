@@ -317,7 +317,14 @@ pub fn render_mobs<'a>(
                     render_wither(entity, cuboid_instances, &to_world, time, light_val);
                 }
                 EntityType::DroppedItem => {
-                    render_dropped_item(entity, cuboid_instances, quad_instances, &to_world, time, light_val);
+                    render_dropped_item(
+                        entity,
+                        cuboid_instances,
+                        quad_instances,
+                        &to_world,
+                        time,
+                        light_val,
+                    );
                 }
                 _ => {}
             }
@@ -350,135 +357,135 @@ fn render_ender_dragon(
     time: f32,
     light_val: f32,
 ) {
-                let flap = (time * 3.0).sin() * 0.22;
-                let dragon_pitch = entity.pitch;
+    let flap = (time * 3.0).sin() * 0.22;
+    let dragon_pitch = entity.pitch;
 
-                // Body, neck, head and jaw.
-                add_cuboid(
-                    cuboid_instances,
-                    Vec3::new(2.0, 1.65, 3.2),
-                    Vec3::ZERO,
-                    to_world(Vec3::new(0.0, 2.05, -0.35)),
-                    entity.yaw,
-                    dragon_pitch,
-                    [10; 6],
-                    4,
-                    light_val,
-                );
-                for (center, size) in [
-                    (Vec3::new(0.0, 2.3, 1.45), Vec3::new(1.25, 1.1, 1.15)),
-                    (Vec3::new(0.0, 2.48, 2.3), Vec3::new(1.05, 0.95, 1.0)),
-                ] {
-                    add_cuboid(
-                        cuboid_instances,
-                        size,
-                        Vec3::ZERO,
-                        to_world(center),
-                        entity.yaw,
-                        dragon_pitch - 0.12,
-                        [11; 6],
-                        4,
-                        light_val,
-                    );
-                }
-                add_cuboid(
-                    cuboid_instances,
-                    Vec3::new(1.45, 0.9, 1.35),
-                    Vec3::ZERO,
-                    to_world(Vec3::new(0.0, 2.62, 3.05)),
-                    entity.yaw,
-                    dragon_pitch,
-                    [12; 6],
-                    4,
-                    light_val,
-                );
-                add_cuboid(
-                    cuboid_instances,
-                    Vec3::new(0.95, 0.25, 0.85),
-                    Vec3::ZERO,
-                    to_world(Vec3::new(0.0, 2.22, 3.42)),
-                    entity.yaw,
-                    dragon_pitch,
-                    [12; 6],
-                    4,
-                    light_val,
-                );
-                for x in [-0.48, 0.48] {
-                    add_cuboid(
-                        cuboid_instances,
-                        Vec3::new(0.2, 0.38, 0.62),
-                        Vec3::ZERO,
-                        to_world(Vec3::new(x, 3.12, 2.75)),
-                        entity.yaw,
-                        dragon_pitch + 0.35,
-                        [12; 6],
-                        4,
-                        light_val,
-                    );
-                }
+    // Body, neck, head and jaw.
+    add_cuboid(
+        cuboid_instances,
+        Vec3::new(2.0, 1.65, 3.2),
+        Vec3::ZERO,
+        to_world(Vec3::new(0.0, 2.05, -0.35)),
+        entity.yaw,
+        dragon_pitch,
+        [10; 6],
+        4,
+        light_val,
+    );
+    for (center, size) in [
+        (Vec3::new(0.0, 2.3, 1.45), Vec3::new(1.25, 1.1, 1.15)),
+        (Vec3::new(0.0, 2.48, 2.3), Vec3::new(1.05, 0.95, 1.0)),
+    ] {
+        add_cuboid(
+            cuboid_instances,
+            size,
+            Vec3::ZERO,
+            to_world(center),
+            entity.yaw,
+            dragon_pitch - 0.12,
+            [11; 6],
+            4,
+            light_val,
+        );
+    }
+    add_cuboid(
+        cuboid_instances,
+        Vec3::new(1.45, 0.9, 1.35),
+        Vec3::ZERO,
+        to_world(Vec3::new(0.0, 2.62, 3.05)),
+        entity.yaw,
+        dragon_pitch,
+        [12; 6],
+        4,
+        light_val,
+    );
+    add_cuboid(
+        cuboid_instances,
+        Vec3::new(0.95, 0.25, 0.85),
+        Vec3::ZERO,
+        to_world(Vec3::new(0.0, 2.22, 3.42)),
+        entity.yaw,
+        dragon_pitch,
+        [12; 6],
+        4,
+        light_val,
+    );
+    for x in [-0.48, 0.48] {
+        add_cuboid(
+            cuboid_instances,
+            Vec3::new(0.2, 0.38, 0.62),
+            Vec3::ZERO,
+            to_world(Vec3::new(x, 3.12, 2.75)),
+            entity.yaw,
+            dragon_pitch + 0.35,
+            [12; 6],
+            4,
+            light_val,
+        );
+    }
 
-                // Four thin wing sections retain the broad silhouette without
-                // pushing a dragon beyond 800 generated vertices.
-                for side in [-1.0_f32, 1.0] {
-                    add_cuboid(
-                        cuboid_instances,
-                        Vec3::new(2.8, 0.14, 1.35),
-                        Vec3::ZERO,
-                        to_world(Vec3::new(side * 2.05, 2.55 + flap, -0.2)),
-                        entity.yaw,
-                        dragon_pitch - flap * side,
-                        [13; 6],
-                        4,
-                        light_val,
-                    );
-                    add_cuboid(
-                        cuboid_instances,
-                        Vec3::new(2.2, 0.1, 0.95),
-                        Vec3::ZERO,
-                        to_world(Vec3::new(side * 4.25, 2.72 + flap * 1.6, -0.55)),
-                        entity.yaw,
-                        dragon_pitch - flap * side,
-                        [13; 6],
-                        4,
-                        light_val,
-                    );
-                }
+    // Four thin wing sections retain the broad silhouette without
+    // pushing a dragon beyond 800 generated vertices.
+    for side in [-1.0_f32, 1.0] {
+        add_cuboid(
+            cuboid_instances,
+            Vec3::new(2.8, 0.14, 1.35),
+            Vec3::ZERO,
+            to_world(Vec3::new(side * 2.05, 2.55 + flap, -0.2)),
+            entity.yaw,
+            dragon_pitch - flap * side,
+            [13; 6],
+            4,
+            light_val,
+        );
+        add_cuboid(
+            cuboid_instances,
+            Vec3::new(2.2, 0.1, 0.95),
+            Vec3::ZERO,
+            to_world(Vec3::new(side * 4.25, 2.72 + flap * 1.6, -0.55)),
+            entity.yaw,
+            dragon_pitch - flap * side,
+            [13; 6],
+            4,
+            light_val,
+        );
+    }
 
-                // Tapered, gently swaying tail.
-                for segment in 0..5 {
-                    let i = segment as f32;
-                    let curve = (time * 2.0 + i * 0.7).sin() * 0.13;
-                    add_cuboid(
-                        cuboid_instances,
-                        Vec3::new(0.75 - i * 0.1, 0.65 - i * 0.07, 1.25 - i * 0.1),
-                        Vec3::ZERO,
-                        to_world(Vec3::new(
-                            curve * i * 0.55,
-                            2.0 - i * 0.12,
-                            -2.35 - i * 0.95,
-                        )),
-                        entity.yaw - curve,
-                        dragon_pitch + 0.08 * i,
-                        [11; 6],
-                        4,
-                        light_val,
-                    );
-                }
+    // Tapered, gently swaying tail.
+    for segment in 0..5 {
+        let i = segment as f32;
+        let curve = (time * 2.0 + i * 0.7).sin() * 0.13;
+        add_cuboid(
+            cuboid_instances,
+            Vec3::new(0.75 - i * 0.1, 0.65 - i * 0.07, 1.25 - i * 0.1),
+            Vec3::ZERO,
+            to_world(Vec3::new(
+                curve * i * 0.55,
+                2.0 - i * 0.12,
+                -2.35 - i * 0.95,
+            )),
+            entity.yaw - curve,
+            dragon_pitch + 0.08 * i,
+            [11; 6],
+            4,
+            light_val,
+        );
+    }
 
-                for (x, z) in [(-0.68, 0.65), (0.68, 0.65), (-0.68, -0.8), (0.68, -0.8)] {
-                    add_cuboid(
-                        cuboid_instances,
-                        Vec3::new(0.42, 1.0, 0.42),
-                        Vec3::ZERO,
-                        to_world(Vec3::new(x, 0.85, z)),
-                        entity.yaw,
-                        dragon_pitch + 0.1,
-                        [10; 6],
-                        4,
-                        light_val,
-                    );
-                }
-            }
+    for (x, z) in [(-0.68, 0.65), (0.68, 0.65), (-0.68, -0.8), (0.68, -0.8)] {
+        add_cuboid(
+            cuboid_instances,
+            Vec3::new(0.42, 1.0, 0.42),
+            Vec3::ZERO,
+            to_world(Vec3::new(x, 0.85, z)),
+            entity.yaw,
+            dragon_pitch + 0.1,
+            [10; 6],
+            4,
+            light_val,
+        );
+    }
+}
 
 fn render_wither(
     entity: &Entity,
@@ -487,60 +494,60 @@ fn render_wither(
     time: f32,
     light_val: f32,
 ) {
-                let hover = (time * 1.8).sin() * 0.1;
-                let wither_light = light_val.max(192.0);
+    let hover = (time * 1.8).sin() * 0.1;
+    let wither_light = light_val.max(192.0);
 
-                // Dedicated resource-pack wither skin at (8,8) face / (9,8) body.
-                // Central spine and the signature three-headed shoulder bar.
-                add_cuboid(
-                    cuboid_instances,
-                    Vec3::new(2.25, 0.36, 0.4),
-                    Vec3::ZERO,
-                    to_world(Vec3::new(0.0, 2.25 + hover, 0.0)),
-                    entity.yaw,
-                    0.0,
-                    [9; 6],
-                    8,
-                    wither_light,
-                );
-                add_cuboid(
-                    cuboid_instances,
-                    Vec3::new(0.38, 1.5, 0.4),
-                    Vec3::ZERO,
-                    to_world(Vec3::new(0.0, 1.4 + hover, 0.0)),
-                    entity.yaw,
-                    0.0,
-                    [9; 6],
-                    8,
-                    wither_light,
-                );
-                for (x, y, scale) in [(-0.92, 2.52, 0.82), (0.0, 2.7, 1.0), (0.92, 2.52, 0.82)] {
-                    add_cuboid(
-                        cuboid_instances,
-                        Vec3::new(0.72, 0.62, 0.62) * scale,
-                        Vec3::ZERO,
-                        to_world(Vec3::new(x, y + hover, 0.12)),
-                        entity.yaw,
-                        entity.pitch,
-                        [8, 9, 9, 9, 9, 9],
-                        8,
-                        wither_light,
-                    );
-                }
-                for (y, width) in [(1.72, 1.45), (1.28, 1.05)] {
-                    add_cuboid(
-                        cuboid_instances,
-                        Vec3::new(width, 0.2, 0.28),
-                        Vec3::ZERO,
-                        to_world(Vec3::new(0.0, y + hover, 0.0)),
-                        entity.yaw,
-                        0.0,
-                        [9; 6],
-                        8,
-                        wither_light,
-                    );
-                }
-            }
+    // Dedicated resource-pack wither skin at (8,8) face / (9,8) body.
+    // Central spine and the signature three-headed shoulder bar.
+    add_cuboid(
+        cuboid_instances,
+        Vec3::new(2.25, 0.36, 0.4),
+        Vec3::ZERO,
+        to_world(Vec3::new(0.0, 2.25 + hover, 0.0)),
+        entity.yaw,
+        0.0,
+        [9; 6],
+        8,
+        wither_light,
+    );
+    add_cuboid(
+        cuboid_instances,
+        Vec3::new(0.38, 1.5, 0.4),
+        Vec3::ZERO,
+        to_world(Vec3::new(0.0, 1.4 + hover, 0.0)),
+        entity.yaw,
+        0.0,
+        [9; 6],
+        8,
+        wither_light,
+    );
+    for (x, y, scale) in [(-0.92, 2.52, 0.82), (0.0, 2.7, 1.0), (0.92, 2.52, 0.82)] {
+        add_cuboid(
+            cuboid_instances,
+            Vec3::new(0.72, 0.62, 0.62) * scale,
+            Vec3::ZERO,
+            to_world(Vec3::new(x, y + hover, 0.12)),
+            entity.yaw,
+            entity.pitch,
+            [8, 9, 9, 9, 9, 9],
+            8,
+            wither_light,
+        );
+    }
+    for (y, width) in [(1.72, 1.45), (1.28, 1.05)] {
+        add_cuboid(
+            cuboid_instances,
+            Vec3::new(width, 0.2, 0.28),
+            Vec3::ZERO,
+            to_world(Vec3::new(0.0, y + hover, 0.0)),
+            entity.yaw,
+            0.0,
+            [9; 6],
+            8,
+            wither_light,
+        );
+    }
+}
 
 fn render_dropped_item(
     entity: &Entity,
@@ -550,46 +557,46 @@ fn render_dropped_item(
     time: f32,
     light_val: f32,
 ) {
-                // Floating + rotating dropped item. Full-cube blocks render as
-                // a small cuboid textured from the item's atlas tile; flat
-                // items (flowers, seeds, tools, food, ...) render as a
-                // double-sided sprite quad, like their inventory icon.
-                let yaw = time * 2.0;
-                let y_offset = (time * 3.0).sin() * 0.1;
+    // Floating + rotating dropped item. Full-cube blocks render as
+    // a small cuboid textured from the item's atlas tile; flat
+    // items (flowers, seeds, tools, food, ...) render as a
+    // double-sided sprite quad, like their inventory icon.
+    let yaw = time * 2.0;
+    let y_offset = (time * 3.0).sin() * 0.1;
 
-                let item = entity.dropped_item.unwrap_or(crate::inventory::Item::Air);
+    let item = entity.dropped_item.unwrap_or(crate::inventory::Item::Air);
 
-                if item.renders_flat() {
-                    let (col, row) = item.properties().tex_coords;
-                    add_flat_sprite(
-                        quad_instances,
-                        0.35,
-                        entity.position + Vec3::new(0.0, 0.3 + y_offset, 0.0),
-                        yaw,
-                        0.0,
-                        col,
-                        row,
-                        light_val,
-                    );
-                } else {
-                    let (col, row) = entity
-                        .dropped_item
-                        .map(|item| item.properties().tex_coords)
-                        .unwrap_or((0, 0));
+    if item.renders_flat() {
+        let (col, row) = item.properties().tex_coords;
+        add_flat_sprite(
+            quad_instances,
+            0.35,
+            entity.position + Vec3::new(0.0, 0.3 + y_offset, 0.0),
+            yaw,
+            0.0,
+            col,
+            row,
+            light_val,
+        );
+    } else {
+        let (col, row) = entity
+            .dropped_item
+            .map(|item| item.properties().tex_coords)
+            .unwrap_or((0, 0));
 
-                    add_cuboid(
-                        cuboid_instances,
-                        Vec3::new(0.25, 0.25, 0.25),
-                        Vec3::new(0.0, 0.0, 0.0),
-                        to_world(Vec3::new(0.0, 0.25 + y_offset, 0.0)),
-                        yaw,
-                        0.0,
-                        [col; 6],
-                        row,
-                        light_val,
-                    );
-                }
-            }
+        add_cuboid(
+            cuboid_instances,
+            Vec3::new(0.25, 0.25, 0.25),
+            Vec3::new(0.0, 0.0, 0.0),
+            to_world(Vec3::new(0.0, 0.25 + y_offset, 0.0)),
+            yaw,
+            0.0,
+            [col; 6],
+            row,
+            light_val,
+        );
+    }
+}
 
 /// Renders the local player as a Steve-like avatar in world space. Used when
 /// the camera is in third-person mode.

@@ -9,7 +9,7 @@ use common::rejected_place::rejected_place;
 use common::tcp_harness::HeldLoopback;
 use icraft::authority::contract::{SessionContract, SessionGameplayState, SessionInventorySlot};
 use icraft::authority::{AuthorityConfig, AuthorityCore};
-use icraft::chunk_manager::{PresentationChunks, WorldColumns};
+use icraft::chunk_manager::PresentationChunks;
 use icraft::dimension::Dimension;
 use icraft::entity::EntityType;
 use icraft::inventory::{Item, ItemStack};
@@ -122,7 +122,8 @@ fn checksum_after_inbound(order: [u64; 2]) -> u64 {
             .expect("fixture session");
         register(&mut core, id, name, Dimension::Overworld);
     }
-    core.world_mut(Dimension::Overworld).unwrap()
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
         .entities
         .spawn(EntityType::Zombie, glam::Vec3::new(10.0, 80.0, 10.0));
     for (index, id) in order.iter().copied().enumerate() {
@@ -197,7 +198,10 @@ fn invalid_dimension_envelope_is_rejected_without_world_or_inventory_mutation() 
         "unexpected invalid-dimension response: {:?}",
         response.outcome
     );
-    assert_eq!(core.world(Dimension::Overworld).get_block(8, 81, 8), before_block);
+    assert_eq!(
+        core.world(Dimension::Overworld).get_block(8, 81, 8),
+        before_block
+    );
     assert_eq!(
         core.session(ALEX)
             .unwrap()
@@ -253,7 +257,10 @@ fn nether_mutations_do_not_invalidate_overworld_client_revision() {
         "overworld client_revision must stay valid after a nether mutation: {:?}",
         overworld.outcome
     );
-    assert_eq!(core.world(Dimension::Overworld).get_block(8, 81, 8), BlockType::Stone);
+    assert_eq!(
+        core.world(Dimension::Overworld).get_block(8, 81, 8),
+        BlockType::Stone
+    );
 }
 
 #[test]
@@ -314,8 +321,14 @@ fn stale_block_place_does_not_consume_held_stack_or_create_drops() {
         held_after_place
     );
     assert_eq!(dropped_item_count(&core), drops_after_place);
-    assert_eq!(core.world(Dimension::Overworld).get_block(9, 81, 8), second_target);
-    assert_eq!(core.world(Dimension::Overworld).get_block(8, 81, 8), BlockType::Stone);
+    assert_eq!(
+        core.world(Dimension::Overworld).get_block(9, 81, 8),
+        second_target
+    );
+    assert_eq!(
+        core.world(Dimension::Overworld).get_block(8, 81, 8),
+        BlockType::Stone
+    );
 }
 
 /// Join-client presentation sink: apply only revision-gated projections.

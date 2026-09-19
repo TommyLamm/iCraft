@@ -57,7 +57,12 @@ impl AuthorityCore {
                 ) {
                     return Err(RejectReason::PermissionDenied);
                 }
-                if !self.world(dimension).dimension.height().contains_y(position[1]) {
+                if !self
+                    .world(dimension)
+                    .dimension
+                    .height()
+                    .contains_y(position[1])
+                {
                     return Err(RejectReason::InvalidCoordinate);
                 }
                 let Some(session) = self.sessions.get_mut(&session_id) else {

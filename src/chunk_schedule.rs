@@ -166,10 +166,6 @@ pub enum DependencyReason {
     ChunkLoad,
 }
 
-
-
-
-
 /// State tracking player anchor and render distance for unload and section prioritization.
 pub struct ChunkStreamingScheduler {
     pub last_player_chunk: Option<(i32, i32)>,
@@ -196,9 +192,6 @@ impl ChunkStreamingScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-
-
 
     #[test]
     fn section_scheduler_deduplicates_and_rejects_stale_completion() {

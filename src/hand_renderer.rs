@@ -284,8 +284,6 @@ fn minecraft_tool_transform() -> Mat4 {
         * Mat4::from_scale(Vec3::splat(TOOL_MODEL_SCALE))
 }
 
-
-
 /// Returns an atlas tile for every face of the held item. Block items preserve
 /// their world top/side/bottom mapping instead of repeating the top texture.
 fn held_item_face_tiles(item: Item) -> Option<[(u32, u32); 6]> {
@@ -300,7 +298,6 @@ fn held_item_face_tiles(item: Item) -> Option<[(u32, u32); 6]> {
         Some([props.tex_coords; 6])
     }
 }
-
 
 #[derive(Clone, Copy)]
 enum ToolOutlineEdge {

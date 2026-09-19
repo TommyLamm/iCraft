@@ -147,7 +147,6 @@ impl RuntimeInput {
 pub use crate::network::server::{ProjectionDest, ProjectionEvent};
 
 use crate::network::protocol::Packet;
-use crate::world::chunk_xz;
 
 /// Embedded presentation drain: wire-shaped packets or in-process `Arc<Chunk>`.
 #[derive(Clone)]
@@ -226,7 +225,9 @@ pub(super) enum ReplaceablePresentationKey {
     },
 }
 
-pub(super) fn presentation_replaceable_key(event: &PresentationEvent) -> Option<ReplaceablePresentationKey> {
+pub(super) fn presentation_replaceable_key(
+    event: &PresentationEvent,
+) -> Option<ReplaceablePresentationKey> {
     match event {
         PresentationEvent::ChunkColumn {
             to,
@@ -244,10 +245,7 @@ pub(super) fn presentation_replaceable_key(event: &PresentationEvent) -> Option<
             let target = event.session_id()?;
             match &event.packet {
                 Packet::ChunkData {
-                    dimension,
-                    cx,
-                    cz,
-                    ..
+                    dimension, cx, cz, ..
                 } => Some(ReplaceablePresentationKey::Chunk {
                     target,
                     dimension: *dimension,
@@ -261,10 +259,9 @@ pub(super) fn presentation_replaceable_key(event: &PresentationEvent) -> Option<
                     dimension: *dimension,
                     entity_id: state.entity_id,
                 }),
-                Packet::PlayerPosition { id, .. } => Some(ReplaceablePresentationKey::PlayerPosition {
-                    target,
-                    id: *id,
-                }),
+                Packet::PlayerPosition { id, .. } => {
+                    Some(ReplaceablePresentationKey::PlayerPosition { target, id: *id })
+                }
                 Packet::TimeSync { .. } => Some(ReplaceablePresentationKey::TimeSync { target }),
                 _ => None,
             }

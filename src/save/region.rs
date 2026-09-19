@@ -206,18 +206,28 @@ pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    let result = unsafe {
-        MoveFileExW(
-            source_wide.as_ptr(),
-            destination_wide.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if result == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
+
+    let mut last_error = None;
+    for attempt in 0..10 {
+        let result = unsafe {
+            MoveFileExW(
+                source_wide.as_ptr(),
+                destination_wide.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if result != 0 {
+            return Ok(());
+        }
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(5) || err.raw_os_error() == Some(32) {
+            std::thread::sleep(std::time::Duration::from_millis(10 * (attempt + 1)));
+            last_error = Some(err);
+        } else {
+            return Err(err);
+        }
     }
+    Err(last_error.unwrap_or_else(io::Error::last_os_error))
 }
 
 pub fn compress_bytes(data: &[u8]) -> io::Result<Vec<u8>> {

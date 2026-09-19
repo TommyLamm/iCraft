@@ -1,6 +1,3 @@
-use super::*;
-
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SoundMaterial {
     Grass,
@@ -227,4 +224,3 @@ impl BlockProperties {
         self.render_type == RenderType::Opaque
     }
 }
-

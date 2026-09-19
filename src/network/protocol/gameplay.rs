@@ -1,6 +1,6 @@
-use crate::inventory::Item;
 use super::decode::PlayerId;
 use super::wire_types::*;
+use crate::inventory::Item;
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 
@@ -135,7 +135,6 @@ pub enum BlockActionKind {
     /// Begin server-timed travel while the authenticated pose is in a portal.
     EnterPortal,
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameplayRequest {

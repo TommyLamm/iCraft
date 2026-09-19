@@ -1,6 +1,7 @@
 // Tests extracted from client.rs (Plan 27).
 
 use super::*;
+use crate::network::protocol::{EntityStateWire, LightningStrike, SessionGameplayWire};
 use crate::network::server::{HostToServer, NetworkServer, ServerToHost};
 use std::net::TcpListener as StdTcpListener;
 use std::sync::{mpsc, Mutex, MutexGuard, OnceLock};
@@ -154,8 +155,8 @@ fn connects_and_receives_join_for_second_client() {
     };
     host_tx
         .try_send(HostToServer::project_broadcast(Packet::PlayerJoin {
-                id: second_id,
-                username: username,
+            id: second_id,
+            username: username,
         }))
         .unwrap();
     assert!(matches!(
@@ -195,14 +196,14 @@ fn receives_targeted_chunk_catchup_and_time_sync() {
 
     host_tx
         .try_send(HostToServer::project_broadcast(Packet::BlockChange {
-                dimension: 0,
-                revision: 100,
-                x: 7,
-                y: 80,
-                z: -9,
-                block: 3,
-                state: 0,
-                raw_fluid: 0,
+            dimension: 0,
+            revision: 100,
+            x: 7,
+            y: 80,
+            z: -9,
+            block: 3,
+            state: 0,
+            raw_fluid: 0,
         }))
         .unwrap();
     host_tx
@@ -224,9 +225,9 @@ fn receives_targeted_chunk_catchup_and_time_sync() {
         .unwrap();
     host_tx
         .try_send(HostToServer::project_broadcast(Packet::TimeSync {
-                ticks: 19_000,
-                weather: 2,
-                weather_remaining_ticks: 8_000.5,
+            ticks: 19_000,
+            weather: 2,
+            weather_remaining_ticks: 8_000.5,
         }))
         .unwrap();
     let strike = LightningStrike {
@@ -237,7 +238,7 @@ fn receives_targeted_chunk_catchup_and_time_sync() {
     };
     host_tx
         .try_send(HostToServer::project_broadcast(Packet::LightningStrike {
-                strike: strike,
+            strike: strike,
         }))
         .unwrap();
 
@@ -359,12 +360,9 @@ fn tcp_capacity_one_retries_without_starving_second_client_and_converges() {
                 z: 2,
                 block,
                 ..
-            } => chunk.set_block_local(
-                2,
-                70,
-                2,
-                crate::world::BlockType::from_wire(block).unwrap(),
-            ),
+            } => {
+                chunk.set_block_local(2, 70, 2, crate::world::BlockType::from_wire(block).unwrap())
+            }
             other => panic!("expected revision-2 block change, got {other:?}"),
         }
         chunk
@@ -431,17 +429,18 @@ fn tcp_capacity_one_retries_without_starving_second_client_and_converges() {
 
     host_tx
         .try_send(HostToServer::project_broadcast(Packet::BlockChange {
-                dimension: 0,
-                revision: 2,
-                x: 2,
-                y: 70,
-                z: 2,
-                block: crate::world::BlockType::Dirt.to_wire(),
-                state: 0,
-                raw_fluid: 0,
+            dimension: 0,
+            revision: 2,
+            x: 2,
+            y: 70,
+            z: 2,
+            block: crate::world::BlockType::Dirt.to_wire(),
+            state: 0,
+            raw_fluid: 0,
         }))
         .unwrap();
-    let snapshot = |to, cx, blocks, block_states| HostToServer::project_session(
+    let snapshot = |to, cx, blocks, block_states| {
+        HostToServer::project_session(
             to,
             Packet::ChunkData {
                 dimension: 0,
@@ -455,7 +454,8 @@ fn tcp_capacity_one_retries_without_starving_second_client_and_converges() {
                 fluid_levels: vec![],
                 block_entities: vec![],
             },
-        );
+        )
+    };
     // The host/state priority selector submits the near chunk first. The
     // transport must preserve it while reporting, rather than dropping,
     // the farther chunk when this client's capacity-one mailbox is full.
@@ -531,33 +531,33 @@ fn tcp_cross_channel_revision_gate_and_reliable_control_are_fifo() {
 
     host_tx
         .try_send(HostToServer::project_broadcast(Packet::BlockChange {
-                dimension: 0,
-                revision: 2,
-                x: 1,
-                y: 70,
-                z: 1,
-                block: crate::world::BlockType::Dirt.to_wire(),
-                state: 0,
-                raw_fluid: 0,
+            dimension: 0,
+            revision: 2,
+            x: 1,
+            y: 70,
+            z: 1,
+            block: crate::world::BlockType::Dirt.to_wire(),
+            state: 0,
+            raw_fluid: 0,
         }))
         .unwrap();
     host_tx
         .try_send(HostToServer::project_broadcast(Packet::ChatMessage {
-                sender: "host".into(),
-                message: "first".into(),
+            sender: "host".into(),
+            message: "first".into(),
         }))
         .unwrap();
     host_tx
         .try_send(HostToServer::project_broadcast(Packet::TimeSync {
-                ticks: 42,
-                weather: 1,
-                weather_remaining_ticks: 99.0,
+            ticks: 42,
+            weather: 1,
+            weather_remaining_ticks: 99.0,
         }))
         .unwrap();
     host_tx
         .try_send(HostToServer::project_broadcast(Packet::ChatMessage {
-                sender: "host".into(),
-                message: "second".into(),
+            sender: "host".into(),
+            message: "second".into(),
         }))
         .unwrap();
     host_tx
@@ -641,8 +641,8 @@ fn sends_and_receives_chat() {
 
     host_tx
         .try_send(HostToServer::project_broadcast(Packet::ChatMessage {
-                sender: "steve".into(),
-                message: "hello".into(),
+            sender: "steve".into(),
+            message: "hello".into(),
         }))
         .unwrap();
     assert!(matches!(
@@ -1175,30 +1175,30 @@ fn host_client_entity_health_and_effect_replication_converges() {
     };
     host_tx
         .try_send(HostToServer::project_broadcast(Packet::EntitySpawn {
-                dimension: 0,
-                sequence: 1,
-                state: state(0.0),
+            dimension: 0,
+            sequence: 1,
+            state: state(0.0),
         }))
         .unwrap();
     host_tx
         .try_send(HostToServer::project_broadcast(Packet::EntityState {
-                dimension: 0,
-                sequence: 2,
-                state: state(2.0),
+            dimension: 0,
+            sequence: 2,
+            state: state(2.0),
         }))
         .unwrap();
     host_tx
         .try_send(HostToServer::project_broadcast(Packet::EntityState {
-                dimension: 0,
-                sequence: 3,
-                state: state(3.0),
+            dimension: 0,
+            sequence: 3,
+            state: state(3.0),
         }))
         .unwrap();
     host_tx
         .try_send(HostToServer::project_broadcast(Packet::PlayerEffect {
-                sequence: 3,
-                player_id: player_id,
-                effects: vec![PlayerEffectWire {
+            sequence: 3,
+            player_id: player_id,
+            effects: vec![PlayerEffectWire {
                 kind: 0,
                 level: 2,
                 remaining_seconds: 30.0,
@@ -1217,14 +1217,10 @@ fn host_client_entity_health_and_effect_replication_converges() {
             continue;
         };
         match event {
-            ClientToGame::Packet(Packet::EntitySpawn { state, .. })
-                if state.entity_id == 77 =>
-            {
+            ClientToGame::Packet(Packet::EntitySpawn { state, .. }) if state.entity_id == 77 => {
                 saw_spawn = true;
             }
-            ClientToGame::Packet(Packet::EntityState { state, .. })
-                if state.entity_id == 77 =>
-            {
+            ClientToGame::Packet(Packet::EntityState { state, .. }) if state.entity_id == 77 => {
                 latest_entity_x = Some(state.position[0]);
             }
             ClientToGame::Packet(Packet::PlayerEffect {
@@ -1241,9 +1237,9 @@ fn host_client_entity_health_and_effect_replication_converges() {
 
     host_tx
         .try_send(HostToServer::project_broadcast(Packet::EntityDespawn {
-                dimension: 0,
-                sequence: 4,
-                entity_id: 77,
+            dimension: 0,
+            sequence: 4,
+            entity_id: 77,
         }))
         .unwrap();
     assert!(matches!(

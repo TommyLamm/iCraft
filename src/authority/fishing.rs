@@ -159,8 +159,8 @@ pub fn cast(
         return Err(RejectReason::InvalidState);
     }
     let rod_slot = held_rod_slot(state, hand)?;
-    let velocity_milli = authoritative_launch_velocity_milli(look_milli)
-        .ok_or(RejectReason::InvalidState)?;
+    let velocity_milli =
+        authoritative_launch_velocity_milli(look_milli).ok_or(RejectReason::InvalidState)?;
     let mut position_milli = context.player_position_milli;
     position_milli[1] = position_milli[1]
         .checked_add(1_620)
@@ -205,9 +205,7 @@ pub fn tick(
     validate_context_hook(hook, context)?;
 
     transact(state, |candidate| {
-        let mut hook = candidate
-            .fishing_hook
-            .ok_or(RejectReason::InvalidState)?;
+        let mut hook = candidate.fishing_hook.ok_or(RejectReason::InvalidState)?;
         validate_context_hook(hook, context)?;
 
         if find_held_rod_slot(candidate)?.is_none() {
@@ -227,8 +225,7 @@ pub fn tick(
             });
         }
 
-        let stage =
-            FishingHookStage::from_wire(hook.stage).ok_or(RejectReason::InvalidState)?;
+        let stage = FishingHookStage::from_wire(hook.stage).ok_or(RejectReason::InvalidState)?;
         let event = match stage {
             FishingHookStage::Flying => {
                 advance_flying_hook(&mut hook)?;
@@ -306,9 +303,7 @@ pub fn reel(
     let rod_slot = held_rod_slot(state, hand)?;
 
     transact(state, |candidate| {
-        let hook = candidate
-            .fishing_hook
-            .ok_or(RejectReason::InvalidState)?;
+        let hook = candidate.fishing_hook.ok_or(RejectReason::InvalidState)?;
         validate_context_hook(hook, context)?;
         if hook_too_far(hook.position_milli, context.player_position_milli) {
             return Err(RejectReason::TooFar);
@@ -317,8 +312,7 @@ pub fn reel(
             return Err(RejectReason::InvalidState);
         }
 
-        let stage =
-            FishingHookStage::from_wire(hook.stage).ok_or(RejectReason::InvalidState)?;
+        let stage = FishingHookStage::from_wire(hook.stage).ok_or(RejectReason::InvalidState)?;
         let (result, experience, loot) = if stage == FishingHookStage::Nibbling
             && hook.bite_ticks_remaining > 0
             && context.open_water
@@ -376,9 +370,7 @@ pub fn cancel(
     let rod_slot = held_rod_slot(state, hand)?;
 
     transact(state, |candidate| {
-        let hook = candidate
-            .fishing_hook
-            .ok_or(RejectReason::InvalidState)?;
+        let hook = candidate.fishing_hook.ok_or(RejectReason::InvalidState)?;
         validate_context_hook(hook, context)?;
         if held_rod_slot(candidate, hand)? != rod_slot {
             return Err(RejectReason::InvalidState);

@@ -229,7 +229,9 @@ impl AuthorityCore {
                     return Err(RejectReason::PermissionDenied);
                 };
                 if held_stack.item != crate::inventory::Item::FlintAndSteel
-                    || self.world(dimension).get_block(position.0, position.1, position.2)
+                    || self
+                        .world(dimension)
+                        .get_block(position.0, position.1, position.2)
                         != crate::world::BlockType::Air
                 {
                     return Err(RejectReason::InvalidState);
@@ -239,7 +241,9 @@ impl AuthorityCore {
                     position.1.saturating_sub(i32::from(face[1])),
                     position.2.saturating_sub(i32::from(face[2])),
                 );
-                if self.world(dimension).get_block(support.0, support.1, support.2)
+                if self
+                    .world(dimension)
+                    .get_block(support.0, support.1, support.2)
                     != crate::world::BlockType::Obsidian
                     || !self.world_mut_expect(dimension).has_block_line_of_sight(
                         session.position,
@@ -287,7 +291,9 @@ impl AuthorityCore {
                     return Err(RejectReason::PermissionDenied);
                 };
                 if held_stack.item != crate::inventory::Item::EyeOfEnder
-                    || self.world(dimension).get_block(position.0, position.1, position.2)
+                    || self
+                        .world(dimension)
+                        .get_block(position.0, position.1, position.2)
                         != crate::world::BlockType::EndPortalFrame
                     || !self.world_mut_expect(dimension).has_block_line_of_sight(
                         session.position,

@@ -120,14 +120,8 @@ impl ProjectionEvent {
 #[derive(Debug)]
 pub enum HostToServer {
     Project(ProjectionEvent),
-    DisconnectCatchupClient {
-        to: PlayerId,
-        reason: String,
-    },
-    DisconnectClient {
-        to: PlayerId,
-        reason: String,
-    },
+    DisconnectCatchupClient { to: PlayerId, reason: String },
+    DisconnectClient { to: PlayerId, reason: String },
     Stop,
 }
 

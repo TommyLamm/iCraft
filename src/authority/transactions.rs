@@ -10,7 +10,9 @@ use crate::block_entity::FurnaceBlockEntity;
 use crate::brewing::brew;
 use crate::enchantment::{can_enchant, generate_options, AnvilState, EnchantmentSet};
 use crate::inventory::{Item, ItemStack};
-use crate::network::protocol::{ItemWire, RejectReason, SessionSlotWire, SlotRefWire, MAX_ANVIL_RENAME_BYTES};
+use crate::network::protocol::{
+    ItemWire, RejectReason, SessionSlotWire, SlotRefWire, MAX_ANVIL_RENAME_BYTES,
+};
 use crate::recipes::RecipeManager;
 use crate::world::BlockType;
 
@@ -65,10 +67,7 @@ impl WorkstationContext {
         self.bookshelves
     }
 
-    fn require_block(
-        self,
-        expected: impl FnOnce(BlockType) -> bool,
-    ) -> Result<(), RejectReason> {
+    fn require_block(self, expected: impl FnOnce(BlockType) -> bool) -> Result<(), RejectReason> {
         match self.block {
             Some(block) if self.position.is_some() && expected(block) => Ok(()),
             _ => Err(RejectReason::InvalidState),
@@ -125,7 +124,11 @@ fn stack_from_source(source: SlotRefWire) -> Result<ItemStack, RejectReason> {
 
 fn slot_from_stack(stack: ItemStack) -> SessionInventorySlot {
     SessionInventorySlot::from_stack(&stack).unwrap_or_else(|| {
-        SessionInventorySlot::from_wire(ItemWire::from_stack(&stack), stack.can_break, stack.can_place_on)
+        SessionInventorySlot::from_wire(
+            ItemWire::from_stack(&stack),
+            stack.can_break,
+            stack.can_place_on,
+        )
     })
 }
 
@@ -137,10 +140,7 @@ fn wire_from_stack(stack: ItemStack) -> SessionSlotWire {
     )
 }
 
-fn exact_source(
-    session: &SessionGameplayState,
-    source: SlotRefWire,
-) -> Result<(), RejectReason> {
+fn exact_source(session: &SessionGameplayState, source: SlotRefWire) -> Result<(), RejectReason> {
     source
         .validate_bounds()
         .map_err(|_| RejectReason::InvalidState)?;

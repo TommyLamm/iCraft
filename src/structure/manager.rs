@@ -4,8 +4,8 @@ use super::placement::{
 };
 use super::types::*;
 use crate::dimension::Dimension;
-use crate::world::Chunk;
 use crate::world::chunk_origin;
+use crate::world::Chunk;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -80,9 +80,7 @@ impl StructureManager {
         // Pin the familiar fixed End City through the manager (not dimension.rs).
         if dimension == Dimension::End {
             let already = generated.iter().any(|s| {
-                s.id == StructureId::EndCity
-                    && s.origin_x == END_CITY_X
-                    && s.origin_z == END_CITY_Z
+                s.id == StructureId::EndCity && s.origin_x == END_CITY_X && s.origin_z == END_CITY_Z
             });
             if !already {
                 generated.push(end_city::generate_end_city(
@@ -131,12 +129,7 @@ impl StructureManager {
 
 /// Write placements that already sit in this column. Piece was filtered by
 /// `intersects_chunk`; local indices use column origin (no per-block `chunk_xz`).
-fn apply_piece_to_chunk(
-    chunk: &mut Chunk,
-    piece: &StructurePiece,
-    c_min_x: i32,
-    c_min_z: i32,
-) {
+fn apply_piece_to_chunk(chunk: &mut Chunk, piece: &StructurePiece, c_min_x: i32, c_min_z: i32) {
     let c_max_x = c_min_x + 15;
     let c_max_z = c_min_z + 15;
     for block in &piece.blocks {
@@ -246,9 +239,7 @@ mod tests {
         let pinned = starts
             .iter()
             .find(|s| {
-                s.id == StructureId::EndCity
-                    && s.origin_x == END_CITY_X
-                    && s.origin_z == END_CITY_Z
+                s.id == StructureId::EndCity && s.origin_x == END_CITY_X && s.origin_z == END_CITY_Z
             })
             .expect("pinned End City");
         assert_eq!(pinned.origin_y, END_CITY_BASE_Y);

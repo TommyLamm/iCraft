@@ -174,7 +174,10 @@ pub(super) fn source_power(manager: &WorldColumns, pos: BlockPos, block: BlockTy
     match block {
         BlockType::RedstoneTorch if !open => 15,
         BlockType::Comparator if open => 1,
-        BlockType::Lever | BlockType::StoneButton | BlockType::PressurePlate | BlockType::Repeater
+        BlockType::Lever
+        | BlockType::StoneButton
+        | BlockType::PressurePlate
+        | BlockType::Repeater
             if open =>
         {
             15
@@ -270,9 +273,10 @@ pub(super) fn fnv1a(data: &[u8]) -> u64 {
 pub(super) fn is_strong_source(manager: &WorldColumns, pos: BlockPos, block: BlockType) -> bool {
     let open = block_open_at(manager, pos);
     match block {
-        BlockType::Lever | BlockType::StoneButton | BlockType::PressurePlate | BlockType::Repeater => {
-            open
-        }
+        BlockType::Lever
+        | BlockType::StoneButton
+        | BlockType::PressurePlate
+        | BlockType::Repeater => open,
         BlockType::RedstoneTorch => !open,
         BlockType::Comparator => open,
         _ => false,
@@ -305,11 +309,7 @@ pub fn is_component(block: BlockType) -> bool {
 pub(super) fn is_movable(block: BlockType) -> bool {
     block != BlockType::Air
         && block != BlockType::Bedrock
-        && !matches!(
-            block,
-            BlockType::Piston
-                | BlockType::StickyPiston
-        )
+        && !matches!(block, BlockType::Piston | BlockType::StickyPiston)
 }
 
 pub(super) fn get_block(manager: &WorldColumns, pos: BlockPos) -> BlockType {
@@ -375,10 +375,7 @@ pub(super) fn fill_plate_occupants(
     for &(x, y, z) in occupants {
         let pos = (x, y - 1, z);
         if components.contains_key(&pos)
-            && matches!(
-                get_block(manager, pos),
-                BlockType::PressurePlate
-            )
+            && matches!(get_block(manager, pos), BlockType::PressurePlate)
         {
             scratch.insert(pos);
         }

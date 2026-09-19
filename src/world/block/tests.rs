@@ -197,7 +197,10 @@ fn canonical_block_table_covers_every_variant() {
         if raw.is_reserved_hole() {
             // Hole rows stay for discriminant density; gameplay indexes the base.
             let base = raw.canonicalize();
-            assert_eq!(base.def() as *const _, &BLOCK_TABLE[base as usize] as *const _);
+            assert_eq!(
+                base.def() as *const _,
+                &BLOCK_TABLE[base as usize] as *const _
+            );
             continue;
         }
         let block = BlockType::from_u8(id);

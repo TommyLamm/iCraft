@@ -1,19 +1,19 @@
 mod common;
 
-use icraft::dimension::Dimension;
 use common::tcp_harness::{
     drive_until, gameplay_request as request, held, seeded_properties, session_slot as slot,
     wait_for_response, HeldLoopback, TcpClient,
 };
 use icraft::authority::contract::SessionGameplayState;
+use icraft::dimension::Dimension;
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::client::ClientToGame;
-use icraft::network::protocol::{Packet, 
-    BlockActionKind, GameplayOperation, GameplayOutcome, GameplayRequest, SessionSlotWire,
+use icraft::network::protocol::{
+    BlockActionKind, GameplayOperation, GameplayOutcome, GameplayRequest, Packet, SessionSlotWire,
 };
 use icraft::server_runtime::{
-    EmbeddedRuntimeOptions, LocalSessionProfile, ProjectionDest, ProjectionEvent, RuntimeTickOutput,
-    ServerProperties, ServerRuntime, TransportMode,
+    EmbeddedRuntimeOptions, LocalSessionProfile, ProjectionDest, ProjectionEvent,
+    RuntimeTickOutput, ServerProperties, ServerRuntime, TransportMode,
 };
 use icraft::world::BlockType;
 use std::fs;
@@ -142,16 +142,26 @@ fn cancel_request(
 }
 
 fn prepare(runtime: &mut ServerRuntime, owner: u64, observer: u64, target_block: BlockType) {
-    runtime.authority.world_mut(Dimension::Overworld).unwrap().ensure_chunk(0, 0);
-    runtime.authority.world_mut(Dimension::Overworld).unwrap().ensure_chunk(1, 0);
     runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
+        .ensure_chunk(0, 0);
+    runtime
+        .authority
+        .world_mut(Dimension::Overworld)
+        .unwrap()
+        .ensure_chunk(1, 0);
+    runtime
+        .authority
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(TARGET.0, TARGET.1, TARGET.2, target_block, 0)
         .expect("seed mining target");
     runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(
             PLACE_SUPPORT.0,
             PLACE_SUPPORT.1,
@@ -479,7 +489,8 @@ fn run_tcp_vector(label: &str, listen: bool) {
 
     runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(TARGET.0, TARGET.1, TARGET.2, BlockType::CoalOre, 0)
         .expect("seed bounded XP mining target after cancel");
 
@@ -574,11 +585,11 @@ fn run_tcp_vector(label: &str, listen: bool) {
             &mut refs,
             "Plan31 TCP chest place projection",
             |runtime, _views| {
-                runtime
-                    .authority
-                    .world(Dimension::Overworld)
-                    .get_block(PLACE_TARGET.0, PLACE_TARGET.1, PLACE_TARGET.2)
-                    == BlockType::Chest
+                runtime.authority.world(Dimension::Overworld).get_block(
+                    PLACE_TARGET.0,
+                    PLACE_TARGET.1,
+                    PLACE_TARGET.2,
+                ) == BlockType::Chest
                     && runtime
                         .authority
                         .world(Dimension::Overworld)
@@ -619,11 +630,11 @@ fn run_tcp_vector(label: &str, listen: bool) {
             &mut refs,
             "Plan31 TCP chest break projection",
             |runtime, _views| {
-                runtime
-                    .authority
-                    .world(Dimension::Overworld)
-                    .get_block(PLACE_TARGET.0, PLACE_TARGET.1, PLACE_TARGET.2)
-                    == BlockType::Air
+                runtime.authority.world(Dimension::Overworld).get_block(
+                    PLACE_TARGET.0,
+                    PLACE_TARGET.1,
+                    PLACE_TARGET.2,
+                ) == BlockType::Air
                     && runtime
                         .authority
                         .world(Dimension::Overworld)
@@ -638,7 +649,8 @@ fn run_tcp_vector(label: &str, listen: bool) {
     // connection-scoped and must not survive into the replacement session.
     runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(
             RECONNECT_TARGET.0,
             RECONNECT_TARGET.1,
@@ -747,10 +759,11 @@ fn run_tcp_vector(label: &str, listen: bool) {
         BlockType::Air
     );
     assert_eq!(
-        restored
-            .authority
-            .world(Dimension::Overworld)
-            .get_block(PLACE_TARGET.0, PLACE_TARGET.1, PLACE_TARGET.2),
+        restored.authority.world(Dimension::Overworld).get_block(
+            PLACE_TARGET.0,
+            PLACE_TARGET.1,
+            PLACE_TARGET.2
+        ),
         BlockType::Air
     );
     restored.shutdown().expect("shutdown reloaded Plan31 world");

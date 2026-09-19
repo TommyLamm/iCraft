@@ -421,8 +421,7 @@ pub fn tick_hoppers_in_columns(
         let origin_z = cz * CHUNK_DEPTH as i32;
         for &encoded in chunk.hopper_positions() {
             let (lx, y, lz) = crate::world::Chunk::decode_torch_position(encoded);
-            let Some(BlockEntity::Hopper(h)) =
-                chunk.get_block_entity(lx as u8, y as i16, lz as u8)
+            let Some(BlockEntity::Hopper(h)) = chunk.get_block_entity(lx as u8, y as i16, lz as u8)
             else {
                 continue;
             };
@@ -582,8 +581,7 @@ fn try_container_transfer(
         return false;
     };
     result.container_checks = result.container_checks.saturating_add(1);
-    let Some((source_after, target_after)) =
-        transfer_one(source, source_side, target, target_side)
+    let Some((source_after, target_after)) = transfer_one(source, source_side, target, target_side)
     else {
         return false;
     };
@@ -1033,10 +1031,7 @@ mod tests {
         manager.set_block_entity(15, 64, 0, Some(BlockEntity::Hopper(hopper)));
 
         // x=16 belongs to an unloaded chunk.  The source remains untouched.
-        assert_eq!(
-            tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
-            0
-        );
+        assert_eq!(tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK), 0);
         assert_eq!(
             manager
                 .get_block_entity(15, 64, 0)
@@ -1049,10 +1044,7 @@ mod tests {
             .insert((1, 0), crate::world::Chunk::new(1, 0));
         manager.set_block(16, 64, 0, BlockType::Chest);
         manager.set_block_entity(16, 64, 0, Some(BlockEntity::Chest(ChestBlockEntity::new())));
-        assert_eq!(
-            tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
-            1
-        );
+        assert_eq!(tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK), 1);
         assert_eq!(
             manager
                 .get_block_entity(16, 64, 0)
@@ -1116,10 +1108,7 @@ mod tests {
         manager.set_block(1, 64, 0, BlockType::Chest);
         manager.set_block_entity(1, 64, 0, Some(BlockEntity::Chest(ChestBlockEntity::new())));
 
-        assert_eq!(
-            tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
-            0
-        );
+        assert_eq!(tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK), 0);
         assert_eq!(
             manager.get_block_entity(0, 64, 0).unwrap().get_stack(0),
             Some(&ItemStack::new(Item::Stone, 1))
@@ -1228,10 +1217,7 @@ mod tests {
         manager.set_block_entity(1, 64, 0, Some(BlockEntity::Chest(ChestBlockEntity::new())));
         manager.dirty_chunks.clear();
 
-        assert_eq!(
-            tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
-            0
-        );
+        assert_eq!(tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK), 0);
         let remaining = match manager.get_block_entity(0, 64, 0) {
             Some(BlockEntity::Hopper(h)) => h.transfer_cooldown,
             _ => panic!("hopper"),
@@ -1261,10 +1247,7 @@ mod tests {
         manager.set_block_entity(1, 64, 0, Some(BlockEntity::Chest(ChestBlockEntity::new())));
         manager.dirty_chunks.clear();
 
-        assert_eq!(
-            tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
-            1
-        );
+        assert_eq!(tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK), 1);
         let remaining = match manager.get_block_entity(0, 64, 0) {
             Some(BlockEntity::Hopper(h)) => h.transfer_cooldown,
             _ => panic!("hopper"),
@@ -1286,12 +1269,7 @@ mod tests {
             .insert((0, 0), crate::world::Chunk::new(0, 0));
         for i in 0..8 {
             manager.set_block(i, 64, 0, BlockType::Chest);
-            manager.set_block_entity(
-                i,
-                64,
-                0,
-                Some(BlockEntity::Chest(ChestBlockEntity::new())),
-            );
+            manager.set_block_entity(i, 64, 0, Some(BlockEntity::Chest(ChestBlockEntity::new())));
         }
         assert!(manager
             .chunks
@@ -1300,8 +1278,12 @@ mod tests {
             .hopper_positions()
             .is_empty());
         let columns = all_loaded(&manager);
-        let result =
-            tick_hoppers_in_columns(&mut manager, None, MAX_HOPPER_TRANSFERS_PER_TICK, Some(&columns));
+        let result = tick_hoppers_in_columns(
+            &mut manager,
+            None,
+            MAX_HOPPER_TRANSFERS_PER_TICK,
+            Some(&columns),
+        );
         assert_eq!(result.transfers, 0);
         assert_eq!(
             result.block_entity_scans, 0,

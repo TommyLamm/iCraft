@@ -453,4 +453,3 @@ pub(super) const MULTIPLAYER_BOTTOM_RECTS: [MenuRect; 2] = [
     MULTIPLAYER_BOTTOM.widgets[0].rect,
     MULTIPLAYER_BOTTOM.widgets[1].rect,
 ];
-

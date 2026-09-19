@@ -182,14 +182,16 @@ fn singleplayer_typed_nether_activation_and_transfer() {
     let mut transferred = false;
     for _ in 0..25 {
         let output = runtime.tick_with_output().unwrap();
-        transferred |= output.presentation_events.iter().any(|event| matches!(
-            event.as_packet_event(),
-            Some(icraft::server_runtime::ProjectionEvent {
-                dest: icraft::server_runtime::ProjectionDest::Session(target),
-                packet: Packet::DimensionTransfer { dimension, .. },
-                ..
-            }) if *target == LOCAL_ID && *dimension == Dimension::Nether as u8
-        ));
+        transferred |= output.presentation_events.iter().any(|event| {
+            matches!(
+                event.as_packet_event(),
+                Some(icraft::server_runtime::ProjectionEvent {
+                    dest: icraft::server_runtime::ProjectionDest::Session(target),
+                    packet: Packet::DimensionTransfer { dimension, .. },
+                    ..
+                }) if *target == LOCAL_ID && *dimension == Dimension::Nether as u8
+            )
+        });
     }
     assert!(transferred);
     assert_eq!(
@@ -311,10 +313,10 @@ fn run_tcp_travel(label: &str, listen: bool) {
         clients[0].take_response(1).is_none(),
         "NetworkClient must not surface an already-observed portal ACK twice"
     );
-    assert!(!clients[1]
-        .events()
-        .iter()
-        .any(|event| matches!(event, ClientToGame::Packet(Packet::DimensionTransfer { .. }))));
+    assert!(!clients[1].events().iter().any(|event| matches!(
+        event,
+        ClientToGame::Packet(Packet::DimensionTransfer { .. })
+    )));
     assert!(!clients[1].events().iter().any(|event| matches!(
         event,
         ClientToGame::Packet(Packet::PlayerSessionUpdate { player_id, .. }) if *player_id == owner
@@ -606,7 +608,7 @@ fn dedicated_tcp_combat_completes_generated_dragon_lifecycle() {
             yaw,
             pitch,
         );
-            {
+        {
             let mut refs = [&mut client];
             drive_until(
                 &mut runtime,

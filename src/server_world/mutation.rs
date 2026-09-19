@@ -1,5 +1,5 @@
-use super::*;
 use super::entities::operation_position;
+use super::*;
 
 impl ServerWorld {
     /// Apply a real voxel mutation and return the revision-bearing event.
@@ -92,8 +92,7 @@ impl ServerWorld {
         }
         let revision = self.revisions.allocate();
         self.set_block_revision((x, y, z), revision);
-        self.chunk_revisions
-            .insert(chunk_xz(x, z), revision);
+        self.chunk_revisions.insert(chunk_xz(x, z), revision);
 
         if block == BlockType::Fire {
             if let Some(interior) =
@@ -496,7 +495,13 @@ impl ServerWorld {
         Ok(Some(entity_id))
     }
 
-    pub(super) fn ensure_container_slot(&self, x: i32, y: i32, z: i32, slot: u16) -> Result<(), RejectReason> {
+    pub(super) fn ensure_container_slot(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        slot: u16,
+    ) -> Result<(), RejectReason> {
         let Some(entity) = self.chunks.get_block_entity(x, y, z) else {
             return Err(RejectReason::InvalidState);
         };
@@ -620,8 +625,7 @@ impl ServerWorld {
     pub(super) fn touch_revision(&mut self, x: i32, y: i32, z: i32) -> WorldMutation {
         let revision = self.revisions.allocate();
         self.set_block_revision((x, y, z), revision);
-        self.chunk_revisions
-            .insert(chunk_xz(x, z), revision);
+        self.chunk_revisions.insert(chunk_xz(x, z), revision);
         WorldMutation {
             dimension: self.dimension as u8,
             position: (x, y, z),
@@ -640,8 +644,7 @@ impl ServerWorld {
         let (x, y, z) = mutation.position;
         let revision = self.revisions.allocate();
         self.set_block_revision((x, y, z), revision);
-        self.chunk_revisions
-            .insert(chunk_xz(x, z), revision);
+        self.chunk_revisions.insert(chunk_xz(x, z), revision);
         WorldMutation {
             dimension: self.dimension as u8,
             position: mutation.position,
@@ -712,6 +715,4 @@ impl ServerWorld {
         self.plate_occupants.sort_unstable();
         self.plate_occupants.dedup();
     }
-
 }
-

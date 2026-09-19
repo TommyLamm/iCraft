@@ -1,6 +1,5 @@
 mod common;
 
-use icraft::dimension::Dimension;
 use common::tcp_harness::{
     drive_until, gameplay_request as request, seeded_properties, session_slot as slot,
     wait_for_response, HeldLoopback, TcpClient,
@@ -8,10 +7,12 @@ use common::tcp_harness::{
 use icraft::authority::contract::{
     SessionGameplayState, SessionInventorySlot, SESSION_INVENTORY_SLOTS,
 };
+use icraft::dimension::Dimension;
 use icraft::entity::EntityType;
 use icraft::inventory::{Item, ItemStack};
-use icraft::network::protocol::{Packet, 
-    BlockActionKind, GameplayOperation, GameplayOutcome, ItemWire, RejectReason, SessionSlotWire,
+use icraft::network::protocol::{
+    BlockActionKind, GameplayOperation, GameplayOutcome, ItemWire, Packet, RejectReason,
+    SessionSlotWire,
 };
 use icraft::server_runtime::{
     EmbeddedRuntimeOptions, LocalSessionProfile, ProjectionDest, ProjectionEvent, ServerProperties,
@@ -29,10 +30,15 @@ fn properties(label: &str) -> ServerProperties {
 }
 
 fn seed_chest_and_inventory(runtime: &mut ServerRuntime, player_id: u64) {
-    runtime.authority.world_mut(Dimension::Overworld).unwrap().ensure_chunk(0, 0);
     runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
+        .ensure_chunk(0, 0);
+    runtime
+        .authority
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(TARGET.0, TARGET.1, TARGET.2, BlockType::Chest, 0)
         .expect("seed chest through authoritative set_block");
     let mut gameplay = SessionGameplayState::default();

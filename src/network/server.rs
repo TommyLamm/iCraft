@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::{mpsc as std_mpsc, Arc};
 use std::thread::JoinHandle;
+#[cfg(test)]
 use std::time::Duration;
 
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
-use tokio::time;
 
 // Public re-exports for external callers (e.g. `use icraft::network::server::*` and `use crate::network::server::*`)
 pub use super::channels::{
@@ -16,28 +16,19 @@ pub use super::channels::{
 pub use super::session::{NetworkMetrics, NetworkMetricsSnapshot};
 
 // Crate-internal re-exports preserving existing internal usage
-pub(crate) use super::channels::{
-    MeteredHostEventSender, DEFAULT_CHAT_RATE_PER_SECOND, DEFAULT_POSE_RATE_PER_SECOND,
-    HANDSHAKE_TIMEOUT, MAX_CATCHUP_QUEUE_DEPTH,
-};
-pub(crate) use super::egress::{
-    broadcast_reliably, broadcast_state, evict_slow_clients, handle_host_command,
-    normalize_host_response, send_to,
-};
-pub(crate) use super::ingress::{
-    authenticate_handshake_username, chat_exceeds_display_cap, prepare_gameplay_request,
-    queue_initial_roster, remove_client, route_gameplay_request, run_client,
-};
+pub(crate) use super::channels::MeteredHostEventSender;
 #[cfg(test)]
-use super::protocol::Packet;
-use super::protocol::PlayerId;
+pub(crate) use super::channels::MAX_CATCHUP_QUEUE_DEPTH;
+#[cfg(test)]
+pub(crate) use super::egress::evict_slow_clients;
+pub(crate) use super::egress::handle_host_command;
+#[cfg(test)]
+pub(crate) use super::ingress::remove_client;
+pub(crate) use super::ingress::run_client;
+#[cfg(test)]
+use super::protocol::{Packet, PlayerId};
 pub(crate) use super::session::{
-    queue_now_ms, queue_stats, reliable_send,
-    reliable_send_and_wait, send_connection_packet, send_writer_packet,
-    CatchupMailbox, ClientSession, EncodedPacket, GameplaySessionState, PoseMailbox, PreAuthSlot,
-    QueuedPacket, RequestRateLimiter, Sessions, StateMailbox, StateMailboxKey, TrackedPacket,
-    CLIENT_QUEUE_CAPACITY, CLIENT_TIMEOUT, KEEPALIVE_INTERVAL, MAX_CHAT_CHARS,
-    PRE_AUTH_CONNECTION_MULTIPLIER, RELIABLE_ENQUEUE_TIMEOUT,
+    queue_stats, PreAuthSlot, Sessions, PRE_AUTH_CONNECTION_MULTIPLIER,
 };
 use super::transport::Connection;
 
@@ -291,4 +282,3 @@ impl NetworkServer<std_mpsc::Sender<ServerToHost>> {
 #[cfg(test)]
 #[path = "server_tests.rs"]
 mod tests;
-

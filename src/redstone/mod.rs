@@ -8,10 +8,11 @@ mod power;
 mod system;
 
 use piston::*;
-use power::*;
 pub use power::is_component;
-pub(crate) use system::{ScheduledTick, MAX_PROPAGATION_PASSES};
+use power::*;
 pub use system::*;
+#[cfg(test)]
+pub(crate) use system::{ScheduledTick, MAX_PROPAGATION_PASSES};
 
 #[cfg(test)]
 mod tests;

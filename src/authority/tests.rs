@@ -7,7 +7,7 @@ use crate::authority::contract::{
 use crate::entity::EntityType;
 use crate::inventory::Item;
 use crate::network::protocol::{
-    BlockActionKind, GameplayOperation, GameplayOutcome, SlotRefWire,
+    BlockActionKind, GameplayOperation, GameplayOutcome, GameplayRequest, SlotRefWire,
 };
 use crate::world::BlockType;
 use contract::SessionContract;
@@ -89,7 +89,10 @@ fn duplicate_and_stale_revision_are_authoritative() {
             reason: RejectReason::InvalidRevision
         }
     ));
-    assert_eq!(core.current_revision(Dimension::Overworld), revision_before_reject);
+    assert_eq!(
+        core.current_revision(Dimension::Overworld),
+        revision_before_reject
+    );
     assert_eq!(rejected.server_sequence, revision_before_reject);
 }
 
@@ -150,7 +153,8 @@ fn rejected_block_action_does_not_drain_a_mutation() {
 fn typed_mining_fixed_tick_breaks_once_and_cancel_is_idempotent() {
     let mut core = core();
     let target = (8, 81, 9);
-    core.world_mut(Dimension::Overworld).unwrap()
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(target.0, target.1, target.2, BlockType::Stone, 0)
         .unwrap();
 
@@ -198,13 +202,15 @@ fn typed_mining_fixed_tick_breaks_once_and_cancel_is_idempotent() {
             .count();
     }
     assert_eq!(
-        core.world(Dimension::Overworld).get_block(target.0, target.1, target.2),
+        core.world(Dimension::Overworld)
+            .get_block(target.0, target.1, target.2),
         BlockType::Air
     );
     assert_eq!(target_mutations, 1);
     assert!(core.session(7).unwrap().gameplay.mining.is_none());
     assert_eq!(
-        core.world_mut(Dimension::Overworld).unwrap()
+        core.world_mut(Dimension::Overworld)
+            .unwrap()
             .entities
             .entities
             .iter()
@@ -238,7 +244,8 @@ fn typed_mining_fixed_tick_breaks_once_and_cancel_is_idempotent() {
     ));
     assert_eq!(core.submit_request(cancel), first_cancel);
     assert_eq!(
-        core.world_mut(Dimension::Overworld).unwrap()
+        core.world_mut(Dimension::Overworld)
+            .unwrap()
             .entities
             .entities
             .iter()
@@ -307,7 +314,8 @@ fn typed_mining_game_modes_and_empty_hand_are_authoritative() {
     let mut creative = core();
     creative.session_mut(7).unwrap().game_mode = crate::inventory::GameMode::Creative;
     creative
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(target.0, target.1, target.2, BlockType::Stone, 0)
         .unwrap();
     let mut creative_gameplay = SessionGameplayState::default();
@@ -330,7 +338,9 @@ fn typed_mining_game_modes_and_empty_hand_are_authoritative() {
         GameplayOutcome::Accepted { .. }
     ));
     assert_eq!(
-        creative.world(Dimension::Overworld).get_block(target.0, target.1, target.2),
+        creative
+            .world(Dimension::Overworld)
+            .get_block(target.0, target.1, target.2),
         BlockType::Air
     );
     assert_eq!(
@@ -347,12 +357,13 @@ fn typed_mining_game_modes_and_empty_hand_are_authoritative() {
     let mut adventure = core();
     adventure.session_mut(7).unwrap().game_mode = crate::inventory::GameMode::Adventure;
     adventure
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(target.0, target.1, target.2, BlockType::Stone, 0)
         .unwrap();
     let mut allowed = SessionGameplayState::default();
-    let tagged_pick = crate::inventory::ItemStack::new(Item::StonePickaxe, 1)
-        .with_can_break(BlockType::Stone);
+    let tagged_pick =
+        crate::inventory::ItemStack::new(Item::StonePickaxe, 1).with_can_break(BlockType::Stone);
     let tagged_wire = crate::network::protocol::SessionSlotWire::new(
         crate::network::protocol::ItemWire::from_stack(&tagged_pick),
         tagged_pick.can_break,
@@ -380,14 +391,17 @@ fn typed_mining_game_modes_and_empty_hand_are_authoritative() {
         let _ = adventure.tick();
     }
     assert_eq!(
-        adventure.world(Dimension::Overworld).get_block(target.0, target.1, target.2),
+        adventure
+            .world(Dimension::Overworld)
+            .get_block(target.0, target.1, target.2),
         BlockType::Air
     );
 
     let mut denied = core();
     denied.session_mut(7).unwrap().game_mode = crate::inventory::GameMode::Adventure;
     denied
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(target.0, target.1, target.2, BlockType::Stone, 0)
         .unwrap();
     let mut untagged = SessionGameplayState::default();
@@ -412,13 +426,16 @@ fn typed_mining_game_modes_and_empty_hand_are_authoritative() {
         }
     ));
     assert_eq!(
-        denied.world(Dimension::Overworld).get_block(target.0, target.1, target.2),
+        denied
+            .world(Dimension::Overworld)
+            .get_block(target.0, target.1, target.2),
         BlockType::Stone
     );
 
     let mut empty_hand = core();
     empty_hand
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(target.0, target.1, target.2, BlockType::Dirt, 0)
         .unwrap();
     assert!(matches!(
@@ -450,10 +467,12 @@ fn typed_place_maps_item_debits_once_and_rejects_cheat_block() {
         0,
     );
     let mut core = core();
-    core.world_mut(Dimension::Overworld).unwrap()
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(support.0, support.1, support.2, BlockType::Stone, 0)
         .unwrap();
-    core.world_mut(Dimension::Overworld).unwrap()
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(target.0, target.1, target.2, BlockType::Air, 0)
         .unwrap();
     let mut gameplay = SessionGameplayState::default();
@@ -477,7 +496,8 @@ fn typed_place_maps_item_debits_once_and_rejects_cheat_block() {
         accepted.outcome
     );
     assert_eq!(
-        core.world(Dimension::Overworld).get_block(target.0, target.1, target.2),
+        core.world(Dimension::Overworld)
+            .get_block(target.0, target.1, target.2),
         BlockType::Stone
     );
     assert_eq!(
@@ -512,16 +532,22 @@ fn typed_place_maps_item_debits_once_and_rejects_cheat_block() {
             .count,
         1
     );
-    assert_eq!(core.world(Dimension::Overworld).get_block(8, 81, 10), BlockType::Air);
+    assert_eq!(
+        core.world(Dimension::Overworld).get_block(8, 81, 10),
+        BlockType::Air
+    );
 
     // The same typed path is valid across an explicitly loaded chunk
     // boundary; unloaded front/support chunks are never synthesized by
     // the action itself.
-    core.world_mut(Dimension::Overworld).unwrap().ensure_chunk(1, 0);
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
+        .ensure_chunk(1, 0);
     core.session_mut(7).unwrap().position = [15.0, 80.0, 8.0];
     let support_cross = (16, 80, 8);
     let target_cross = (16, 81, 8);
-    core.world_mut(Dimension::Overworld).unwrap()
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(
             support_cross.0,
             support_cross.1,
@@ -530,7 +556,8 @@ fn typed_place_maps_item_debits_once_and_rejects_cheat_block() {
             0,
         )
         .unwrap();
-    core.world_mut(Dimension::Overworld).unwrap()
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(
             target_cross.0,
             target_cross.1,
@@ -578,7 +605,8 @@ fn typed_mining_cancels_on_cancel_held_change_range_or_block_replacement() {
         0,
     );
     let start = |core: &mut AuthorityCore, request_id: u128| {
-        core.world_mut(Dimension::Overworld).unwrap()
+        core.world_mut(Dimension::Overworld)
+            .unwrap()
             .set_block(target.0, target.1, target.2, BlockType::Stone, 0)
             .unwrap();
         let mut gameplay = SessionGameplayState::default();
@@ -614,7 +642,9 @@ fn typed_mining_cancels_on_cancel_held_change_range_or_block_replacement() {
     assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
     let _ = cancelled.tick();
     assert_eq!(
-        cancelled.world(Dimension::Overworld).get_block(target.0, target.1, target.2),
+        cancelled
+            .world(Dimension::Overworld)
+            .get_block(target.0, target.1, target.2),
         BlockType::Stone
     );
 
@@ -633,7 +663,9 @@ fn typed_mining_cancels_on_cancel_held_change_range_or_block_replacement() {
     let _ = held_changed.tick();
     assert!(held_changed.session(7).unwrap().gameplay.mining.is_none());
     assert_eq!(
-        held_changed.world(Dimension::Overworld).get_block(target.0, target.1, target.2),
+        held_changed
+            .world(Dimension::Overworld)
+            .get_block(target.0, target.1, target.2),
         BlockType::Stone
     );
 
@@ -659,20 +691,25 @@ fn typed_mining_cancels_on_cancel_held_change_range_or_block_replacement() {
     let _ = moved.tick();
     assert!(moved.session(7).unwrap().gameplay.mining.is_none());
     assert_eq!(
-        moved.world(Dimension::Overworld).get_block(target.0, target.1, target.2),
+        moved
+            .world(Dimension::Overworld)
+            .get_block(target.0, target.1, target.2),
         BlockType::Stone
     );
 
     let mut replaced = core();
     start(&mut replaced, 124);
     replaced
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(target.0, target.1, target.2, BlockType::Dirt, 0)
         .unwrap();
     let _ = replaced.tick();
     assert!(replaced.session(7).unwrap().gameplay.mining.is_none());
     assert_eq!(
-        replaced.world(Dimension::Overworld).get_block(target.0, target.1, target.2),
+        replaced
+            .world(Dimension::Overworld)
+            .get_block(target.0, target.1, target.2),
         BlockType::Dirt
     );
 }
@@ -690,10 +727,12 @@ fn typed_adventure_place_requires_can_place_on_and_block_entity_projection() {
     );
     let mut core = core();
     core.session_mut(7).unwrap().game_mode = crate::inventory::GameMode::Adventure;
-    core.world_mut(Dimension::Overworld).unwrap()
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(support.0, support.1, support.2, BlockType::Stone, 0)
         .unwrap();
-    core.world_mut(Dimension::Overworld).unwrap()
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(target.0, target.1, target.2, BlockType::Air, 0)
         .unwrap();
     let mut gameplay = SessionGameplayState::default();
@@ -743,7 +782,8 @@ fn typed_adventure_place_requires_can_place_on_and_block_entity_projection() {
         let _ = core.tick();
     }
     assert_eq!(
-        core.world(Dimension::Overworld).get_block(target.0, target.1, target.2),
+        core.world(Dimension::Overworld)
+            .get_block(target.0, target.1, target.2),
         BlockType::Air
     );
     assert!(core
@@ -762,7 +802,8 @@ fn reconnect_resets_owner_private_mining_progress() {
         0,
     );
     let mut core = core();
-    core.world_mut(Dimension::Overworld).unwrap()
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(target.0, target.1, target.2, BlockType::Stone, 0)
         .unwrap();
     let mut gameplay = SessionGameplayState::default();
@@ -808,7 +849,8 @@ fn typed_mining_grants_xp_once_and_removes_broken_tool_without_orb() {
         0xaa,
     );
     let mut core = core();
-    core.world_mut(Dimension::Overworld).unwrap()
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(target.0, target.1, target.2, BlockType::DiamondOre, 0)
         .unwrap();
     let mut gameplay = SessionGameplayState::default();
@@ -834,7 +876,8 @@ fn typed_mining_grants_xp_once_and_removes_broken_tool_without_orb() {
         let _ = core.tick();
     }
     assert_eq!(
-        core.world(Dimension::Overworld).get_block(target.0, target.1, target.2),
+        core.world(Dimension::Overworld)
+            .get_block(target.0, target.1, target.2),
         BlockType::Air
     );
     assert_eq!(core.session(7).unwrap().gameplay.experience, 4);
@@ -865,10 +908,12 @@ fn authoritative_dispenser_edge_executes_once_with_global_entity_id() {
     let mut lever_on = crate::world::BlockState::default();
     lever_on.is_open = true;
     let lever_on = lever_on.encode();
-    core.world_mut(Dimension::Overworld).unwrap()
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(lever.0, lever.1, lever.2, BlockType::Lever, lever_on)
         .unwrap();
-    core.world_mut(Dimension::Overworld).unwrap()
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(source.0, source.1, source.2, BlockType::Dispenser, 0)
         .unwrap();
     {
@@ -879,14 +924,13 @@ fn authoritative_dispenser_edge_executes_once_with_global_entity_id() {
     }
     {
         let world = core.world_mut(Dimension::Overworld).unwrap();
-        world.redstone.on_block_changed(
-            &world.chunks,
-            source,
-            crate::redstone::Direction::South,
-        );
+        world
+            .redstone
+            .on_block_changed(&world.chunks, source, crate::redstone::Direction::South);
     }
     if let Some(entity) = core
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .chunks
         .get_block_entity_mut(source.0, source.1, source.2)
     {
@@ -895,7 +939,8 @@ fn authoritative_dispenser_edge_executes_once_with_global_entity_id() {
 
     let first = core.tick();
     assert_eq!(
-        core.world_mut(Dimension::Overworld).unwrap()
+        core.world_mut(Dimension::Overworld)
+            .unwrap()
             .entities
             .entities
             .iter()
@@ -923,7 +968,8 @@ fn authoritative_dispenser_edge_executes_once_with_global_entity_id() {
         .iter()
         .all(|mutation| mutation.position != source));
     assert_eq!(
-        core.world_mut(Dimension::Overworld).unwrap()
+        core.world_mut(Dimension::Overworld)
+            .unwrap()
             .entities
             .entities
             .iter()
@@ -932,7 +978,8 @@ fn authoritative_dispenser_edge_executes_once_with_global_entity_id() {
         1
     );
 
-    core.world_mut(Dimension::Overworld).unwrap()
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(lever.0, lever.1, lever.2, BlockType::Lever, 0)
         .unwrap();
     {
@@ -942,7 +989,8 @@ fn authoritative_dispenser_edge_executes_once_with_global_entity_id() {
             .on_block_changed(&world.chunks, lever, crate::redstone::Direction::East);
     }
     let _ = core.tick();
-    core.world_mut(Dimension::Overworld).unwrap()
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(lever.0, lever.1, lever.2, BlockType::Lever, lever_on)
         .unwrap();
     {
@@ -953,7 +1001,8 @@ fn authoritative_dispenser_edge_executes_once_with_global_entity_id() {
     }
     let _ = core.tick();
     assert_eq!(
-        core.world_mut(Dimension::Overworld).unwrap()
+        core.world_mut(Dimension::Overworld)
+            .unwrap()
             .entities
             .entities
             .iter()
@@ -1159,14 +1208,13 @@ fn session_dimension_index_tracks_register_move_and_remove() {
         true,
     ))
     .unwrap();
-    assert_eq!(
-        core.session_ids_in_dimension(Dimension::Overworld),
-        &[7]
-    );
+    assert_eq!(core.session_ids_in_dimension(Dimension::Overworld), &[7]);
     assert_eq!(core.session_ids_in_dimension(Dimension::Nether), &[8]);
 
     assert!(core.set_session_dimension(7, Dimension::Nether));
-    assert!(core.session_ids_in_dimension(Dimension::Overworld).is_empty());
+    assert!(core
+        .session_ids_in_dimension(Dimension::Overworld)
+        .is_empty());
     assert_eq!(core.session_ids_in_dimension(Dimension::Nether), &[7, 8]);
 
     assert!(core.set_session_dimension(7, Dimension::Nether));
@@ -1191,10 +1239,14 @@ fn session_updates_publish_join_and_dimension_change_but_not_idle_ticks() {
     .unwrap();
 
     let joined = core.tick();
-    assert!(joined.session_updates.iter().any(|update| {
-        update.player_id == 7 && update.dimension == Dimension::Overworld as u8
-    }));
-    assert_eq!(joined.session_updates.len(), core.last_snapshot.session_updates.len());
+    assert!(joined
+        .session_updates
+        .iter()
+        .any(|update| { update.player_id == 7 && update.dimension == Dimension::Overworld as u8 }));
+    assert_eq!(
+        joined.session_updates.len(),
+        core.last_snapshot.session_updates.len()
+    );
 
     let idle = core.tick();
     assert!(idle.session_updates.is_empty());
@@ -1202,9 +1254,10 @@ fn session_updates_publish_join_and_dimension_change_but_not_idle_ticks() {
 
     assert!(core.set_session_dimension(7, Dimension::Nether));
     let transferred = core.tick();
-    assert!(transferred.session_updates.iter().any(|update| {
-        update.player_id == 7 && update.dimension == Dimension::Nether as u8
-    }));
+    assert!(transferred
+        .session_updates
+        .iter()
+        .any(|update| { update.player_id == 7 && update.dimension == Dimension::Nether as u8 }));
     let idle_after_transfer = core.tick();
     assert!(idle_after_transfer.session_updates.is_empty());
 }
@@ -1216,7 +1269,8 @@ fn mining_brew_and_fishing_revision_bumps_publish_dirty_session_updates() {
     assert!(core.tick().session_updates.is_empty());
 
     let target = (8, 81, 9);
-    core.world_mut(Dimension::Overworld).unwrap()
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(target.0, target.1, target.2, BlockType::Stone, 0)
         .unwrap();
     let held_stack = crate::inventory::ItemStack::new(Item::StonePickaxe, 1);
@@ -1259,7 +1313,8 @@ fn mining_brew_and_fishing_revision_bumps_publish_dirty_session_updates() {
     assert!(mining_update.state.mining.is_some());
     assert!(mining_update.state.revision > 0);
 
-    core.world_mut(Dimension::Overworld).unwrap()
+    core.world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(8, 80, 8, BlockType::BrewingStand, 0)
         .unwrap();
     let mut brew_gameplay = core.session(7).unwrap().gameplay;
@@ -1399,7 +1454,10 @@ fn sessions_in_multiple_dimensions_tick_and_dispatch_independently() {
     });
     let snapshot = core.tick();
     assert_eq!(snapshot.tick, 1);
-    assert_eq!(core.world_mut(Dimension::Overworld).unwrap().dimension, Dimension::Overworld);
+    assert_eq!(
+        core.world_mut(Dimension::Overworld).unwrap().dimension,
+        Dimension::Overworld
+    );
     assert!(snapshot
         .session_updates
         .iter()
@@ -1410,10 +1468,16 @@ fn sessions_in_multiple_dimensions_tick_and_dispatch_independently() {
         .any(|update| update.player_id == 8 && update.dimension == Dimension::Nether as u8));
 
     assert_eq!(core.world(Dimension::Overworld).time, 1);
-    assert_eq!(core.world(Dimension::Overworld).get_block(8, 80, 8), BlockType::Glass);
+    assert_eq!(
+        core.world(Dimension::Overworld).get_block(8, 80, 8),
+        BlockType::Glass
+    );
     let overworld_revision = core.revision_for_dimension(Dimension::Overworld);
     assert_eq!(core.world(Dimension::Nether).time, 1);
-    assert_eq!(core.world(Dimension::Nether).get_block(8, 80, 8), BlockType::Obsidian);
+    assert_eq!(
+        core.world(Dimension::Nether).get_block(8, 80, 8),
+        BlockType::Obsidian
+    );
     let nether_revision = core.revision_for_dimension(Dimension::Nether);
     assert_eq!(overworld_revision, nether_revision);
 
@@ -1443,7 +1507,10 @@ fn sessions_in_multiple_dimensions_tick_and_dispatch_independently() {
             reason: RejectReason::InvalidState
         }
     ));
-    assert_eq!(core.world(Dimension::Overworld).get_block(8, 80, 8), BlockType::Glass);
+    assert_eq!(
+        core.world(Dimension::Overworld).get_block(8, 80, 8),
+        BlockType::Glass
+    );
 
     // Rejected Overworld BlockAction must not mutate; routing selects the
     // session world by explicit dimension, not an ambient active pointer.
@@ -1471,8 +1538,14 @@ fn sessions_in_multiple_dimensions_tick_and_dispatch_independently() {
             reason: RejectReason::InvalidState
         }
     ));
-    assert_eq!(core.world(Dimension::Overworld).get_block(8, 80, 8), BlockType::Glass);
-    assert_ne!(core.world(Dimension::Overworld).get_block(9, 80, 8), BlockType::Glass);
+    assert_eq!(
+        core.world(Dimension::Overworld).get_block(8, 80, 8),
+        BlockType::Glass
+    );
+    assert_ne!(
+        core.world(Dimension::Overworld).get_block(9, 80, 8),
+        BlockType::Glass
+    );
 }
 
 #[test]
@@ -1513,11 +1586,13 @@ fn combat_mutates_headless_entity_without_state_fallback() {
     attacker.attack_cooldown_ticks = ATTACK_COOLDOWN_TICKS;
     assert!(core.set_session_gameplay(7, attacker));
     let target = core
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .entities
         .spawn(EntityType::Zombie, glam::Vec3::new(8.0, 80.0, 9.0));
     let before = core
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .entities
         .get_by_id(target)
         .unwrap()
@@ -1535,7 +1610,8 @@ fn combat_mutates_headless_entity_without_state_fallback() {
         "unexpected combat response: {response:?}"
     );
     assert!(
-        core.world_mut(Dimension::Overworld).unwrap()
+        core.world_mut(Dimension::Overworld)
+            .unwrap()
             .entities
             .get_by_id(target)
             .unwrap()
@@ -1640,7 +1716,8 @@ fn trade_conserves_items_and_mount_projects_session_state() {
         Some(vehicle)
     );
     assert!(core
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .entities
         .get_by_id(vehicle)
         .unwrap()
@@ -1653,14 +1730,28 @@ fn apply_pending_worldgen_respects_budget_and_stable_order() {
     let mut core = core();
     core.set_worldgen_mode_all(crate::server_world::WorldgenMode::Async);
     let ring1 = [
-        (-1, -1), (-1, 0), (-1, 1),
-        (0, -1),           (0, 1),
-        (1, -1),  (1, 0),  (1, 1),
+        (-1, -1),
+        (-1, 0),
+        (-1, 1),
+        (0, -1),
+        (0, 1),
+        (1, -1),
+        (1, 0),
+        (1, 1),
     ];
     let ring2 = [
-        (2, -2), (2, -1), (2, 0), (2, 1), (2, 2),
-        (-2, -2), (-2, -1), (-2, 0), (-2, 1), (-2, 2),
-        (0, 2), (1, 2),
+        (2, -2),
+        (2, -1),
+        (2, 0),
+        (2, 1),
+        (2, 2),
+        (-2, -2),
+        (-2, -1),
+        (-2, 0),
+        (-2, 1),
+        (-2, 2),
+        (0, 2),
+        (1, 2),
     ];
 
     let mut columns = Vec::new();
@@ -1710,22 +1801,36 @@ fn apply_pending_worldgen_respects_budget_and_stable_order() {
     let world = core.world_ref(Dimension::Overworld).unwrap();
     // All 8 ring 1 chunks (distances 1 and 2) must have been applied first
     for &(cx, cz) in &ring1 {
-        assert!(world.chunk_is_resident(cx, cz), "ring 1 chunk ({cx}, {cz}) must be applied first");
+        assert!(
+            world.chunk_is_resident(cx, cz),
+            "ring 1 chunk ({cx}, {cz}) must be applied first"
+        );
     }
     // The 8 non-corner chunks from ring 2 (distances 4 and 5) must also be applied in tick 1
     let non_corners = [
-        (2, -1), (2, 0), (2, 1),
-        (-2, -1), (-2, 0), (-2, 1),
-        (0, 2), (1, 2),
+        (2, -1),
+        (2, 0),
+        (2, 1),
+        (-2, -1),
+        (-2, 0),
+        (-2, 1),
+        (0, 2),
+        (1, 2),
     ];
     for &(cx, cz) in &non_corners {
-        assert!(world.chunk_is_resident(cx, cz), "non-corner ring 2 chunk ({cx}, {cz}) must be applied in tick 1");
+        assert!(
+            world.chunk_is_resident(cx, cz),
+            "non-corner ring 2 chunk ({cx}, {cz}) must be applied in tick 1"
+        );
     }
 
     // The 4 corners with greatest Euclidean distance (dx^2 + dz^2 = 8) must remain deferred
     let corners = [(-2, -2), (-2, 2), (2, -2), (2, 2)];
     for &(cx, cz) in &corners {
-        assert!(!world.chunk_is_resident(cx, cz), "corner ring 2 chunk ({cx}, {cz}) must remain deferred");
+        assert!(
+            !world.chunk_is_resident(cx, cz),
+            "corner ring 2 chunk ({cx}, {cz}) must remain deferred"
+        );
     }
 
     // Tick 2: limit 16
@@ -1733,7 +1838,10 @@ fn apply_pending_worldgen_respects_budget_and_stable_order() {
     assert_eq!(core.pending_worldgen_count(), 1);
     let world = core.world_ref(Dimension::Overworld).unwrap();
     for &(cx, cz) in &corners {
-        assert!(world.chunk_is_resident(cx, cz), "corner ring 2 chunk ({cx}, {cz}) must be applied in tick 2");
+        assert!(
+            world.chunk_is_resident(cx, cz),
+            "corner ring 2 chunk ({cx}, {cz}) must be applied in tick 2"
+        );
     }
     assert_eq!(core.pending_worldgen[0].dimension, Dimension::End);
 }
@@ -1763,6 +1871,8 @@ fn apply_pending_worldgen_rejection_releases_capacity() {
     core.apply_pending_worldgen(16);
     assert_eq!(core.pending_worldgen_count(), 0);
     assert!(!core.is_worldgen_pending(Dimension::Overworld, 5, 5));
-    assert!(!core.world_ref(Dimension::Overworld).unwrap().chunk_is_resident(5, 5));
+    assert!(!core
+        .world_ref(Dimension::Overworld)
+        .unwrap()
+        .chunk_is_resident(5, 5));
 }
-

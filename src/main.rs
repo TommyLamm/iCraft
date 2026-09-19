@@ -27,16 +27,16 @@ mod culling_visibility;
 
 /// Lib LOS/connectivity plus desktop section-visibility traversal.
 pub mod culling {
+    pub use crate::culling_visibility::*;
     pub use icraft::culling::*;
     pub use icraft::culling::{connectivity, los};
-    pub use crate::culling_visibility::*;
 }
 
 mod app;
 mod audio;
 mod camera;
-mod gpu_frame_resources;
 mod glyph_atlas;
+mod gpu_frame_resources;
 mod hand_renderer;
 mod menu;
 #[cfg(feature = "microbench")]

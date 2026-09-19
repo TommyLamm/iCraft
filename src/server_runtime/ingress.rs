@@ -9,12 +9,12 @@ use super::*;
 use crate::authority::DimensionTransferIntent;
 use crate::dimension::Dimension;
 use crate::game_rules::persisted_player_game_mode;
-use crate::network::protocol::{GameplayRequest, GameplayResponse, Packet, PROTOCOL_VERSION};
+use crate::network::protocol::{GameplayRequest, GameplayResponse, Packet};
 use crate::network::server::{HostToServer, ProjectionEvent, ServerToHost};
 use crate::save::normalize_player_identity;
+use crate::world::chunk_xz;
 use std::io;
 use std::time::Instant;
-use crate::world::chunk_xz;
 
 impl ServerRuntime {
     pub(super) fn handle_event(&mut self, event: ServerToHost) -> io::Result<()> {
@@ -76,8 +76,10 @@ impl ServerRuntime {
                 if !is_dead {
                     return Ok(());
                 }
-                let previous_dimension =
-                    self.players.get(&id).map(|session| session.interest.dimension);
+                let previous_dimension = self
+                    .players
+                    .get(&id)
+                    .map(|session| session.interest.dimension);
                 if let Some(dimension) = previous_dimension {
                     self.authority
                         .with_world(dimension, |world| world.close_container_viewers_forced(id));
@@ -140,11 +142,11 @@ impl ServerRuntime {
     ) -> io::Result<()> {
         let username = normalize_player_identity(&username)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        if self.authority.sessions().any(|session| {
-            session
-                .username
-                .eq_ignore_ascii_case(username.as_str())
-        }) {
+        if self
+            .authority
+            .sessions()
+            .any(|session| session.username.eq_ignore_ascii_case(username.as_str()))
+        {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 format!("duplicate player identity: {username}"),
@@ -281,9 +283,7 @@ impl ServerRuntime {
         if self.local_session_id == Some(id) {
             self.push_presentation_event(ProjectionEvent::session(
                 id,
-                Packet::WorldRulesSync {
-                    rules,
-                },
+                Packet::WorldRulesSync { rules },
             ));
             self.push_presentation_event(ProjectionEvent::session(
                 id,
@@ -296,9 +296,7 @@ impl ServerRuntime {
         } else {
             self.enqueue_host(HostToServer::project_session(
                 id,
-                Packet::WorldRulesSync {
-                    rules,
-                },
+                Packet::WorldRulesSync { rules },
             ));
             self.enqueue_host(HostToServer::project_session(
                 id,

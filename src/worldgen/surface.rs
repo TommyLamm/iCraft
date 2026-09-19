@@ -90,11 +90,7 @@ impl BiomeSurfaceData {
 /// Computes the block type for a column position given precomputed surface height and biome surface data.
 ///
 /// Returns None for air (or water above the sea floor).
-pub fn block_for_column(
-    wy: i32,
-    surface_y: i32,
-    surface: &BiomeSurfaceData,
-) -> Option<BlockType> {
+pub fn block_for_column(wy: i32, surface_y: i32, surface: &BiomeSurfaceData) -> Option<BlockType> {
     use BlockType::*;
 
     // Bedrock floor at the dimension minimum. Nothing below is diggable stone.
@@ -209,12 +205,24 @@ mod tests {
     fn block_for_column_handles_snow_filler_and_stone() {
         let surface_snow = BiomeSurfaceData::for_biome(Biome::SnowyPlains);
         // Snow block on high snowy surface.
-        assert_eq!(block_for_column(90, 90, &surface_snow), Some(BlockType::Snow));
+        assert_eq!(
+            block_for_column(90, 90, &surface_snow),
+            Some(BlockType::Snow)
+        );
         // Normal grass on snowy surface at or below y=80.
-        assert_eq!(block_for_column(80, 80, &surface_snow), Some(BlockType::Grass));
+        assert_eq!(
+            block_for_column(80, 80, &surface_snow),
+            Some(BlockType::Grass)
+        );
         // Filler within 3 blocks below surface.
-        assert_eq!(block_for_column(78, 80, &surface_snow), Some(BlockType::Dirt));
+        assert_eq!(
+            block_for_column(78, 80, &surface_snow),
+            Some(BlockType::Dirt)
+        );
         // Stone more than 3 blocks below surface.
-        assert_eq!(block_for_column(70, 80, &surface_snow), Some(BlockType::Stone));
+        assert_eq!(
+            block_for_column(70, 80, &surface_snow),
+            Some(BlockType::Stone)
+        );
     }
 }

@@ -1,4 +1,3 @@
-use super::*;
 use crate::redstone::Direction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,4 +137,3 @@ impl BlockState {
         }
     }
 }
-

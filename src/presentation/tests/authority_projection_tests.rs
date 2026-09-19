@@ -126,7 +126,11 @@ fn invalid_column_payload_fails_closed_without_modifying_resident_column_or_revi
     // Existing resident column and tracked revision are preserved.
     assert_eq!(*revisions.get(&revision_key).unwrap(), 10);
     assert_eq!(
-        manager.chunks.get(&(cx, cz)).unwrap().get_block_local(5, 64, 5),
+        manager
+            .chunks
+            .get(&(cx, cz))
+            .unwrap()
+            .get_block_local(5, 64, 5),
         BlockType::GoldOre
     );
 
@@ -181,7 +185,11 @@ fn loaded_neighbors_receive_ao_invalidation_when_adjacent_column_committed() {
                 let section = mesh.section_mut(sy).unwrap();
                 section.invalidate();
                 scheduler.enqueue(
-                    SectionIdentity::new(SectionKey::new(neighbor.0, sy, neighbor.1), section.revision, lifetime),
+                    SectionIdentity::new(
+                        SectionKey::new(neighbor.0, sy, neighbor.1),
+                        section.revision,
+                        lifetime,
+                    ),
                     DependencyReason::Ao,
                     (0, 0),
                 );
@@ -208,16 +216,25 @@ fn pending_block_deltas_replay_in_revision_order_and_stale_columns_rejected() {
     let dimension = Dimension::Overworld;
     let (cx, cz) = (2, 3);
     let mut revisions = std::collections::HashMap::new();
-    let mut pending_changes: std::collections::HashMap<(i32, i32), std::collections::HashMap<(i32, i32, i32), (u64, BlockType, u8, u8)>> =
-        std::collections::HashMap::new();
+    let mut pending_changes: std::collections::HashMap<
+        (i32, i32),
+        std::collections::HashMap<(i32, i32, i32), (u64, BlockType, u8, u8)>,
+    > = std::collections::HashMap::new();
 
     // 1. Block deltas arrive BEFORE column is resident.
     // Deltas buffer into pending_block_changes WITHOUT advancing client_chunk_revisions.
     let entry = pending_changes.entry((cx, cz)).or_default();
-    entry.insert((2 * 16 + 1, 64, 3 * 16 + 1), (15, BlockType::DiamondOre, 0, 0));
+    entry.insert(
+        (2 * 16 + 1, 64, 3 * 16 + 1),
+        (15, BlockType::DiamondOre, 0, 0),
+    );
     entry.insert((2 * 16 + 2, 64, 3 * 16 + 2), (12, BlockType::GoldOre, 0, 0));
 
-    assert_eq!(revisions.get(&(dimension, cx, cz)), None, "revision must not advance before column is resident");
+    assert_eq!(
+        revisions.get(&(dimension, cx, cz)),
+        None,
+        "revision must not advance before column is resident"
+    );
 
     // 2. Base column arrives with revision 10.
     // Base revision 10 is newer than uninserted (0). Column commits and sets revision to 10.
@@ -245,15 +262,24 @@ fn pending_block_deltas_replay_in_revision_order_and_stale_columns_rejected() {
     }
 
     assert_eq!(*revisions.get(&(dimension, cx, cz)).unwrap(), 15);
-    assert_eq!(manager.get_block(2 * 16 + 1, 64, 3 * 16 + 1), BlockType::DiamondOre);
-    assert_eq!(manager.get_block(2 * 16 + 2, 64, 3 * 16 + 2), BlockType::GoldOre);
+    assert_eq!(
+        manager.get_block(2 * 16 + 1, 64, 3 * 16 + 1),
+        BlockType::DiamondOre
+    );
+    assert_eq!(
+        manager.get_block(2 * 16 + 2, 64, 3 * 16 + 2),
+        BlockType::GoldOre
+    );
 
     // 4. Stale column arriving with revision <= 15 is rejected.
     let stale_revision = 14;
     let accepted = stale_revision >= *revisions.get(&(dimension, cx, cz)).unwrap();
     assert!(!accepted, "stale column must be rejected");
     // World state remains unchanged
-    assert_eq!(manager.get_block(2 * 16 + 1, 64, 3 * 16 + 1), BlockType::DiamondOre);
+    assert_eq!(
+        manager.get_block(2 * 16 + 1, 64, 3 * 16 + 1),
+        BlockType::DiamondOre
+    );
 }
 
 #[test]
@@ -306,4 +332,3 @@ fn terrain_mesh_identity_rejects_stale_lifetime_and_dimension_switch() {
         Some(initial_identity),
     ));
 }
-

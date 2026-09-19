@@ -189,7 +189,10 @@ mod tests {
         let mut left = 7u32;
         let mut right = 7u32;
         for _ in 0..8 {
-            assert_eq!(seeded_visual_unit(&mut left), seeded_visual_unit(&mut right));
+            assert_eq!(
+                seeded_visual_unit(&mut left),
+                seeded_visual_unit(&mut right)
+            );
         }
     }
 }

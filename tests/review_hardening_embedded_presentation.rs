@@ -19,9 +19,8 @@ fn embedded_gate_sends_container_op_and_rejects_world_mutations() {
         topology.inventory_decision(PresentationInventoryTarget::Workstation),
         PresentationInventoryAction::Reject,
     );
-    assert!(!topology.should_writeback_after_inventory_click(Some(
-        PresentationInventoryTarget::ContainerSlot
-    )));
+    assert!(!topology
+        .should_writeback_after_inventory_click(Some(PresentationInventoryTarget::ContainerSlot)));
 }
 
 #[test]

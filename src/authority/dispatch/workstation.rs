@@ -92,7 +92,8 @@ impl AuthorityCore {
                 bottles,
             } => {
                 let position = [*x, *y, *z];
-                let context = WorkstationContext::at(position, self.world(dimension).get_block(*x, *y, *z));
+                let context =
+                    WorkstationContext::at(position, self.world(dimension).get_block(*x, *y, *z));
                 match *action {
                     0 => {
                         let ingredient = ingredient.ok_or(RejectReason::InvalidState)?;
@@ -123,7 +124,8 @@ impl AuthorityCore {
                     return Err(RejectReason::InvalidState);
                 }
                 let position = [*x, *y, *z];
-                let context = WorkstationContext::at(position, self.world(dimension).get_block(*x, *y, *z));
+                let context =
+                    WorkstationContext::at(position, self.world(dimension).get_block(*x, *y, *z));
                 transactions::execute_anvil(&mut candidate, context, *left, *right, rename)?;
             }
             GameplayOperation::UseState { hand, active } => {

@@ -7,8 +7,8 @@
 
 use crate::chunk_schedule::UNLOAD_HYSTERESIS;
 use crate::dimension::Dimension;
-use std::collections::{BTreeSet, HashSet};
 use crate::world::chunk_xz;
+use std::collections::{BTreeSet, HashSet};
 
 /// Same extra Chebyshev ring the client uses before unloading a column.
 pub const RESIDENCY_HYSTERESIS: i32 = UNLOAD_HYSTERESIS;
@@ -194,15 +194,8 @@ impl InterestSet {
         I: IntoIterator<Item = u64>,
     {
         let incoming: HashSet<u64> = entity_ids.into_iter().collect();
-        let mut entered: Vec<_> = incoming
-            .difference(&self.entities)
-            .copied()
-            .collect();
-        let mut departed: Vec<_> = self
-            .entities
-            .difference(&incoming)
-            .copied()
-            .collect();
+        let mut entered: Vec<_> = incoming.difference(&self.entities).copied().collect();
+        let mut departed: Vec<_> = self.entities.difference(&incoming).copied().collect();
         for id in &departed {
             self.entities.remove(id);
         }
@@ -243,9 +236,9 @@ impl InterestSet {
             InterestKind::EntityState(id) => self.simulation_entities.contains(&id),
             InterestKind::Block(position)
             | InterestKind::BlockEntity(position)
-            | InterestKind::Container(position) => self
-                .chunks
-                .contains(&chunk_xz(position.0, position.2)),
+            | InterestKind::Container(position) => {
+                self.chunks.contains(&chunk_xz(position.0, position.2))
+            }
         }
     }
 

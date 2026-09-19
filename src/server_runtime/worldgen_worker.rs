@@ -85,10 +85,12 @@ impl WorldgenWorker {
         out
     }
 
+    #[cfg(test)]
     pub fn is_in_flight(&self, dimension: Dimension, chunk_x: i32, chunk_z: i32) -> bool {
         self.in_flight.contains(&(dimension, chunk_x, chunk_z))
     }
 
+    #[cfg(test)]
     pub fn in_flight_count(&self) -> usize {
         self.in_flight.len()
     }
@@ -116,7 +118,10 @@ mod tests {
         // Poll worker_b: worker_b should never receive worker_a's result.
         for _ in 0..10 {
             let completed_b = worker_b.poll_completed();
-            assert!(completed_b.is_empty(), "worker_b should not receive worker_a's result");
+            assert!(
+                completed_b.is_empty(),
+                "worker_b should not receive worker_a's result"
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 

@@ -149,4 +149,3 @@ impl ServerRuntime {
         self.set_session_view_distance(local_id, view_distance)
     }
 }
-

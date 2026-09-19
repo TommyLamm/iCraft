@@ -41,21 +41,25 @@ impl AuthorityCore {
                 .iter()
                 .copied()
                 .filter_map(|id| {
-                    self.sessions.get(&id).map(|session| {
-                        (session.id, session.position, session.yaw, session.pitch)
-                    })
+                    self.sessions
+                        .get(&id)
+                        .map(|session| (session.id, session.position, session.yaw, session.pitch))
                 })
                 .collect();
-            let simulation_chunks = simulation_unions.get(&dimension).cloned().unwrap_or_else(|| {
-                let distance = self.config.simulation_distance.clamp(0, 32) as u8;
-                let mut union = BTreeSet::new();
-                for (_, position, _, _) in &players {
-                    if position.iter().all(|value| value.is_finite()) {
-                        union.extend(chunks_around(*position, distance));
-                    }
-                }
-                union
-            });
+            let simulation_chunks =
+                simulation_unions
+                    .get(&dimension)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        let distance = self.config.simulation_distance.clamp(0, 32) as u8;
+                        let mut union = BTreeSet::new();
+                        for (_, position, _, _) in &players {
+                            if position.iter().all(|value| value.is_finite()) {
+                                union.extend(chunks_around(*position, distance));
+                            }
+                        }
+                        union
+                    });
             // One world_mut for tick + redstone drain; dispense needs a fresh
             // borrow so AuthorityCore can allocate global entity ids.
             let (mut world_mutations, actions) = {

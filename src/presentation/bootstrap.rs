@@ -23,10 +23,7 @@ pub(crate) struct GpuContext {
 }
 
 /// Single present-mode policy for menu and game swapchains.
-pub(crate) fn choose_present_mode(
-    vsync: bool,
-    modes: &[wgpu::PresentMode],
-) -> wgpu::PresentMode {
+pub(crate) fn choose_present_mode(vsync: bool, modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
     if vsync {
         wgpu::PresentMode::Fifo
     } else if modes.contains(&wgpu::PresentMode::Mailbox) {

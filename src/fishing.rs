@@ -94,4 +94,3 @@ fn integer_sqrt(value: u64) -> u32 {
     }
     root.min(u64::from(u32::MAX)) as u32
 }
-

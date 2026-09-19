@@ -69,7 +69,6 @@ fn sample_player() -> PlayerData {
     }
 }
 
-
 #[test]
 fn test_serialization_roundtrips() {
     let level = sample_level();
@@ -1723,7 +1722,9 @@ fn restore_saved_chunk_does_not_insert_corrupt_inner_zlib() {
         crate::game_rules::WorldType::Superflat,
         false,
         crate::game_rules::WorldRules::default(),
-        2, crate::game_rules::Difficulty::default());
+        2,
+        crate::game_rules::Difficulty::default(),
+    );
     assert!(world.chunks.chunks.contains_key(&(0, 0)));
 
     let mut data = ChunkSaveData::from_chunk(&Chunk::empty(0, 0)).unwrap();
@@ -1769,7 +1770,9 @@ fn legal_region_with_empty_inner_zlib_is_not_replaced_by_generated_terrain() {
         crate::game_rules::WorldType::Default,
         false,
         crate::game_rules::WorldRules::default(),
-        2, crate::game_rules::Difficulty::default());
+        2,
+        crate::game_rules::Difficulty::default(),
+    );
     assert!(world.restore_saved_chunk(&loaded).is_err());
     assert!(!world.chunks.chunks.contains_key(&(0, 0)));
 
@@ -1830,7 +1833,9 @@ fn player_modified_chunk_with_corrupt_inner_zlib_is_not_written_as_generated() {
         crate::game_rules::WorldType::Default,
         true,
         crate::game_rules::WorldRules::default(),
-        2, crate::game_rules::Difficulty::default());
+        2,
+        crate::game_rules::Difficulty::default(),
+    );
     let loaded = SaveManager::new(&world_dir)
         .load_chunk(0, 0)
         .expect("region envelope remains readable");

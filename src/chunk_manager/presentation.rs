@@ -75,10 +75,7 @@ impl PresentationChunks {
         Self::new_in_dimension(view_distance, crate::dimension::Dimension::Overworld)
     }
 
-    pub fn new_in_dimension(
-        view_distance: i32,
-        dimension: crate::dimension::Dimension,
-    ) -> Self {
+    pub fn new_in_dimension(view_distance: i32, dimension: crate::dimension::Dimension) -> Self {
         let view_distance = view_distance.max(0);
         Self {
             chunks: DenseColumnGrid::with_distance(view_distance),
@@ -430,8 +427,7 @@ impl PresentationChunks {
         ) {
             if slots.len() == 54 {
                 let state = crate::world::BlockState::decode(self.get_block_state(x, y, z));
-                let Some(partner_pos) =
-                    crate::block_entity::double_chest_partner(self, (x, y, z))
+                let Some(partner_pos) = crate::block_entity::double_chest_partner(self, (x, y, z))
                 else {
                     return false;
                 };
@@ -441,10 +437,12 @@ impl PresentationChunks {
                     } else {
                         (&slots[27..54], &slots[..27])
                     };
-                let primary = self.get_block_entity(x, y, z).and_then(|entity| match entity {
-                    crate::block_entity::BlockEntity::Chest(chest) => Some(chest.clone()),
-                    _ => None,
-                });
+                let primary = self
+                    .get_block_entity(x, y, z)
+                    .and_then(|entity| match entity {
+                        crate::block_entity::BlockEntity::Chest(chest) => Some(chest.clone()),
+                        _ => None,
+                    });
                 let partner = self
                     .get_block_entity(partner_pos.0, partner_pos.1, partner_pos.2)
                     .and_then(|entity| match entity {
@@ -486,7 +484,12 @@ impl PresentationChunks {
                 arr.copy_from_slice(slots);
                 chest.inventory = crate::inventory::ContainerInventory { slots: arr };
                 chest.revision = chest.revision.wrapping_add(1);
-                self.set_block_entity(x, y, z, Some(crate::block_entity::BlockEntity::Chest(chest)));
+                self.set_block_entity(
+                    x,
+                    y,
+                    z,
+                    Some(crate::block_entity::BlockEntity::Chest(chest)),
+                );
                 return true;
             }
             return false;

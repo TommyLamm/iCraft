@@ -27,7 +27,6 @@ mod widgets;
 use controls::{ControlAction, CONTROL_BINDINGS};
 use widgets::*;
 
-
 fn controls_static_focus_count() -> usize {
     1 + CONTROLS_VISIBLE_ROWS + 1
 }
@@ -55,8 +54,8 @@ const SAVES_DIR: &str = "saves";
 const META_FILE: &str = "world.meta";
 const CURRENT_WORLD_FORMAT_VERSION: u32 = 3;
 
-pub use settings::{ControlBindings, GameSettings, Language};
 use settings::{cycle_fps_cap, fps_cap_label, key_name, parse_bool, parse_key};
+pub use settings::{ControlBindings, GameSettings, Language};
 
 pub struct WorldLaunch {
     pub world_dir: PathBuf,
@@ -1178,11 +1177,13 @@ impl Menu {
                 rects.extend(WORLDS_BOTTOM_RECTS.iter().map(|r| r.as_array()));
                 rects
             }
-            MenuScreen::CreateWorld => CREATE_WORLD_SCREEN_RECTS.iter().map(|r| r.as_array()).collect(),
-            MenuScreen::ConfirmDelete => CONFIRM_DELETE_RECTS
+            MenuScreen::CreateWorld => CREATE_WORLD_SCREEN_RECTS
                 .iter()
                 .map(|r| r.as_array())
                 .collect(),
+            MenuScreen::ConfirmDelete => {
+                CONFIRM_DELETE_RECTS.iter().map(|r| r.as_array()).collect()
+            }
         };
         rects
             .get(self.focus_index.min(rects.len().saturating_sub(1)))
@@ -2902,10 +2903,7 @@ impl Menu {
                 vertices,
                 &self.catalog.format_lookup(
                     "menu.control_value",
-                    &[
-                        ("action", action_label),
-                        ("value", &value),
-                    ],
+                    &[("action", action_label), ("value", &value)],
                 ),
                 rect.x0,
                 rect.x1,
@@ -3308,8 +3306,6 @@ fn draw_text_with_font(
     }
 }
 
-
-
 const PANORAMA_SHADER: &str = r#"
 struct Panorama { time: f32, width: f32, height: f32, padding: f32 };
 @group(0) @binding(0) var<uniform> panorama: Panorama;
@@ -3339,7 +3335,6 @@ fn hash(p: vec2<f32>) -> f32 { return fract(sin(dot(p, vec2<f32>(127.1, 311.7)))
     return vec4<f32>(color * vignette, 1.0);
 }
 "#;
-
 
 #[cfg(test)]
 #[path = "tests.rs"]

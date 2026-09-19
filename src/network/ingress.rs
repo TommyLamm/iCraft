@@ -6,9 +6,7 @@ use tokio::time::{self, Instant};
 
 use super::channels::{HostEventSendError, HostEventSender, ServerConfig, ServerToHost};
 use super::egress::{broadcast_reliably, evict_slow_clients, send_to};
-use super::protocol::{
-    GameplayRequest, Packet, PlayerId, RejectReason, PROTOCOL_VERSION,
-};
+use super::protocol::{GameplayRequest, Packet, PlayerId, RejectReason, PROTOCOL_VERSION};
 use super::session::{
     queue_now_ms, queue_stats, reliable_send, reliable_send_and_wait, send_connection_packet,
     send_encoded_packet, send_writer_packet, CatchupMailbox, ClientSession, EncodedPacket,
@@ -32,10 +30,7 @@ pub(crate) async fn queue_initial_roster(
     metrics: &NetworkMetrics,
 ) -> Result<(), ()> {
     for (id, username) in roster {
-        let packet = Packet::PlayerJoin {
-            id,
-            username,
-        };
+        let packet = Packet::PlayerJoin { id, username };
         let Ok(encoded) = EncodedPacket::new(packet) else {
             return Err(());
         };
@@ -125,14 +120,7 @@ pub(crate) async fn route_gameplay_request<S: HostEventSender>(
     }
 
     if let Some(response) = immediate_response {
-        let failed = send_to(
-            sessions,
-            id,
-            Packet::GameplayResponse {
-                response,
-            },
-        )
-        .await;
+        let failed = send_to(sessions, id, Packet::GameplayResponse { response }).await;
         if !failed.is_empty() {
             return Err("gameplay response queue is unavailable".into());
         }
@@ -248,7 +236,8 @@ pub(crate) async fn run_client<S: HostEventSender>(
                 .await;
                 return;
             }
-        },    Ok(Err(err)) => {
+        },
+        Ok(Err(err)) => {
             eprintln!("[NetworkServer] Handshake receive error: {err}");
             return;
         }
@@ -663,13 +652,7 @@ pub(crate) async fn remove_client<S: HostEventSender>(
         session.username, id
     );
     let _ = server_to_host.send(ServerToHost::ClientLeft { id });
-    let failed = broadcast_reliably(
-        sessions,
-        Packet::PlayerLeave {
-            id,
-        },
-    )
-    .await;
+    let failed = broadcast_reliably(sessions, Packet::PlayerLeave { id }).await;
     evict_slow_clients(sessions, server_to_host, failed).await;
 }
 

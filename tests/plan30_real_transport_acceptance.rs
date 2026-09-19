@@ -1,20 +1,20 @@
 mod common;
 
-use icraft::dimension::Dimension;
 use common::tcp_harness::{
     current_revision, drive_until, gameplay_request as request, seeded_properties, session_slot,
     source, wait_for_cached_response, HeldLoopback, TcpClient,
 };
 use icraft::authority::transactions::BREW_TICKS;
 use icraft::block_entity::{BlockEntity, FurnaceBlockEntity};
+use icraft::dimension::Dimension;
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::client::{ClientToGame, GameToClient};
-use icraft::network::protocol::{Packet, 
-    GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse, RejectReason,
+use icraft::network::protocol::{
+    GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse, Packet, RejectReason,
 };
 use icraft::network::server::ServerToHost;
 use icraft::server_runtime::{
-    EmbeddedRuntimeOptions, LocalSessionProfile, RuntimeInput, ProjectionDest, ProjectionEvent,
+    EmbeddedRuntimeOptions, LocalSessionProfile, ProjectionDest, ProjectionEvent, RuntimeInput,
     RuntimeTickOutput, ServerProperties, ServerRuntime, TransportMode,
 };
 use icraft::world::BlockType;
@@ -43,7 +43,8 @@ fn reset_persistent_domains(runtime: &mut ServerRuntime, id: u64) {
     if let Some(hook) = hook {
         runtime
             .authority
-            .world_mut(Dimension::Overworld).unwrap()
+            .world_mut(Dimension::Overworld)
+            .unwrap()
             .remove_authority_entity(hook);
     }
     let revision = current_revision(runtime, id);
@@ -62,7 +63,8 @@ fn prepare_fixture(runtime: &mut ServerRuntime, owner: u64, victim: u64) {
     let anvil_position = (8, 80, 12);
     runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(
             furnace_position.0,
             furnace_position.1,
@@ -73,7 +75,8 @@ fn prepare_fixture(runtime: &mut ServerRuntime, owner: u64, victim: u64) {
         .expect("fixture furnace block");
     runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .set_block(
             brew_position.0,
             brew_position.1,
@@ -88,7 +91,8 @@ fn prepare_fixture(runtime: &mut ServerRuntime, owner: u64, victim: u64) {
     ] {
         runtime
             .authority
-            .world_mut(Dimension::Overworld).unwrap()
+            .world_mut(Dimension::Overworld)
+            .unwrap()
             .set_block(position.0, position.1, position.2, block, 0)
             .expect("fixture workstation block");
     }
@@ -97,7 +101,8 @@ fn prepare_fixture(runtime: &mut ServerRuntime, owner: u64, victim: u64) {
     furnace.accumulated_xp = 4.0;
     runtime
         .authority
-        .world_mut(Dimension::Overworld).unwrap()
+        .world_mut(Dimension::Overworld)
+        .unwrap()
         .chunks
         .set_block_entity(
             furnace_position.0,
@@ -468,7 +473,10 @@ fn run_singleplayer_embedded_contract() {
         HOST_SESSION_ID,
         0x40_00a,
         1,
-        GameplayOperation::ItemUse { item: Item::Bread as u32, count: 1 },
+        GameplayOperation::ItemUse {
+            item: Item::Bread as u32,
+            count: 1,
+        },
     );
     assert_eq!(
         embedded_response(&out_of_order_output, HOST_SESSION_ID, 0x40_00a).outcome,
@@ -483,7 +491,10 @@ fn run_singleplayer_embedded_contract() {
             HOST_SESSION_ID,
             0x40_00b,
             10,
-            GameplayOperation::ItemUse { item: Item::Bread as u32, count: 1 },
+            GameplayOperation::ItemUse {
+                item: Item::Bread as u32,
+                count: 1,
+            },
         )
     };
     input
@@ -589,7 +600,8 @@ fn run_topology(label: &str, listen: bool) {
     );
     clients[0].send_request(cast.clone());
     let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
-    let cast_response = wait_for_cached_response(&mut runtime, &mut refs, owner_id, cast.request_id);
+    let cast_response =
+        wait_for_cached_response(&mut runtime, &mut refs, owner_id, cast.request_id);
     assert!(
         matches!(cast_response.outcome, GameplayOutcome::Accepted { .. }),
         "cast response: {:?}",
@@ -868,10 +880,12 @@ fn run_topology(label: &str, listen: bool) {
                 .authority
                 .session(victim_id)
                 .is_some_and(|session| !session.gameplay.is_dead)
-                && views[1]
-                    .events()
-                    .iter()
-                    .any(|event| matches!(event, ClientToGame::Packet(Packet::PlayerRespawnResult { .. })))
+                && views[1].events().iter().any(|event| {
+                    matches!(
+                        event,
+                        ClientToGame::Packet(Packet::PlayerRespawnResult { .. })
+                    )
+                })
         },
     );
     assert_eq!(
@@ -893,7 +907,10 @@ fn run_topology(label: &str, listen: bool) {
         owner_id,
         0x30_00a,
         1,
-        GameplayOperation::ItemUse { item: Item::Bread as u32, count: 1 },
+        GameplayOperation::ItemUse {
+            item: Item::Bread as u32,
+            count: 1,
+        },
     );
     let rejected_before_ooo = runtime.metrics.requests_rejected;
     clients[0].send_request(out_of_order);
@@ -937,7 +954,10 @@ fn run_topology(label: &str, listen: bool) {
         owner_id,
         0x30_00b,
         10,
-        GameplayOperation::ItemUse { item: Item::Bread as u32, count: 1 },
+        GameplayOperation::ItemUse {
+            item: Item::Bread as u32,
+            count: 1,
+        },
     );
     let ahead_revision = current_revision(&runtime, owner_id).saturating_add(1_000);
     let stale = GameplayRequest {

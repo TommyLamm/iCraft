@@ -71,7 +71,10 @@ mod tests {
         assert_eq!(a, [14, 17, 17, 31, 17, 17, 17]);
         assert_eq!(glyph('a'), a, "glyph should be case-insensitive");
         assert_ne!(glyph('0'), [0; 7]);
-        assert_eq!(glyph('\u{ffff}'), [0; 7], "unknown characters fall back to blank");
+        assert_eq!(
+            glyph('\u{ffff}'),
+            [0; 7],
+            "unknown characters fall back to blank"
+        );
     }
 }
-
